@@ -1,0 +1,24 @@
+*.o
+*.a
+build/
+.cache/
+
+# Reference binaries
+tools/crag-mcp/crag-mcp
+tools/cmcp-inspect/cmcp-inspect
+
+# Example binaries
+examples/echo-server
+examples/minimal-client
+
+# Compiled test binaries (source is tests/test_*.c, binaries are tests/test_<name>)
+tests/test_*
+!tests/test_*.c
+!tests/test.h
+
+# Editor / tool state
+.claude/
+
+# Personal working notes
+todo.md
+notes.md
