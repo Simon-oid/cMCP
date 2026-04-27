@@ -63,15 +63,32 @@ remote auth are Tier 2.
   capacity (200 entries, forced resize), and every malformed-shape
   branch.
 
-### 1.3 stdio transport (`src/transport_stdio.c`)
+### 1.3 stdio transport (`src/transport_stdio.c`) — DONE
 
-- Newline-delimited JSON. Read = blocking `getline` on a dedicated
-  reader thread; write = mutex-guarded `fwrite` + `fflush`.
-- Never write partial frames; never write to stdout from anywhere
-  outside this module — `fprintf(stderr, ...)` only.
-- `cmcp_transport_t` vtable so `transport_http` can slot in later.
-- Tests: `test_stdio_roundtrip` — `fork()` a child running an echo
-  server, run a real handshake from the parent, assert messages match.
+- Shipped: `cmcp_transport_t` vtable in `include/cmcp_transport.h`
+  (`read_fn` / `write_fn` / `close_fn` + `impl`), with thin static-inline
+  wrappers (`cmcp_transport_read/write/close`) so call sites read
+  naturally. The HTTP transport (Phase 2.1) plugs into the same shape.
+- Two stdio constructors: `cmcp_transport_stdio_new()` over the
+  process's own stdin/stdout (does NOT close them), and
+  `_new_fds(read_fd, write_fd)` taking ownership of the FDs (used for
+  spawning a child or testing).
+- Newline-delimited framing. Read = blocking `getline()`; the impl owns
+  a growable line buffer reused across reads, returns a fresh malloc'd
+  copy per frame so caller ownership is unambiguous. Skips blank lines
+  defensively.
+- Write is mutex-guarded `fwrite + fputc('\n') + fflush` and refuses
+  buffers containing raw newlines — a bad upper layer can't desync the
+  wire forever.
+- EOF and read errors collapse to `CMCP_EIO`; callers treat both as
+  "conversation over."
+- Tests: `test_stdio_roundtrip` — single frame, 50 frames in order,
+  blank-line tolerance, embedded-newline rejection, EOF after writer
+  closes, 4 concurrent writer threads × 25 frames each (single reader
+  asserts whole frames), and a real `fork()` echo child where the
+  parent sends a real `initialize` request via `cmcp_rpc_emit`, reads
+  the echoed frame, parses and asserts every field round-tripped.
+  807 assertions, 7 tests.
 
 ### 1.4 Lifecycle (`src/server.c`, `src/client.c` minimal)
 
@@ -248,5 +265,12 @@ a concrete reason.
   hash, mutex, resize), `cmcp_rpc_dispatch` with route table.
   739/739 assertions across 38 tests. ~660 lines impl + 180 line
   header, ~620 lines of tests.
+- Phase 1.3: stdio transport (`src/transport_stdio.c`,
+  `include/cmcp_transport.h`). Vtable type for transports + stdio
+  impl: newline framing, mutex-guarded writes, growable read buffer,
+  EOF→EIO. Two ctors: process stdin/stdout vs. own-the-FDs.
+  `test_stdio_roundtrip` covers concurrent writers and a real
+  fork()ed echo child running a JSON-RPC handshake.
+  807/807 assertions across 7 tests.
 - Wildcard-based Makefile so `CORE_SRC`/`SERVER_SRC`/`CLIENT_SRC`
   auto-grow as phases land — `make` only compiles files that exist.
