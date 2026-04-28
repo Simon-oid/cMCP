@@ -19,6 +19,11 @@ tests/test_*
 # Editor / tool state
 .claude/
 
-# Personal working notes
+# Personal working notes — kept locally, never pushed.
+# CLAUDE.md is the AI-coding playbook for this repo; TODO.md is the
+# evolving roadmap. Both are useful while developing but not part of
+# the public deliverable, so they live in the working tree only.
+CLAUDE.md
+TODO.md
 todo.md
 notes.md
