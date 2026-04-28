@@ -19,12 +19,29 @@ typedef enum {
     SS_CLOSED,            /* terminal */
 } server_state_t;
 
+/* ====================================================================== */
+/* Internal tool entry                                                     */
+/* ====================================================================== */
+
+typedef struct {
+    char                 *name;
+    char                 *description;
+    cmcp_json_t          *input_schema;     /* may be NULL */
+    cmcp_tool_handler_fn  handler;
+    void                 *userdata;
+} server_tool_t;
+
 struct cmcp_server {
     char                       *name;
     char                       *version;
     cmcp_server_capabilities_t  caps;
 
     server_state_t              state;
+
+    /* Tool registry. Linear array — N is tiny in practice (< 50). */
+    server_tool_t              *tools;
+    size_t                      n_tools;
+    size_t                      cap_tools;
 
     /* Negotiated peer info, set on initialize. */
     char                        *peer_name;
@@ -59,12 +76,20 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
     return s;
 }
 
+static void tool_clear(server_tool_t *t) {
+    free(t->name);
+    free(t->description);
+    cmcp_json_free(t->input_schema);
+}
+
 void cmcp_server_free(cmcp_server_t *s) {
     if (!s) return;
     free(s->name);
     free(s->version);
     free(s->peer_name);
     free(s->peer_version);
+    for (size_t i = 0; i < s->n_tools; i++) tool_clear(&s->tools[i]);
+    free(s->tools);
     free(s);
 }
 
@@ -85,38 +110,100 @@ const char *cmcp_server_client_version(const cmcp_server_t *s) {
 }
 
 /* ====================================================================== */
+/* Tool registry                                                           */
+/* ====================================================================== */
+
+static server_tool_t *tool_find(cmcp_server_t *s, const char *name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < s->n_tools; i++) {
+        if (strcmp(s->tools[i].name, name) == 0) return &s->tools[i];
+    }
+    return NULL;
+}
+
+int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
+    if (!s || !tool || !tool->name || !tool->handler) return CMCP_EINVAL;
+    if (tool_find(s, tool->name)) return CMCP_EPROTOCOL;
+
+    cmcp_json_t *schema = NULL;
+    if (tool->input_schema) {
+        schema = cmcp_json_parse(tool->input_schema, strlen(tool->input_schema));
+        if (!schema) return CMCP_EPARSE;
+        if (schema->type != CMCP_JSON_OBJECT) {
+            cmcp_json_free(schema);
+            return CMCP_EPARSE;
+        }
+    }
+
+    /* Grow the array if needed. */
+    if (s->n_tools == s->cap_tools) {
+        size_t newcap = s->cap_tools ? s->cap_tools * 2 : 4;
+        server_tool_t *nt = (server_tool_t *)realloc(
+            s->tools, newcap * sizeof *nt);
+        if (!nt) { cmcp_json_free(schema); return CMCP_ENOMEM; }
+        s->tools = nt;
+        s->cap_tools = newcap;
+    }
+
+    server_tool_t *t = &s->tools[s->n_tools];
+    memset(t, 0, sizeof *t);
+    t->name        = xstrdup(tool->name);
+    t->description = tool->description ? xstrdup(tool->description) : NULL;
+    t->input_schema = schema;
+    t->handler     = tool->handler;
+    t->userdata    = tool->userdata;
+    if (!t->name || (tool->description && !t->description)) {
+        tool_clear(t);
+        return CMCP_ENOMEM;
+    }
+    s->n_tools++;
+    return CMCP_OK;
+}
+
+cmcp_json_t *cmcp_tool_text_content(const char *text) {
+    if (!text) return NULL;
+    cmcp_json_t *arr = cmcp_json_new_array();
+    if (!arr) return NULL;
+    cmcp_json_t *item = cmcp_json_new_object();
+    if (!item) { cmcp_json_free(arr); return NULL; }
+    cmcp_json_object_set(item, "type", cmcp_json_new_string("text"));
+    cmcp_json_object_set(item, "text", cmcp_json_new_string(text));
+    cmcp_json_array_append(arr, item);
+    return arr;
+}
+
+/* ====================================================================== */
 /* JSON helpers for capability ↔ object encoding                           */
 /* ====================================================================== */
 
-/* Build the server's capabilities sub-object. Empty inner objects mean
- * "the capability is offered, no extra options" per MCP convention. */
-static cmcp_json_t *server_caps_to_json(const cmcp_server_capabilities_t *c) {
+/* Build the server's capabilities sub-object. The presence of a
+ * top-level key (e.g. "tools": {}) signals that the capability is
+ * offered; subkeys advertise optional sub-capabilities. */
+static cmcp_json_t *server_caps_to_json(const cmcp_server_t *s) {
+    const cmcp_server_capabilities_t *c = &s->caps;
     cmcp_json_t *root = cmcp_json_new_object();
     if (!root) return NULL;
 
-    if (c->tools_list_changed || c->resources_list_changed ||
-        c->resources_subscribe || c->prompts_list_changed) {
-        /* tools — declared if list_changed is set. The presence of
-         * "tools" in the object signals tool support; subkeys advertise
-         * optional sub-capabilities. */
-        if (c->tools_list_changed) {
-            cmcp_json_t *tools = cmcp_json_new_object();
+    /* tools — declared if any tool is registered, OR explicitly via
+     * tools_list_changed. */
+    if (s->n_tools > 0 || c->tools_list_changed) {
+        cmcp_json_t *tools = cmcp_json_new_object();
+        if (c->tools_list_changed)
             cmcp_json_object_set(tools, "listChanged", cmcp_json_new_bool(1));
-            cmcp_json_object_set(root, "tools", tools);
-        }
-        if (c->resources_list_changed || c->resources_subscribe) {
-            cmcp_json_t *res = cmcp_json_new_object();
-            if (c->resources_subscribe)
-                cmcp_json_object_set(res, "subscribe", cmcp_json_new_bool(1));
-            if (c->resources_list_changed)
-                cmcp_json_object_set(res, "listChanged", cmcp_json_new_bool(1));
-            cmcp_json_object_set(root, "resources", res);
-        }
-        if (c->prompts_list_changed) {
-            cmcp_json_t *pr = cmcp_json_new_object();
-            cmcp_json_object_set(pr, "listChanged", cmcp_json_new_bool(1));
-            cmcp_json_object_set(root, "prompts", pr);
-        }
+        cmcp_json_object_set(root, "tools", tools);
+    }
+    if (c->resources_list_changed || c->resources_subscribe) {
+        cmcp_json_t *res = cmcp_json_new_object();
+        if (c->resources_subscribe)
+            cmcp_json_object_set(res, "subscribe", cmcp_json_new_bool(1));
+        if (c->resources_list_changed)
+            cmcp_json_object_set(res, "listChanged", cmcp_json_new_bool(1));
+        cmcp_json_object_set(root, "resources", res);
+    }
+    if (c->prompts_list_changed) {
+        cmcp_json_t *pr = cmcp_json_new_object();
+        cmcp_json_object_set(pr, "listChanged", cmcp_json_new_bool(1));
+        cmcp_json_object_set(root, "prompts", pr);
     }
     if (c->logging) cmcp_json_object_set(root, "logging", cmcp_json_new_object());
     return root;
@@ -199,7 +286,7 @@ static void handle_initialize(cmcp_server_t *s,
     cmcp_json_t *result = cmcp_json_new_object();
     cmcp_json_object_set(result, "protocolVersion",
                           cmcp_json_new_string(CMCP_PROTOCOL_VERSION));
-    cmcp_json_object_set(result, "capabilities", server_caps_to_json(&s->caps));
+    cmcp_json_object_set(result, "capabilities", server_caps_to_json(s));
     cmcp_json_t *si = cmcp_json_new_object();
     cmcp_json_object_set(si, "name",    cmcp_json_new_string(s->name));
     cmcp_json_object_set(si, "version", cmcp_json_new_string(s->version));
@@ -207,6 +294,93 @@ static void handle_initialize(cmcp_server_t *s,
 
     cmcp_rpc_make_response(resp, &req->id, result);
     s->state = SS_HANDSHAKE;
+}
+
+/* ====================================================================== */
+/* tools/list                                                              */
+/* ====================================================================== */
+
+static cmcp_json_t *tool_to_descriptor(const server_tool_t *t) {
+    cmcp_json_t *o = cmcp_json_new_object();
+    if (!o) return NULL;
+    cmcp_json_object_set(o, "name", cmcp_json_new_string(t->name));
+    if (t->description)
+        cmcp_json_object_set(o, "description",
+                              cmcp_json_new_string(t->description));
+    /* Spec requires inputSchema; default to {"type":"object"} if the
+     * tool didn't supply one so clients can still validate against the
+     * empty-args case. */
+    if (t->input_schema) {
+        cmcp_json_object_set(o, "inputSchema", cmcp_json_clone(t->input_schema));
+    } else {
+        cmcp_json_t *def = cmcp_json_new_object();
+        cmcp_json_object_set(def, "type", cmcp_json_new_string("object"));
+        cmcp_json_object_set(o, "inputSchema", def);
+    }
+    return o;
+}
+
+static void handle_tools_list(cmcp_server_t *s,
+                               const cmcp_rpc_message_t *req,
+                               cmcp_rpc_message_t *resp) {
+    cmcp_json_t *result = cmcp_json_new_object();
+    cmcp_json_t *arr    = cmcp_json_new_array();
+    for (size_t i = 0; i < s->n_tools; i++) {
+        cmcp_json_array_append(arr, tool_to_descriptor(&s->tools[i]));
+    }
+    cmcp_json_object_set(result, "tools", arr);
+    /* No pagination in v0.1: omit nextCursor. */
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
+/* tools/call                                                              */
+/* ====================================================================== */
+
+static void handle_tools_call(cmcp_server_t *s,
+                               const cmcp_rpc_message_t *req,
+                               cmcp_rpc_message_t *resp) {
+    if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
+        reply_invalid_params(resp, &req->id,
+                              "tools/call requires params object", NULL);
+        return;
+    }
+    const cmcp_json_t *name_v = cmcp_json_object_get(req->params, "name");
+    if (!name_v || name_v->type != CMCP_JSON_STRING) {
+        reply_invalid_params(resp, &req->id,
+                              "tools/call requires `name` string", NULL);
+        return;
+    }
+    server_tool_t *t = tool_find(s, name_v->str.s);
+    if (!t) {
+        cmcp_json_t *data = cmcp_json_new_object();
+        cmcp_json_object_set(data, "name",
+                              cmcp_json_new_string(name_v->str.s));
+        reply_invalid_params(resp, &req->id, "Unknown tool", data);
+        return;
+    }
+
+    /* arguments is optional; default to absent. */
+    const cmcp_json_t *args = cmcp_json_object_get(req->params, "arguments");
+
+    /* Phase 1.6 will validate `args` against `t->input_schema` here. */
+
+    cmcp_json_t *content = NULL;
+    int is_error = 0;
+    int rc = t->handler(args, t->userdata, &content, &is_error);
+    if (rc != CMCP_OK) {
+        cmcp_json_free(content);
+        cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                             "Tool handler failed", NULL);
+        return;
+    }
+
+    /* Wrap. NULL content → empty array (spec allows). */
+    cmcp_json_t *result = cmcp_json_new_object();
+    if (!content) content = cmcp_json_new_array();
+    cmcp_json_object_set(result, "content", content);
+    cmcp_json_object_set(result, "isError", cmcp_json_new_bool(is_error ? 1 : 0));
+    cmcp_rpc_make_response(resp, &req->id, result);
 }
 
 /* ====================================================================== */
@@ -250,7 +424,15 @@ static void server_handle_message(cmcp_server_t *s,
         return;
     }
 
-    /* No tool registry yet — Phase 1.5. */
+    if (strcmp(msg->method, "tools/list") == 0) {
+        handle_tools_list(s, msg, resp);
+        return;
+    }
+    if (strcmp(msg->method, "tools/call") == 0) {
+        handle_tools_call(s, msg, resp);
+        return;
+    }
+
     cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_METHOD_NOT_FOUND,
                          msg->method ? msg->method : "(null)", NULL);
 }
@@ -336,4 +518,12 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
 
     s->state = SS_CLOSED;
     return CMCP_OK;
+}
+
+int cmcp_server_run_stdio(cmcp_server_t *s) {
+    cmcp_transport_t *t = cmcp_transport_stdio_new();
+    if (!t) return CMCP_ENOMEM;
+    int rc = cmcp_server_run(s, t);
+    cmcp_transport_close(t);
+    return rc;
 }

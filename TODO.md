@@ -8,10 +8,10 @@ v0.1.0 (the cut openclawd actually consumes); Tier 2 is HTTP transport
 and the polish that makes the library look professional; Tier 3 is
 deferred large-scope work.
 
-Current target: **Phase 1.5 (Tool registry + dispatch)** — Phases 1.1
-through 1.4 are landed. The server can negotiate capabilities and
-reject unknown methods with `-32601`; the next step is wiring a real
-tool registry behind that.
+Current target: **Phase 1.6 (JSON Schema validator subset)** — Phases
+1.1 through 1.5 are landed. The server has a working tool registry
+that wraps results per the MCP spec; Phase 1.6 adds the validation
+layer that runs on `arguments` before each `tools/call` dispatch.
 
 ## Tier 1 — blocking v0.1.0 ("openclawd can call cRAG via MCP")
 
@@ -126,11 +126,11 @@ remote auth are Tier 2.
   single-pass linker can resolve core symbols pulled in by server.o /
   client.o after their archives are scanned.
 
-### 1.5 Tool registry + dispatch (`src/server.c`)
+### 1.5 Tool registry + dispatch (`src/server.c`) — DONE
 
-- Public API:
+- Shipped: public registry API on the server. Designated-initialiser
+  ergonomics:
   ```c
-  cmcp_server_t *s = cmcp_server_new("crag-mcp", "0.1.0");
   cmcp_server_add_tool(s, &(cmcp_tool_t){
       .name = "crag_query",
       .description = "Hybrid retrieval over the cRAG index.",
@@ -138,13 +138,43 @@ remote auth are Tier 2.
       .handler = crag_query_handler,
       .userdata = ctx,
   });
-  cmcp_server_run_stdio(s);
   ```
-- `tools/list` walks the registry in registration order.
-- `tools/call` validates input against the schema (1.6), dispatches,
-  wraps the return value as `content[]` per spec.
-- Tests: `test_tools` — register/list/call, unknown tool, schema
-  rejection, handler error propagation.
+  All fields are deep-copied; the schema string is parsed eagerly to
+  `cmcp_json_t` (returning `CMCP_EPARSE` on malformed input or non-
+  object schemas). Duplicate names rejected with `CMCP_EPROTOCOL`.
+- Storage: a growable `server_tool_t[]` (initial cap 4, double on
+  overflow). Linear scan by name — N is small in practice.
+- Three error layers wired correctly per spec:
+  - unknown method → `-32601`
+  - unknown tool / missing `name` / non-object params → `-32602` (with
+    `data.name` echoing the bad name for clients to surface)
+  - tool-level failure → success response with `isError: true`
+  - handler internal failure (non-zero return) → `-32603`
+- `tools/list` walks the registry in registration order, returns each
+  entry as `{name, description?, inputSchema}`. The library defaults
+  `inputSchema` to `{"type":"object"}` when the tool didn't supply
+  one (the spec requires this field). No pagination in v0.1.
+- `tools/call` looks up by name, calls the handler with the parsed
+  `arguments` object (or NULL), and wraps the result as
+  `{content, isError}`. Schema validation hook is in place — Phase 1.6
+  fills it in.
+- Server capability now correctly advertises `"tools": {}` whenever
+  ≥ 1 tool is registered (independent of `tools_list_changed`, which
+  only signals support for `notifications/tools/list_changed`).
+- Convenience helper `cmcp_tool_text_content(text)` builds the common
+  `[{"type":"text","text":text}]` array so handlers stay one line.
+- Sugar: `cmcp_server_run_stdio(s)` opens, runs, and closes a stdio
+  transport over the calling process's stdin/stdout.
+- Tests: `test_tools` — register + list (incl. duplicate-name and bad
+  schema rejection), tools/list over the wire (asserts descriptor
+  shape), tools/call success (handler counter increments via
+  userdata), unknown tool, missing `name`, tool-level error
+  (`isError: true` and JSON-RPC error stays NULL), handler internal
+  error (`-32603`), empty registry returns empty array, registry
+  realloc past 25 tools. 95 assertions across 9 tests.
+- Two pre-existing `test_lifecycle` cases switched from `tools/list`
+  to `frobs/list` for the unknown-method path, since `tools/list` is
+  now an actual implemented method.
 
 ### 1.6 JSON Schema validator subset (`src/schema.c`)
 
@@ -303,7 +333,19 @@ a concrete reason.
   `-32602` data, sync client request/response with intermediate
   frame draining. `test_lifecycle` covers happy path, version
   mismatch, double-init, operate-before-init, unknown method,
-  stray notification. 63/63 assertions across 6 tests. Total now
-  1698 assertions over four test binaries.
+  stray notification. 63/63 assertions across 6 tests.
+- Phase 1.5: Tool registry + dispatch (`src/server.c`,
+  `include/cmcp_server.h`). `cmcp_server_add_tool()` with
+  designated-initialiser ergonomics, eager schema parsing, dup-name
+  rejection. `tools/list` walks the registry; `tools/call` wraps
+  handler output as `{content, isError}` per spec. Three error
+  layers (unknown method → -32601, unknown tool / missing name →
+  -32602 with `data.name`, internal failure → -32603, tool-level
+  errors → `isError: true`). `tools` capability auto-advertised
+  when ≥ 1 tool is registered. `cmcp_server_run_stdio()` sugar.
+  `test_tools` covers register/list/call, schema rejection,
+  unknown tool, tool-level error, handler internal error, empty
+  registry, 25-tool realloc. 95/95 assertions across 9 tests.
+  Total now 1793 assertions over five test binaries.
 - Wildcard-based Makefile so `CORE_SRC`/`SERVER_SRC`/`CLIENT_SRC`
   auto-grow as phases land — `make` only compiles files that exist.

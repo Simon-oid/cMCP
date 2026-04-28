@@ -230,7 +230,9 @@ static void test_operate_before_initialized(void) {
     pthread_t th;
     TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
 
-    /* Pre-handshake `tools/list` must be rejected as -32600. */
+    /* Pre-handshake operate-class request must be rejected as -32600.
+     * The state-check fires before the method lookup, so even a
+     * known method like `tools/list` is rejected here. */
     cmcp_rpc_message_t req;
     TEST_ASSERT(cmcp_rpc_make_request(&req, 7, "tools/list", NULL)
                 == CMCP_OK);
@@ -263,8 +265,9 @@ static void test_unknown_method_after_init(void) {
     cmcp_client_t *cli = cmcp_client_new("test-client", "0.0.1");
     TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
 
+    /* `frobs/list` is intentionally not a method we implement. */
     cmcp_rpc_message_t resp;
-    TEST_ASSERT(cmcp_client_request(cli, "tools/list", NULL, &resp) == CMCP_OK);
+    TEST_ASSERT(cmcp_client_request(cli, "frobs/list", NULL, &resp) == CMCP_OK);
     TEST_ASSERT(resp.kind == CMCP_MSG_RESPONSE);
     TEST_ASSERT(resp.error != NULL);
     TEST_ASSERT(resp.error->code == CMCP_RPC_METHOD_NOT_FOUND);
@@ -296,10 +299,11 @@ static void test_notification_dropped_silently(void) {
     TEST_ASSERT(cmcp_client_notify(cli, "notifications/bogus", NULL)
                 == CMCP_OK);
 
-    /* Follow-up request: response code must be -32601 and id must
-     * match — i.e., we didn't read a stale frame from the notification. */
+    /* Follow-up unknown-method request: response code must be -32601
+     * with a matching id — proves we didn't read a stale frame from
+     * the notification. */
     cmcp_rpc_message_t resp;
-    TEST_ASSERT(cmcp_client_request(cli, "tools/list", NULL, &resp)
+    TEST_ASSERT(cmcp_client_request(cli, "frobs/list", NULL, &resp)
                 == CMCP_OK);
     TEST_ASSERT(resp.error != NULL);
     TEST_ASSERT(resp.error->code == CMCP_RPC_METHOD_NOT_FOUND);
