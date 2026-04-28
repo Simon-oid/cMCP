@@ -4,6 +4,28 @@
 #include <stddef.h>
 #include "cmcp_json.h"
 
+/* ------------------------------------------------------------------ */
+/* MCP capability declarations                                          */
+/* ------------------------------------------------------------------ */
+/* These are the subset of MCP capabilities cMCP currently models. Each
+ * field is a boolean: 1 if the peer offers this capability, 0 if not.
+ * Negotiated at initialize-time and never re-negotiated within a
+ * session. Phase 1.4 wires the structs and the handshake; later phases
+ * fill in the behavior gated by each flag. */
+
+typedef struct {
+    int tools_list_changed;       /* tools/list_changed notifications */
+    int resources_subscribe;      /* resources/subscribe + updated */
+    int resources_list_changed;   /* resources/list_changed */
+    int prompts_list_changed;     /* prompts/list_changed */
+    int logging;                  /* logging methods */
+} cmcp_server_capabilities_t;
+
+typedef struct {
+    int sampling;                 /* sampling/createMessage */
+    int roots_list_changed;       /* roots/list_changed */
+} cmcp_client_capabilities_t;
+
 /* JSON-RPC 2.0 standard error codes. */
 #define CMCP_RPC_PARSE_ERROR       -32700
 #define CMCP_RPC_INVALID_REQUEST   -32600

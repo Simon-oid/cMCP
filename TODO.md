@@ -8,8 +8,10 @@ v0.1.0 (the cut openclawd actually consumes); Tier 2 is HTTP transport
 and the polish that makes the library look professional; Tier 3 is
 deferred large-scope work.
 
-Current target: **Phase 1.1 (JSON layer)** — start by lifting cRAG's
-`src/util.c` into `src/json.c` and extending it.
+Current target: **Phase 1.5 (Tool registry + dispatch)** — Phases 1.1
+through 1.4 are landed. The server can negotiate capabilities and
+reject unknown methods with `-32601`; the next step is wiring a real
+tool registry behind that.
 
 ## Tier 1 — blocking v0.1.0 ("openclawd can call cRAG via MCP")
 
@@ -90,17 +92,39 @@ remote auth are Tier 2.
   the echoed frame, parses and asserts every field round-tripped.
   807 assertions, 7 tests.
 
-### 1.4 Lifecycle (`src/server.c`, `src/client.c` minimal)
+### 1.4 Lifecycle (`src/server.c`, `src/client.c` minimal) — DONE
 
-- `initialize` request → capability negotiation → `initialized`
-  notification → operate → `shutdown`.
-- Pin protocol version to `CMCP_PROTOCOL_VERSION`. Reject mismatches in
-  `initialize` with a structured error (don't best-effort).
-- Server declares capabilities (`tools.listChanged` set; resources /
-  prompts unset for now). Client mirrors into negotiated set.
-- Tests: `test_lifecycle` — happy path, version mismatch, missing
-  required capabilities, double-`initialize`, operating before
-  `initialized`.
+- Shipped: `cmcp_server_t` and `cmcp_client_t` with explicit state
+  machine on the server side
+  (`SS_UNINIT → SS_HANDSHAKE → SS_READY → SS_CLOSED`). Server's
+  `cmcp_server_run()` is a single read-loop: parse one frame, dispatch,
+  reply iff request. Notifications are silently dropped, responses are
+  ignored (servers don't issue requests in v0.1), batches are rejected
+  with `-32600`, parse failures emit `-32700`.
+- Capability structs (`cmcp_server_capabilities_t`,
+  `cmcp_client_capabilities_t`) are now in `include/cmcp_types.h` and
+  encoded/decoded on both sides — server emits its own caps in the
+  `initialize` result, client emits its caps in the request, each side
+  parses the other's into a struct after the handshake.
+- Pinned protocol version: server returns `-32602` with structured
+  data `{ "supported": ..., "requested": ... }` on mismatch; client
+  validates the response's `protocolVersion` and refuses with
+  `CMCP_EPROTOCOL` if it differs.
+- Pre-handshake non-`initialize` requests rejected as `-32600`;
+  re-`initialize` after the handshake also rejected as `-32600`;
+  unknown methods after handshake are `-32601` (proper tool registry
+  arrives in 1.5).
+- `cmcp_client_request()` is synchronous — drains intermediate frames
+  until the matching response ID arrives, drops stray notifications
+  along the way. Allocates IDs from the Phase 1.2 pending table.
+- Tests: `test_lifecycle` — happy path (server in pthread, client on
+  main, both sides see the other's identity + caps), version mismatch
+  (asserts the `supported`/`requested` data), double-`initialize`,
+  operate-before-`initialized`, unknown method after handshake, stray
+  notification dropped silently. 63 assertions across 6 tests.
+- Build: link order changed to `server, client, core` so the
+  single-pass linker can resolve core symbols pulled in by server.o /
+  client.o after their archives are scanned.
 
 ### 1.5 Tool registry + dispatch (`src/server.c`)
 
@@ -272,5 +296,14 @@ a concrete reason.
   `test_stdio_roundtrip` covers concurrent writers and a real
   fork()ed echo child running a JSON-RPC handshake.
   807/807 assertions across 7 tests.
+- Phase 1.4: Lifecycle (`src/server.c`, `src/client.c`,
+  `include/cmcp_server.h`, `include/cmcp_client.h`). Server state
+  machine (UNINIT/HANDSHAKE/READY/CLOSED), capability negotiation
+  on both sides, protocol-version pinning with structured
+  `-32602` data, sync client request/response with intermediate
+  frame draining. `test_lifecycle` covers happy path, version
+  mismatch, double-init, operate-before-init, unknown method,
+  stray notification. 63/63 assertions across 6 tests. Total now
+  1698 assertions over four test binaries.
 - Wildcard-based Makefile so `CORE_SRC`/`SERVER_SRC`/`CLIENT_SRC`
   auto-grow as phases land — `make` only compiles files that exist.

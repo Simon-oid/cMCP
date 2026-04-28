@@ -28,9 +28,12 @@ CORE_LIB   := libcmcp_core.a
 SERVER_LIB := libcmcp_server.a
 CLIENT_LIB := libcmcp_client.a
 
-BUILT_LIBS := $(if $(CORE_OBJ),$(CORE_LIB)) \
-              $(if $(SERVER_OBJ),$(SERVER_LIB)) \
-              $(if $(CLIENT_OBJ),$(CLIENT_LIB))
+# Link order: consumers (server/client) before provider (core), so the
+# single-pass linker can resolve core symbols pulled in by server.o and
+# client.o after their archives are scanned.
+BUILT_LIBS := $(if $(SERVER_OBJ),$(SERVER_LIB)) \
+              $(if $(CLIENT_OBJ),$(CLIENT_LIB)) \
+              $(if $(CORE_OBJ),$(CORE_LIB))
 
 # --- Reference binaries ----------------------------------------------------
 INSPECT_BIN  := tools/cmcp-inspect/cmcp-inspect
