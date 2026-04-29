@@ -1,6 +1,7 @@
 #include "cmcp.h"
 #include "cmcp_server.h"
 #include "cmcp_json.h"
+#include "cmcp_schema.h"
 #include "cmcp_types.h"
 #include "cmcp_transport.h"
 
@@ -363,7 +364,34 @@ static void handle_tools_call(cmcp_server_t *s,
     /* arguments is optional; default to absent. */
     const cmcp_json_t *args = cmcp_json_object_get(req->params, "arguments");
 
-    /* Phase 1.6 will validate `args` against `t->input_schema` here. */
+    /* Validate arguments against the registered input schema. NULL
+     * arguments are treated as a JSON null by the validator; that
+     * fails any `type: object` schema with required keys, which is
+     * the right answer. Tools without an input_schema skip this step.
+     *
+     * Failures map to JSON-RPC -32602 INVALID_PARAMS with structured
+     * data identifying path / keyword / message — clients can
+     * surface or programmatically react to it. */
+    if (t->input_schema) {
+        cmcp_schema_error_t serr;
+        int vr = cmcp_schema_validate(t->input_schema, args, &serr);
+        if (vr == CMCP_ESCHEMA) {
+            cmcp_json_t *data = cmcp_schema_error_to_json(&serr);
+            cmcp_schema_error_clear(&serr);
+            reply_invalid_params(resp, &req->id,
+                                  "arguments failed schema validation", data);
+            return;
+        }
+        if (vr != CMCP_OK) {
+            /* CMCP_EINVAL (broken schema) or CMCP_ENOMEM. The schema
+             * was parsed at registration time, so EINVAL here means
+             * something else went wrong — treat as internal. */
+            cmcp_schema_error_clear(&serr);
+            cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                                 "Schema validation failed internally", NULL);
+            return;
+        }
+    }
 
     cmcp_json_t *content = NULL;
     int is_error = 0;
