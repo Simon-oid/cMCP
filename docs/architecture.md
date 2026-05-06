@@ -167,6 +167,63 @@ Content-Length`, and parks the connection on a holder thread that
 polls for client disconnect every 250ms. There are no events to emit
 yet — server-side notification emit is Phase 2.4.
 
+### transport_http_client.c (client side)
+
+The mirror image: `cmcp_transport_http_connect(url)` produces a
+transport that the existing async client (`client.c`) drives like any
+other. Internally it juggles two libcurl flows:
+
+```
+caller thread          SSE thread           libcurl easy
+─────────────          ──────────           ────────────
+write_fn(frame) ─────► do_post()
+                       curl_easy_perform ──► POST /mcp
+                       (synchronous)         ◄── 200 + body / 202
+                       latch session id
+                       queue_push(body)
+                                                 ┌── on session latch:
+                       (idle, parked on cv)  ────┤  open SSE
+                                                 │  curl_easy_perform
+                                                 │  WRITEFUNCTION
+                                                 │   parses data: ...
+                                                 │   queue_push(event)
+                                                 └── (long-poll)
+read_fn() ─────────────► queue_pop ◄────── (frames from either source)
+```
+
+**Why two flows.** Each `write_fn` call is a one-shot HTTP exchange
+with its own libcurl easy handle, so multiple application threads can
+be in `call_async` concurrently without serializing — their POSTs
+race independently and their responses arrive on the queue, where
+client.c's reader thread demultiplexes by JSON-RPC id. The SSE thread
+is separate so server-pushed messages don't have to wait for an
+application-side POST to drain.
+
+**Session latch.** The first POST goes out without a session id
+(it's the `initialize`). The response carries `Mcp-Session-Id`; a
+header-callback parses it and `latch_session_id` stores it under a
+mutex, broadcasting a condvar that wakes the SSE thread (which has
+been parked since startup waiting for exactly this). Subsequent
+POSTs add the header automatically.
+
+**Shutdown.** The SSE thread is parked on a libcurl `curl_easy_perform`
+that won't return until the server closes the connection — except
+that we install a `CURLOPT_XFERINFOFUNCTION` progress callback that
+returns non-zero when a `shutting_down` flag is set, which forces
+curl to abort the transfer with `CURLE_ABORTED_BY_CALLBACK`. The
+queue_pop loop in `read_fn` is plain pthread_cond_wait, which is
+immune to signals, so we expose a `wake_fn` on the transport vtable.
+client.c's free path calls `cmcp_transport_wake` before joining the
+reader thread; the wake flips `shutting_down` and broadcasts the
+queue cv, queue_pop returns CMCP_EIO, the reader exits.
+
+The wake_fn vtable slot is optional — stdio leaves it NULL because
+its `read_fn` blocks on a syscall (`getline`), and the SIGUSR2 +
+non-restarting handler protocol that returns `EINTR` from the
+syscall is enough for that case. Transports whose `read_fn` parks on
+a userspace primitive (condvar, futex, channel) need wake_fn; those
+that block on a syscall don't.
+
 ### server.c
 
 Tool registry → dispatch → run loop. The handshake (`initialize`,

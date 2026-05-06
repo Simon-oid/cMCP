@@ -42,9 +42,20 @@ struct cmcp_transport {
      * NULL. After close, t is invalid.
      *
      * close_fn must NOT be called while another thread is inside
-     * read_fn. Upper layers that run a reader thread should signal
-     * the reader to exit (e.g. pthread_kill) and join before close. */
+     * read_fn. Upper layers that run a reader thread should call
+     * wake_fn (or pthread_kill, for transports that block on a
+     * syscall returning EINTR) to wake the reader, join, then close. */
     void (*close_fn)(cmcp_transport_t *t);
+
+    /* Optional. Wake any thread blocked inside read_fn so it returns
+     * CMCP_EIO. Idempotent and safe to call multiple times. Does NOT
+     * free anything — close_fn still has to be called separately.
+     *
+     * Required for transports whose read_fn blocks on a userspace
+     * primitive (condvar, futex, etc.) that doesn't surface signals.
+     * Stdio leaves this NULL — its read_fn blocks on a read syscall
+     * which the upper layer interrupts via pthread_kill. */
+    void (*wake_fn)(cmcp_transport_t *t);
 
     void *impl;
 };
@@ -64,6 +75,10 @@ static inline int cmcp_transport_write(cmcp_transport_t *t,
 
 static inline void cmcp_transport_close(cmcp_transport_t *t) {
     if (t) t->close_fn(t);
+}
+
+static inline void cmcp_transport_wake(cmcp_transport_t *t) {
+    if (t && t->wake_fn) t->wake_fn(t);
 }
 
 /* ====================================================================== */
@@ -110,5 +125,30 @@ cmcp_transport_t *cmcp_transport_stdio_new_fds(int read_fd, int write_fd);
  * denied). The transport begins accepting immediately. */
 cmcp_transport_t *cmcp_transport_http_listen(const char *host,
                                               unsigned short port);
+
+/* ====================================================================== */
+/* Streamable HTTP transport — client side                                 */
+/* ====================================================================== */
+/* Connect to a Streamable HTTP MCP server. `url` is the full /mcp
+ * endpoint, e.g. "http://127.0.0.1:8080/mcp" or
+ * "https://example.com/api/mcp" (TLS handled by libcurl).
+ *
+ * Construction is cheap — no network I/O happens until the first
+ * write_fn fires, which POSTs the frame and synchronously waits for
+ * the HTTP response. The transport runs a background SSE reader
+ * thread: once a session id has been latched (from the first
+ * `initialize` response), it opens a long-lived `GET /mcp` with
+ * `Accept: text/event-stream` and feeds each `data: <json>\n\n`
+ * block back through `read_fn` as a frame.
+ *
+ * Frames returned by read_fn come from two sources merged by a
+ * thread-safe queue: synchronous POST responses (HTTP 200 + body)
+ * and SSE-streamed server-pushed messages. Notification POSTs
+ * (HTTP 202 Accepted) carry no body and don't enqueue.
+ *
+ * v0.2 limits: no auto-reconnect on SSE drop; TLS verification uses
+ * the system CA bundle (no custom CA pinning); no exposed knobs for
+ * proxies (set CURL env vars if you need them). */
+cmcp_transport_t *cmcp_transport_http_connect(const char *url);
 
 #endif

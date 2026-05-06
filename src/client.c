@@ -351,18 +351,27 @@ void cmcp_client_free(cmcp_client_t *c) {
 
     c->shutting_down = 1;
 
-    /* Wake the reader and join. We send the wake signal to interrupt
-     * its blocked read; getline returns -1 with EINTR, the stdio
-     * transport returns CMCP_EIO, the reader exits.
+    /* Wake the reader and join. Two complementary mechanisms:
      *
-     * Race: the reader may be between its shutting_down check and
-     * the read syscall when we send the signal — the no-op handler
-     * runs and the reader proceeds into the read. Re-send in a tight
-     * tryjoin loop until the reader actually exits. */
+     *   1) Transport's wake_fn (HTTP client, etc.) — flips an internal
+     *      flag and broadcasts the userspace condvar that read_fn is
+     *      parked on, causing read_fn to return CMCP_EIO.
+     *
+     *   2) pthread_kill(SIGUSR2) with a non-restarting handler — for
+     *      transports whose read_fn blocks on a syscall (stdio's
+     *      getline), the signal forces EINTR, the transport surfaces
+     *      it as CMCP_EIO, the reader exits.
+     *
+     * We do both: wake_fn handles userspace-blocked readers, the
+     * signal handles syscall-blocked ones, and the tryjoin retry loop
+     * covers the race where the reader was between its shutdown check
+     * and the actual blocking call. */
     if (c->reader_started) {
+        if (c->transport) cmcp_transport_wake(c->transport);
         for (;;) {
             int jr = pthread_tryjoin_np(c->reader, NULL);
             if (jr == 0) break;
+            if (c->transport) cmcp_transport_wake(c->transport);
             pthread_kill(c->reader, CMCP_WAKE_SIGNAL);
             struct timespec ts = { 0, 100000 };  /* 100us */
             nanosleep(&ts, NULL);
