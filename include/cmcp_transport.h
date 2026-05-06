@@ -86,4 +86,29 @@ cmcp_transport_t *cmcp_transport_stdio_new(void);
  * (read = child's stdout, write = child's stdin) and for tests. */
 cmcp_transport_t *cmcp_transport_stdio_new_fds(int read_fd, int write_fd);
 
+/* ====================================================================== */
+/* Streamable HTTP transport — server side                                 */
+/* ====================================================================== */
+/* Streamable HTTP per MCP spec 2025-06-18: a single `/mcp` endpoint that
+ * accepts POST (request → response) and GET with `Accept:
+ * text/event-stream` (SSE upgrade for server-to-client streams). Session
+ * is identified by the `Mcp-Session-Id` header — minted on the first
+ * `initialize` POST and required on every subsequent request.
+ *
+ * Threading: the transport owns one acceptor thread that loops
+ * accept(). Each connection is handled inline on the acceptor (POSTs
+ * are 1-shot and serialized; SSE connections detach to a background
+ * holder thread). read_fn blocks until a POST body arrives; write_fn
+ * pairs with the most recent unanswered request and unblocks the
+ * acceptor's POST handler so it can send the HTTP response.
+ *
+ * v0.2 limits: one logical session per transport, no TLS (deploy
+ * behind nginx/caddy), no HTTP keep-alive (one request per
+ * connection), Content-Length only (no chunked transfer encoding).
+ *
+ * Returns NULL on bind/listen failure (e.g. port in use, permission
+ * denied). The transport begins accepting immediately. */
+cmcp_transport_t *cmcp_transport_http_listen(const char *host,
+                                              unsigned short port);
+
 #endif
