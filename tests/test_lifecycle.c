@@ -193,23 +193,17 @@ static void test_double_initialize(void) {
     cmcp_client_t *cli = cmcp_client_new("test-client", "0.0.1");
     TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
 
-    /* Send a second `initialize` directly over the wire (the client
-     * API doesn't expose this; we have to bypass it). */
+    /* Send a second `initialize` through the client API. The client
+     * doesn't reject this on its end (the public API doesn't expose
+     * lifecycle state checks); we're testing the SERVER's rejection. */
     cmcp_json_t *params = cmcp_json_new_object();
     cmcp_json_object_set(params, "protocolVersion",
                          cmcp_json_new_string(CMCP_PROTOCOL_VERSION));
     cmcp_json_object_set(params, "capabilities", cmcp_json_new_object());
 
-    cmcp_rpc_message_t req;
-    TEST_ASSERT(cmcp_rpc_make_request(&req, 99, "initialize", params)
-                == CMCP_OK);
-
     cmcp_rpc_message_t resp;
-    TEST_ASSERT(rpc_round_trip(p.client_t, &req, &resp) == CMCP_OK);
-    cmcp_rpc_message_clear(&req);
-
+    TEST_ASSERT(cmcp_client_request(cli, "initialize", params, &resp) == CMCP_OK);
     TEST_ASSERT(resp.kind == CMCP_MSG_RESPONSE);
-    TEST_ASSERT(resp.id.kind == CMCP_ID_INT && resp.id.i == 99);
     TEST_ASSERT(resp.error != NULL);
     TEST_ASSERT(resp.error->code == CMCP_RPC_INVALID_REQUEST);
     cmcp_rpc_message_clear(&resp);

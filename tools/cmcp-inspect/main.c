@@ -37,16 +37,12 @@
 #include "cmcp.h"
 #include "cmcp_client.h"
 #include "cmcp_json.h"
-#include "cmcp_transport.h"
 #include "cmcp_types.h"
 
-#include <errno.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 /* ====================================================================== */
 /* Output helpers                                                          */
@@ -150,51 +146,6 @@ static void print_rpc_error(const cmcp_rpc_error_t *e, const char *what) {
         if (raw) { fprintf(stderr, " %s", raw); free(raw); }
     }
     fputc('\n', stderr);
-}
-
-/* ====================================================================== */
-/* Spawn helper                                                            */
-/* ====================================================================== */
-
-/* Fork and exec the server child. On success, returns the child pid
- * and populates *read_fd / *write_fd with the parent's end of the
- * pipes. On failure, returns -1 and leaves the FDs unset. */
-static pid_t spawn_server(char **server_argv, int *read_fd, int *write_fd) {
-    int p2c[2], c2p[2];
-    if (pipe(p2c) != 0) return -1;
-    if (pipe(c2p) != 0) {
-        close(p2c[0]); close(p2c[1]);
-        return -1;
-    }
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(p2c[0]); close(p2c[1]);
-        close(c2p[0]); close(c2p[1]);
-        return -1;
-    }
-
-    if (pid == 0) {
-        /* child: stdin <- parent, stdout -> parent. */
-        if (dup2(p2c[0], STDIN_FILENO)  < 0 ||
-            dup2(c2p[1], STDOUT_FILENO) < 0) {
-            perror("cmcp-inspect: dup2");
-            _exit(127);
-        }
-        close(p2c[0]); close(p2c[1]);
-        close(c2p[0]); close(c2p[1]);
-        execvp(server_argv[0], server_argv);
-        fprintf(stderr, "cmcp-inspect: exec %s: %s\n",
-                server_argv[0], strerror(errno));
-        _exit(127);
-    }
-
-    /* parent: keep our ends, close the child's. */
-    close(p2c[0]);
-    close(c2p[1]);
-    *write_fd = p2c[1];
-    *read_fd  = c2p[0];
-    return pid;
 }
 
 /* ====================================================================== */
@@ -315,38 +266,23 @@ int main(int argc, char **argv) {
 
     char **server_argv = &argv[optind];
 
-    int rfd = -1, wfd = -1;
-    pid_t pid = spawn_server(server_argv, &rfd, &wfd);
-    if (pid < 0) {
-        fprintf(stderr, "cmcp-inspect: spawn failed: %s\n", strerror(errno));
-        return 1;
-    }
-
-    cmcp_transport_t *t = cmcp_transport_stdio_new_fds(rfd, wfd);
-    if (!t) {
-        fprintf(stderr, "cmcp-inspect: transport allocation failed\n");
-        close(rfd); close(wfd);
-        kill(pid, SIGTERM);
-        waitpid(pid, NULL, 0);
-        return 1;
-    }
-
     cmcp_client_t *cli = cmcp_client_new("cmcp-inspect", CMCP_VERSION);
     if (!cli) {
         fprintf(stderr, "cmcp-inspect: client allocation failed\n");
-        cmcp_transport_close(t);
-        kill(pid, SIGTERM);
-        waitpid(pid, NULL, 0);
+        return 1;
+    }
+
+    /* Spawn the child, set up the stdio transport, and run the
+     * handshake — all in one shot. cmcp_client_free will close the
+     * transport and reap the child. */
+    int rc = cmcp_client_connect_stdio(cli, server_argv[0], server_argv, NULL);
+    if (rc != CMCP_OK) {
+        fprintf(stderr, "cmcp-inspect: connect/handshake failed (%d)\n", rc);
+        cmcp_client_free(cli);
         return 1;
     }
 
     int exit_code = 0;
-    int rc = cmcp_client_handshake(cli, t);
-    if (rc != CMCP_OK) {
-        fprintf(stderr, "cmcp-inspect: handshake failed (%d)\n", rc);
-        exit_code = 1;
-        goto cleanup;
-    }
 
     if (!json_mode) {
         const char *sn = cmcp_client_server_name(cli);
@@ -369,14 +305,5 @@ int main(int argc, char **argv) {
 
 cleanup:
     cmcp_client_free(cli);
-    cmcp_transport_close(t);
-
-    /* If the child is still alive (stdin closed should EOF it), wait
-     * briefly; SIGTERM as a fallback so we never leak a daemon. */
-    int status = 0;
-    if (waitpid(pid, &status, WNOHANG) == 0) {
-        kill(pid, SIGTERM);
-        waitpid(pid, &status, 0);
-    }
     return exit_code;
 }

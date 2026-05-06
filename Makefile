@@ -14,7 +14,7 @@ LDLIBS  ?= $(CURL_LIBS) -lpthread
 CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c \
                      src/transport_stdio.c src/transport_http.c
 SERVER_CANDIDATES := src/server.c src/notif.c
-CLIENT_CANDIDATES := src/client.c
+CLIENT_CANDIDATES := src/client.c src/session.c
 
 CORE_SRC   := $(wildcard $(CORE_CANDIDATES))
 SERVER_SRC := $(wildcard $(SERVER_CANDIDATES))

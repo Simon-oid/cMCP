@@ -39,7 +39,11 @@ struct cmcp_transport {
 
     /* Tear down the transport: close any owned file descriptors,
      * release the impl state, free `t` itself. Safe to call with
-     * NULL. After close, t is invalid. */
+     * NULL. After close, t is invalid.
+     *
+     * close_fn must NOT be called while another thread is inside
+     * read_fn. Upper layers that run a reader thread should signal
+     * the reader to exit (e.g. pthread_kill) and join before close. */
     void (*close_fn)(cmcp_transport_t *t);
 
     void *impl;
