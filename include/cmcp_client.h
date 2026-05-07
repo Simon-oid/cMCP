@@ -143,6 +143,43 @@ cmcp_json_t *cmcp_sampling_text_result(const char *text,
                                         const char *stop_reason);
 
 /* ====================================================================== */
+/* Roots (host → server filesystem scoping)                                 */
+/* ====================================================================== */
+
+/* Roots tell servers which paths the host considers in-scope. A
+ * filesystem-shaped server (or any server that operates on URIs) is
+ * expected to read this list before doing anything that touches the
+ * outside world. Roots are advisory — the server is the one that
+ * enforces the boundary. cMCP just carries the list. */
+
+typedef struct {
+    const char *uri;        /* required, typically `file:///abs/path` */
+    const char *name;       /* optional human-readable display name */
+} cmcp_root_t;
+
+/* Replace the current roots set with a deep-copy of the caller's
+ * array. Pass roots=NULL,n=0 to clear. After this call, the client's
+ * `roots` capability is advertised (presence of the key signals
+ * support for `roots/list`); if you also set
+ * `caps.roots_list_changed = 1` via cmcp_client_set_capabilities,
+ * `listChanged` is added.
+ *
+ * Safe to call before OR after handshake. Calling after handshake
+ * does NOT re-negotiate caps, but the new list takes effect
+ * immediately for subsequent server `roots/list` requests; pair with
+ * cmcp_client_notify_roots_changed if your server cares.
+ *
+ * Returns CMCP_OK / CMCP_EINVAL / CMCP_ENOMEM. */
+int cmcp_client_set_roots(cmcp_client_t *c,
+                           const cmcp_root_t *roots, size_t n);
+
+/* Emit `notifications/roots/list_changed`. Requires
+ * caps.roots_list_changed = 1 (CMCP_EPROTOCOL otherwise). Caller is
+ * responsible for the order: typically you set the new roots first,
+ * then call this so the server's re-list sees the new state. */
+int cmcp_client_notify_roots_changed(cmcp_client_t *c);
+
+/* ====================================================================== */
 /* Server identity (post-handshake)                                        */
 /* ====================================================================== */
 

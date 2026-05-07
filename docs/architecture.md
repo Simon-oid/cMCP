@@ -550,6 +550,51 @@ If only the cap is set, sampling requests get `-32601` — server
 sent something we said we'd handle, but we forgot to wire it.
 Default-deny in both directions.
 
+## Roots (host → server filesystem scoping)
+
+Roots tell servers which paths or URIs the host considers in-scope.
+A filesystem-shaped server reads this list before doing anything that
+touches the outside world. cMCP carries the list; the server is the
+one that enforces the boundary.
+
+API:
+
+- `cmcp_client_set_roots(c, roots, n)` — declarative. Library deep-
+  copies. Calling with `(NULL, 0)` is "I support roots, the list is
+  empty"; that's distinct from never calling, which means "I don't
+  do roots at all."
+- `cmcp_client_notify_roots_changed(c)` — emit
+  `notifications/roots/list_changed`. Cap-gated:
+  `caps.roots_list_changed = 1` required.
+
+Symmetric to sampling, this is one of two server-initiated *requests*
+the client knows how to answer (`sampling/createMessage` is the
+other). The reader thread catches `roots/list` and replies with the
+stored list — no host callback runs, the data is the data.
+
+### Capability auto-advertise
+
+`roots: {}` is added to the `initialize` capabilities object whenever
+`cmcp_client_set_roots` was ever called, even with `n=0`. The cap
+presence is the opt-in; the empty list is a valid state. If
+`caps.roots_list_changed = 1` was also set, `listChanged: true`
+appears under `roots`. This mirrors the server's auto-advertise rule
+for tools/resources/prompts: caller behavior implies the cap.
+
+Default-deny: if the host never called `set_roots`, a server-sent
+`roots/list` request gets `-32601` and the cap isn't advertised
+either, so a well-behaved server shouldn't be asking in the first
+place.
+
+### Concurrency
+
+`cmcp_client_set_roots` is safe to call before or after handshake,
+and from any thread. A `roots_mu` mutex on the client guards the
+array pointer + contents; the reader thread takes a snapshot under
+the lock when building the `roots/list` response. Replacing the
+array atomically swaps the pointer and frees the old contents while
+the lock is held.
+
 ## What's deliberately *not* in v0.2
 
 - TLS. Deploy behind nginx/caddy. Hand-rolling TLS in C is a project

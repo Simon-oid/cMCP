@@ -139,6 +139,17 @@ struct cmcp_client {
     cmcp_sampling_handler_fn    sampling_fn;
     void                       *sampling_ud;
 
+    /* Roots: declarative list the reader replies with on
+     * `roots/list`. roots_mu guards both the array pointer and its
+     * contents; the reader takes a snapshot under the lock then
+     * builds the response. roots_set flips on the first set_roots
+     * call (even with n=0) — that's what triggers cap advertisement. */
+    pthread_mutex_t             roots_mu;
+    int                         roots_mu_init;
+    cmcp_root_t                *roots;          /* deep-copied; uri/name owned */
+    size_t                      n_roots;
+    int                         roots_set;
+
     /* Spawned child (cmcp_client_connect_stdio). */
     pid_t                       child_pid;
 };
@@ -186,15 +197,21 @@ static int send_message(cmcp_client_t *c, const cmcp_rpc_message_t *m) {
 /* Capability codecs (unchanged from Phase 1.4)                            */
 /* ====================================================================== */
 
-static cmcp_json_t *client_caps_to_json(const cmcp_client_capabilities_t *c) {
+/* Build the client's capabilities sub-object. The `roots` key is
+ * present whenever the host has called cmcp_client_set_roots (even
+ * with n=0) — that's the opt-in signal. `listChanged` is the
+ * separate flag in the cap struct. */
+static cmcp_json_t *client_caps_to_json(const cmcp_client_t *cli) {
+    const cmcp_client_capabilities_t *c = &cli->caps;
     cmcp_json_t *root = cmcp_json_new_object();
     if (!root) return NULL;
     if (c->sampling) {
         cmcp_json_object_set(root, "sampling", cmcp_json_new_object());
     }
-    if (c->roots_list_changed) {
+    if (cli->roots_set || c->roots_list_changed) {
         cmcp_json_t *roots = cmcp_json_new_object();
-        cmcp_json_object_set(roots, "listChanged", cmcp_json_new_bool(1));
+        if (c->roots_list_changed)
+            cmcp_json_object_set(roots, "listChanged", cmcp_json_new_bool(1));
         cmcp_json_object_set(root, "roots", roots);
     }
     return root;
@@ -259,6 +276,39 @@ static void reply_method_not_found(cmcp_client_t *c, const cmcp_id_t *id) {
                              NULL) != CMCP_OK) return;
     send_message(c, &err);
     cmcp_rpc_message_clear(&err);
+}
+
+/* Reply to `roots/list` with the host's current root set. The list
+ * is purely declarative (set via cmcp_client_set_roots); no host
+ * callback runs. If the host never called set_roots, fall through to
+ * the -32601 path — the cap wasn't advertised either, so the server
+ * shouldn't be asking. */
+static void handle_roots_list(cmcp_client_t *c,
+                                const cmcp_rpc_message_t *req) {
+    pthread_mutex_lock(&c->roots_mu);
+    if (!c->roots_set) {
+        pthread_mutex_unlock(&c->roots_mu);
+        reply_method_not_found(c, &req->id);
+        return;
+    }
+    cmcp_json_t *arr = cmcp_json_new_array();
+    for (size_t i = 0; i < c->n_roots; i++) {
+        cmcp_json_t *o = cmcp_json_new_object();
+        cmcp_json_object_set(o, "uri", cmcp_json_new_string(c->roots[i].uri));
+        if (c->roots[i].name)
+            cmcp_json_object_set(o, "name",
+                                  cmcp_json_new_string(c->roots[i].name));
+        cmcp_json_array_append(arr, o);
+    }
+    pthread_mutex_unlock(&c->roots_mu);
+
+    cmcp_json_t *result = cmcp_json_new_object();
+    cmcp_json_object_set(result, "roots", arr);
+
+    cmcp_rpc_message_t resp;
+    if (cmcp_rpc_make_response(&resp, &req->id, result) != CMCP_OK) return;
+    send_message(c, &resp);
+    cmcp_rpc_message_clear(&resp);
 }
 
 /* Dispatch `sampling/createMessage` to the host's handler. If no
@@ -351,6 +401,9 @@ static void *reader_main(void *arg) {
                 if (m->method &&
                     strcmp(m->method, "sampling/createMessage") == 0) {
                     handle_sampling_request(c, m);
+                } else if (m->method &&
+                           strcmp(m->method, "roots/list") == 0) {
+                    handle_roots_list(c, m);
                 } else {
                     reply_method_not_found(c, &m->id);
                 }
@@ -379,6 +432,11 @@ cmcp_client_t *cmcp_client_new(const char *name, const char *version) {
     c->version = xstrdup(version);
     c->pending = cmcp_rpc_pending_new();
     pthread_mutex_init(&c->list_mu, NULL);
+    if (pthread_mutex_init(&c->roots_mu, NULL) != 0) {
+        cmcp_client_free(c);
+        return NULL;
+    }
+    c->roots_mu_init = 1;
     if (!c->name || !c->version || !c->pending) {
         cmcp_client_free(c);
         return NULL;
@@ -446,6 +504,12 @@ void cmcp_client_free(cmcp_client_t *c) {
     free(c->server_version);
     cmcp_rpc_pending_free(c->pending);
     pthread_mutex_destroy(&c->list_mu);
+    for (size_t i = 0; i < c->n_roots; i++) {
+        free((char *)c->roots[i].uri);
+        free((char *)c->roots[i].name);
+    }
+    free(c->roots);
+    if (c->roots_mu_init) pthread_mutex_destroy(&c->roots_mu);
     free(c);
 }
 
@@ -469,6 +533,60 @@ void cmcp_client_set_sampling_handler(cmcp_client_t *c,
     if (!c) return;
     c->sampling_fn = fn;
     c->sampling_ud = userdata;
+}
+
+int cmcp_client_set_roots(cmcp_client_t *c,
+                           const cmcp_root_t *roots, size_t n) {
+    if (!c) return CMCP_EINVAL;
+    if (n > 0 && !roots) return CMCP_EINVAL;
+
+    /* Build the new array first so we don't lose the old one on
+     * partial allocation failure. */
+    cmcp_root_t *fresh = NULL;
+    if (n > 0) {
+        fresh = (cmcp_root_t *)calloc(n, sizeof *fresh);
+        if (!fresh) return CMCP_ENOMEM;
+        for (size_t i = 0; i < n; i++) {
+            if (!roots[i].uri) {
+                /* Roll back partial allocs. */
+                for (size_t j = 0; j < i; j++) {
+                    free((char *)fresh[j].uri);
+                    free((char *)fresh[j].name);
+                }
+                free(fresh);
+                return CMCP_EINVAL;
+            }
+            fresh[i].uri  = xstrdup(roots[i].uri);
+            fresh[i].name = roots[i].name ? xstrdup(roots[i].name) : NULL;
+            if (!fresh[i].uri || (roots[i].name && !fresh[i].name)) {
+                for (size_t j = 0; j <= i; j++) {
+                    free((char *)fresh[j].uri);
+                    free((char *)fresh[j].name);
+                }
+                free(fresh);
+                return CMCP_ENOMEM;
+            }
+        }
+    }
+
+    pthread_mutex_lock(&c->roots_mu);
+    /* Free old array. */
+    for (size_t i = 0; i < c->n_roots; i++) {
+        free((char *)c->roots[i].uri);
+        free((char *)c->roots[i].name);
+    }
+    free(c->roots);
+    c->roots     = fresh;
+    c->n_roots   = n;
+    c->roots_set = 1;
+    pthread_mutex_unlock(&c->roots_mu);
+    return CMCP_OK;
+}
+
+int cmcp_client_notify_roots_changed(cmcp_client_t *c) {
+    if (!c) return CMCP_EINVAL;
+    if (!c->caps.roots_list_changed) return CMCP_EPROTOCOL;
+    return cmcp_client_notify(c, "notifications/roots/list_changed", NULL);
 }
 
 cmcp_json_t *cmcp_sampling_text_result(const char *text,
@@ -610,7 +728,7 @@ static int do_initialize(cmcp_client_t *c) {
     cmcp_json_object_set(params, "protocolVersion",
                           cmcp_json_new_string(CMCP_PROTOCOL_VERSION));
     cmcp_json_object_set(params, "capabilities",
-                          client_caps_to_json(&c->caps));
+                          client_caps_to_json(c));
     cmcp_json_t *ci = cmcp_json_new_object();
     cmcp_json_object_set(ci, "name",    cmcp_json_new_string(c->name));
     cmcp_json_object_set(ci, "version", cmcp_json_new_string(c->version));
