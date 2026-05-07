@@ -11,6 +11,15 @@
  *                 One-line summary: db path, chunk count, file count,
  *                 embedding dim.
  *
+ * Plus one resource:
+ *
+ *   crag://stats  Same diagnostics as the crag_stats tool, but exposed
+ *                 as a resource so a host can pin it as ambient
+ *                 context rather than calling a tool. The point isn't
+ *                 to duplicate functionality — it's to exercise the
+ *                 resources/list and /read surface end-to-end against
+ *                 a real server.
+ *
  * Indexing is deliberately NOT exposed as a tool. Indexing is a heavy,
  * stateful, admin-plane operation; an LLM has no business triggering
  * it. Run `crag index <dir>` from the cRAG CLI instead. (See
@@ -197,6 +206,32 @@ static int crag_stats_handler(const cmcp_json_t *args, void *userdata,
 }
 
 /* ====================================================================== */
+/* crag://stats — resource form of crag_stats                              */
+/* ====================================================================== */
+
+static int crag_stats_resource(const char *uri, void *userdata,
+                                cmcp_json_t **out_contents, int *out_is_error) {
+    crag_mcp_ctx_t *ctx = (crag_mcp_ctx_t *)userdata;
+
+    crag_store_stats_t stats = {0};
+    if (store_stats(&ctx->store, &stats) != 0) {
+        *out_is_error = 1;
+        *out_contents = cmcp_resource_text_contents(uri, "text/plain",
+                                                     "stats query failed");
+        return CMCP_OK;
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof buf,
+              "db:     %s\nchunks: %d\nfiles:  %d\ndim:    %d",
+              ctx->db_path, stats.chunks, stats.files, stats.dim);
+
+    *out_is_error = 0;
+    *out_contents = cmcp_resource_text_contents(uri, "text/plain", buf);
+    return *out_contents ? CMCP_OK : CMCP_ENOMEM;
+}
+
+/* ====================================================================== */
 /* main                                                                    */
 /* ====================================================================== */
 
@@ -280,6 +315,22 @@ int main(int argc, char **argv) {
     });
     if (rc != CMCP_OK) {
         fprintf(stderr, "crag-mcp: register crag_stats failed (%d)\n", rc);
+        cmcp_server_free(s);
+        embed_backend_free(ctx.embed);
+        store_close(&ctx.store);
+        return 1;
+    }
+
+    rc = cmcp_server_add_resource(s, &(cmcp_resource_t){
+        .uri         = "crag://stats",
+        .name        = "cRAG diagnostics",
+        .description = "DB path, chunk count, file count, embedding dim.",
+        .mime_type   = "text/plain",
+        .read        = crag_stats_resource,
+        .userdata    = &ctx,
+    });
+    if (rc != CMCP_OK) {
+        fprintf(stderr, "crag-mcp: register crag://stats failed (%d)\n", rc);
         cmcp_server_free(s);
         embed_backend_free(ctx.embed);
         store_close(&ctx.store);

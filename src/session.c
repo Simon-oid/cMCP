@@ -260,3 +260,227 @@ int cmcp_session_tool_call(cmcp_session_t *s,
 
     return cmcp_client_request(e->client, "tools/call", params, out_response);
 }
+
+/* ====================================================================== */
+/* Aggregated resources/list                                               */
+/* ====================================================================== */
+
+static void absorb_one_resources_list(const char *server_name,
+                                       const cmcp_rpc_message_t *resp,
+                                       cmcp_session_resource_t **out_arr,
+                                       size_t *out_len, size_t *out_cap) {
+    if (!resp || !resp->result || resp->result->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *res = cmcp_json_object_get(resp->result, "resources");
+    if (!res || res->type != CMCP_JSON_ARRAY) return;
+
+    for (size_t i = 0; i < res->arr.len; i++) {
+        const cmcp_json_t *r = res->arr.items[i];
+        if (!r || r->type != CMCP_JSON_OBJECT) continue;
+        const cmcp_json_t *uri  = cmcp_json_object_get(r, "uri");
+        const cmcp_json_t *name = cmcp_json_object_get(r, "name");
+        if (!uri  || uri->type  != CMCP_JSON_STRING) continue;
+        if (!name || name->type != CMCP_JSON_STRING) continue;
+        const cmcp_json_t *desc = cmcp_json_object_get(r, "description");
+        const cmcp_json_t *mime = cmcp_json_object_get(r, "mimeType");
+
+        if (*out_len == *out_cap) {
+            size_t new_cap = *out_cap ? *out_cap * 2 : 8;
+            cmcp_session_resource_t *na = (cmcp_session_resource_t *)realloc(
+                *out_arr, new_cap * sizeof *na);
+            if (!na) return;
+            *out_arr = na;
+            *out_cap = new_cap;
+        }
+        cmcp_session_resource_t *e = &(*out_arr)[*out_len];
+        memset(e, 0, sizeof *e);
+        e->server      = xstrdup(server_name);
+        e->uri         = xstrdup(uri->str.s);
+        e->name        = xstrdup(name->str.s);
+        e->description = (desc && desc->type == CMCP_JSON_STRING)
+                            ? xstrdup(desc->str.s) : NULL;
+        e->mime_type   = (mime && mime->type == CMCP_JSON_STRING)
+                            ? xstrdup(mime->str.s) : NULL;
+        if (!e->server || !e->uri || !e->name) {
+            free(e->server); free(e->uri); free(e->name);
+            free(e->description); free(e->mime_type);
+            continue;
+        }
+        (*out_len)++;
+    }
+}
+
+int cmcp_session_resources_list(cmcp_session_t *s,
+                                 cmcp_session_resource_t **out_resources,
+                                 size_t *out_n) {
+    if (!s || !out_resources || !out_n) return CMCP_EINVAL;
+    *out_resources = NULL;
+    *out_n = 0;
+    if (s->len == 0) return CMCP_OK;
+
+    long long *ids = (long long *)calloc(s->len, sizeof *ids);
+    int       *ok  = (int *)calloc(s->len, sizeof *ok);
+    if (!ids || !ok) { free(ids); free(ok); return CMCP_ENOMEM; }
+
+    for (size_t i = 0; i < s->len; i++) {
+        int rc = cmcp_client_call_async(s->entries[i].client,
+                                          "resources/list", NULL, &ids[i]);
+        ok[i] = (rc == CMCP_OK);
+    }
+
+    cmcp_session_resource_t *arr = NULL;
+    size_t arr_len = 0, arr_cap = 0;
+    for (size_t i = 0; i < s->len; i++) {
+        if (!ok[i]) continue;
+        cmcp_rpc_message_t resp;
+        cmcp_rpc_message_init(&resp);
+        int wr = cmcp_client_wait(s->entries[i].client, ids[i], &resp);
+        if (wr == CMCP_OK && !resp.error) {
+            absorb_one_resources_list(s->entries[i].server_name, &resp,
+                                       &arr, &arr_len, &arr_cap);
+        }
+        cmcp_rpc_message_clear(&resp);
+    }
+
+    free(ids); free(ok);
+    *out_resources = arr;
+    *out_n = arr_len;
+    return CMCP_OK;
+}
+
+void cmcp_session_resources_free(cmcp_session_resource_t *r, size_t n) {
+    if (!r) return;
+    for (size_t i = 0; i < n; i++) {
+        free(r[i].server);
+        free(r[i].uri);
+        free(r[i].name);
+        free(r[i].description);
+        free(r[i].mime_type);
+    }
+    free(r);
+}
+
+int cmcp_session_resource_read(cmcp_session_t *s,
+                                const char *server,
+                                const char *uri,
+                                cmcp_rpc_message_t *out_response) {
+    if (!s || !server || !uri || !out_response) return CMCP_EINVAL;
+    entry_t *e = find_by_name(s, server);
+    if (!e) return CMCP_ENOTFOUND;
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "uri", cmcp_json_new_string(uri));
+    return cmcp_client_request(e->client, "resources/read", params, out_response);
+}
+
+/* ====================================================================== */
+/* Aggregated prompts/list                                                 */
+/* ====================================================================== */
+
+static void absorb_one_prompts_list(const char *server_name,
+                                     const cmcp_rpc_message_t *resp,
+                                     cmcp_session_prompt_t **out_arr,
+                                     size_t *out_len, size_t *out_cap) {
+    if (!resp || !resp->result || resp->result->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *prs = cmcp_json_object_get(resp->result, "prompts");
+    if (!prs || prs->type != CMCP_JSON_ARRAY) return;
+
+    for (size_t i = 0; i < prs->arr.len; i++) {
+        const cmcp_json_t *p = prs->arr.items[i];
+        if (!p || p->type != CMCP_JSON_OBJECT) continue;
+        const cmcp_json_t *name = cmcp_json_object_get(p, "name");
+        if (!name || name->type != CMCP_JSON_STRING) continue;
+        const cmcp_json_t *desc = cmcp_json_object_get(p, "description");
+        const cmcp_json_t *args = cmcp_json_object_get(p, "arguments");
+
+        if (*out_len == *out_cap) {
+            size_t new_cap = *out_cap ? *out_cap * 2 : 8;
+            cmcp_session_prompt_t *na = (cmcp_session_prompt_t *)realloc(
+                *out_arr, new_cap * sizeof *na);
+            if (!na) return;
+            *out_arr = na;
+            *out_cap = new_cap;
+        }
+        cmcp_session_prompt_t *e = &(*out_arr)[*out_len];
+        memset(e, 0, sizeof *e);
+        e->server      = xstrdup(server_name);
+        e->name        = xstrdup(name->str.s);
+        e->description = (desc && desc->type == CMCP_JSON_STRING)
+                            ? xstrdup(desc->str.s) : NULL;
+        e->arguments   = args ? cmcp_json_clone(args) : NULL;
+        if (!e->server || !e->name) {
+            free(e->server); free(e->name);
+            free(e->description); cmcp_json_free(e->arguments);
+            continue;
+        }
+        (*out_len)++;
+    }
+}
+
+int cmcp_session_prompts_list(cmcp_session_t *s,
+                               cmcp_session_prompt_t **out_prompts,
+                               size_t *out_n) {
+    if (!s || !out_prompts || !out_n) return CMCP_EINVAL;
+    *out_prompts = NULL;
+    *out_n = 0;
+    if (s->len == 0) return CMCP_OK;
+
+    long long *ids = (long long *)calloc(s->len, sizeof *ids);
+    int       *ok  = (int *)calloc(s->len, sizeof *ok);
+    if (!ids || !ok) { free(ids); free(ok); return CMCP_ENOMEM; }
+
+    for (size_t i = 0; i < s->len; i++) {
+        int rc = cmcp_client_call_async(s->entries[i].client,
+                                          "prompts/list", NULL, &ids[i]);
+        ok[i] = (rc == CMCP_OK);
+    }
+
+    cmcp_session_prompt_t *arr = NULL;
+    size_t arr_len = 0, arr_cap = 0;
+    for (size_t i = 0; i < s->len; i++) {
+        if (!ok[i]) continue;
+        cmcp_rpc_message_t resp;
+        cmcp_rpc_message_init(&resp);
+        int wr = cmcp_client_wait(s->entries[i].client, ids[i], &resp);
+        if (wr == CMCP_OK && !resp.error) {
+            absorb_one_prompts_list(s->entries[i].server_name, &resp,
+                                     &arr, &arr_len, &arr_cap);
+        }
+        cmcp_rpc_message_clear(&resp);
+    }
+
+    free(ids); free(ok);
+    *out_prompts = arr;
+    *out_n = arr_len;
+    return CMCP_OK;
+}
+
+void cmcp_session_prompts_free(cmcp_session_prompt_t *p, size_t n) {
+    if (!p) return;
+    for (size_t i = 0; i < n; i++) {
+        free(p[i].server);
+        free(p[i].name);
+        free(p[i].description);
+        cmcp_json_free(p[i].arguments);
+    }
+    free(p);
+}
+
+int cmcp_session_prompt_get(cmcp_session_t *s,
+                             const char *server,
+                             const char *name,
+                             cmcp_json_t *args,
+                             cmcp_rpc_message_t *out_response) {
+    if (!s || !server || !name || !out_response) {
+        cmcp_json_free(args);
+        return CMCP_EINVAL;
+    }
+    entry_t *e = find_by_name(s, server);
+    if (!e) { cmcp_json_free(args); return CMCP_ENOTFOUND; }
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) { cmcp_json_free(args); return CMCP_ENOMEM; }
+    cmcp_json_object_set(params, "name", cmcp_json_new_string(name));
+    if (args) cmcp_json_object_set(params, "arguments", args);
+    return cmcp_client_request(e->client, "prompts/get", params, out_response);
+}

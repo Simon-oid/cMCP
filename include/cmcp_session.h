@@ -69,4 +69,57 @@ cmcp_client_t *cmcp_session_get(cmcp_session_t *s, const char *server_name);
 
 size_t cmcp_session_count(const cmcp_session_t *s);
 
+/* ====================================================================== */
+/* Aggregated resources                                                    */
+/* ====================================================================== */
+
+/* URIs may already contain colons (scheme separator) so we don't fold
+ * server-name into them; resource_read takes an explicit (server, uri)
+ * pair instead of a single qualified string. */
+
+typedef struct {
+    char *server;        /* host-supplied server name */
+    char *uri;           /* resource URI as the server published it */
+    char *name;          /* display name */
+    char *description;   /* may be NULL */
+    char *mime_type;     /* may be NULL */
+} cmcp_session_resource_t;
+
+int cmcp_session_resources_list(cmcp_session_t *s,
+                                 cmcp_session_resource_t **out_resources,
+                                 size_t *out_n);
+
+void cmcp_session_resources_free(cmcp_session_resource_t *r, size_t n);
+
+/* Read one resource. server names which client to route to; uri is sent
+ * as params.uri verbatim. On CMCP_OK out_response owns its fields. */
+int cmcp_session_resource_read(cmcp_session_t *s,
+                                const char *server,
+                                const char *uri,
+                                cmcp_rpc_message_t *out_response);
+
+/* ====================================================================== */
+/* Aggregated prompts                                                      */
+/* ====================================================================== */
+
+typedef struct {
+    char        *server;       /* host-supplied server name */
+    char        *name;         /* prompt name as the server published it */
+    char        *description;  /* may be NULL */
+    cmcp_json_t *arguments;    /* deep-copy of the prompt's argument array; may be NULL */
+} cmcp_session_prompt_t;
+
+int cmcp_session_prompts_list(cmcp_session_t *s,
+                               cmcp_session_prompt_t **out_prompts,
+                               size_t *out_n);
+
+void cmcp_session_prompts_free(cmcp_session_prompt_t *p, size_t n);
+
+/* Get one prompt. args is consumed (may be NULL). */
+int cmcp_session_prompt_get(cmcp_session_t *s,
+                             const char *server,
+                             const char *name,
+                             cmcp_json_t *args,
+                             cmcp_rpc_message_t *out_response);
+
 #endif

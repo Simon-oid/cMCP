@@ -226,11 +226,32 @@ that block on a syscall don't.
 
 ### server.c
 
-Tool registry → dispatch → run loop. The handshake (`initialize`,
-`notifications/initialized`), `tools/list`, and `tools/call` are
-built in. Other request methods get `-32601`. Operate-class methods
-sent before initialize get `-32600`. Schema validation lives between
-the dispatch and the handler, so handlers see only well-formed input.
+Tool / resource / prompt registries → dispatch → run loop. The
+handshake (`initialize`, `notifications/initialized`) plus the full
+primitive surface is built in:
+
+- `tools/list`, `tools/call`
+- `resources/list`, `resources/read`,
+  `resources/subscribe`, `resources/unsubscribe`
+- `prompts/list`, `prompts/get`
+
+Other request methods get `-32601`. Operate-class methods sent before
+initialize get `-32600`. Tool input schemas are validated between
+dispatch and handler so handlers only see well-formed input. Prompt
+arguments use a flat `[{name, description?, required?}]` descriptor
+list (per spec — not full JSON Schema), so the server only enforces
+*required-arg present*; richer validation is the prompt handler's
+job.
+
+Capabilities (`tools`, `resources`, `prompts`) are auto-advertised in
+the `initialize` result whenever ≥1 of the corresponding kind is
+registered. Sub-capabilities (`subscribe`, `listChanged`) stay
+opt-in via `cmcp_server_set_capabilities`.
+
+`resources/subscribe` records the URI in a per-server set;
+`resources/unsubscribe` removes it. Notification *emit* against that
+set lands in Phase 2.4 — the storage is here so subscribe/unsubscribe
+are real round-trips today.
 
 ### client.c + session.c
 
@@ -241,9 +262,18 @@ notifications to a user callback, and replies `-32601` to unsolicited
 server requests (we don't support sampling/roots host-side yet).
 
 `session.c` is the aggregator a multi-server host uses: add N clients
-under host-supplied names, fan-out async + fan-in sequentially on
-`tools/list`, parse `<server>:<tool>` qualified names on `tools/call`
-and route to the right client.
+under host-supplied names, then per primitive:
+
+- **tools** — `cmcp_session_tools_list` fans out async + fans in;
+  `cmcp_session_tool_call` parses `<server>:<tool>` qualified names
+  and routes.
+- **resources** — `cmcp_session_resources_list` aggregates;
+  `cmcp_session_resource_read` takes an explicit `(server, uri)`
+  pair. We do *not* fold the server into the URI: URIs already
+  contain colons (scheme separator), so a single qualified string
+  would be ambiguous.
+- **prompts** — symmetric: `cmcp_session_prompts_list` aggregates,
+  `cmcp_session_prompt_get` takes `(server, name, args)`.
 
 ## Threading model
 

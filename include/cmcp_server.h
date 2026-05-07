@@ -81,6 +81,93 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool);
 cmcp_json_t *cmcp_tool_text_content(const char *text);
 
 /* ====================================================================== */
+/* Resource registry                                                       */
+/* ====================================================================== */
+
+/* Handler for a `resources/read` invocation.
+ *
+ *   `uri`           The URI the caller asked for. Always equals the
+ *                   resource's registered URI (the dispatcher matches
+ *                   before invoking). Borrowed.
+ *   `userdata`      Whatever was passed at registration time.
+ *   `out_contents`  OUT. Owned cmcp_json_t array of content items, e.g.
+ *                   [{"uri":..., "mimeType":..., "text":...}]. The
+ *                   library takes ownership on success. NULL is treated
+ *                   as an empty array.
+ *   `out_is_error`  OUT. Set to non-zero to mark this as a resource-
+ *                   level error (analogous to tool-level error). The
+ *                   wire still carries `contents`; clients render it
+ *                   as the error message.
+ *
+ * Return CMCP_OK on success. Any non-zero return is treated as an
+ * INTERNAL_ERROR (-32603) and `out_*` values are ignored. */
+typedef int (*cmcp_resource_read_fn)(const char *uri,
+                                      void *userdata,
+                                      cmcp_json_t **out_contents,
+                                      int *out_is_error);
+
+/* Resource descriptor (caller-owned, copied by add_resource). */
+typedef struct {
+    const char            *uri;          /* required, unique per server */
+    const char            *name;         /* required, human display name */
+    const char            *description;  /* optional */
+    const char            *mime_type;    /* optional, e.g. "text/plain" */
+    cmcp_resource_read_fn  read;         /* required */
+    void                  *userdata;
+} cmcp_resource_t;
+
+/* Register a resource. Strings are deep-copied. Duplicate URIs rejected
+ * with CMCP_EPROTOCOL.
+ *
+ * MUST be called BEFORE cmcp_server_run(). */
+int cmcp_server_add_resource(cmcp_server_t *s, const cmcp_resource_t *r);
+
+/* Convenience: build a contents-array containing a single text item.
+ * mime_type may be NULL. Returns NULL on allocation failure. */
+cmcp_json_t *cmcp_resource_text_contents(const char *uri,
+                                          const char *mime_type,
+                                          const char *text);
+
+/* ====================================================================== */
+/* Prompt registry                                                         */
+/* ====================================================================== */
+
+/* Handler for a `prompts/get` invocation.
+ *
+ *   `arguments`    The parsed `params.arguments` object from the
+ *                  request. May be NULL. Borrowed.
+ *   `userdata`     Whatever was passed at registration time.
+ *   `out_messages` OUT. Owned cmcp_json_t array of message objects:
+ *                  [{"role":"user|assistant", "content":{...}}]. The
+ *                  library takes ownership on success. NULL is treated
+ *                  as an empty array.
+ *
+ * Return CMCP_OK on success. Any non-zero return is treated as an
+ * INTERNAL_ERROR (-32603). */
+typedef int (*cmcp_prompt_handler_fn)(const cmcp_json_t *arguments,
+                                       void *userdata,
+                                       cmcp_json_t **out_messages);
+
+/* Prompt descriptor (caller-owned, copied by add_prompt). */
+typedef struct {
+    const char             *name;         /* required, unique per server */
+    const char             *description;  /* optional */
+    /* JSON array text describing arguments, each: {name, description?,
+     * required?}. May be NULL. Server validates required fields are
+     * present at prompts/get time; full schema validation is the
+     * handler's responsibility. */
+    const char             *arguments;
+    cmcp_prompt_handler_fn  handler;      /* required */
+    void                   *userdata;
+} cmcp_prompt_t;
+
+int cmcp_server_add_prompt(cmcp_server_t *s, const cmcp_prompt_t *p);
+
+/* Convenience: build a single-element messages array containing one
+ * text-content message. role is "user" or "assistant". */
+cmcp_json_t *cmcp_prompt_text_messages(const char *role, const char *text);
+
+/* ====================================================================== */
 /* Run loop                                                                */
 /* ====================================================================== */
 

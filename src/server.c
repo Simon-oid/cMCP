@@ -21,7 +21,7 @@ typedef enum {
 } server_state_t;
 
 /* ====================================================================== */
-/* Internal tool entry                                                     */
+/* Internal registry entries                                               */
 /* ====================================================================== */
 
 typedef struct {
@@ -31,6 +31,23 @@ typedef struct {
     cmcp_tool_handler_fn  handler;
     void                 *userdata;
 } server_tool_t;
+
+typedef struct {
+    char                  *uri;
+    char                  *name;
+    char                  *description;
+    char                  *mime_type;
+    cmcp_resource_read_fn  read;
+    void                  *userdata;
+} server_resource_t;
+
+typedef struct {
+    char                   *name;
+    char                   *description;
+    cmcp_json_t            *arguments;     /* JSON array, may be NULL */
+    cmcp_prompt_handler_fn  handler;
+    void                   *userdata;
+} server_prompt_t;
 
 struct cmcp_server {
     char                       *name;
@@ -43,6 +60,23 @@ struct cmcp_server {
     server_tool_t              *tools;
     size_t                      n_tools;
     size_t                      cap_tools;
+
+    /* Resource registry — same shape. */
+    server_resource_t          *resources;
+    size_t                      n_resources;
+    size_t                      cap_resources;
+
+    /* Prompt registry — same shape. */
+    server_prompt_t            *prompts;
+    size_t                      n_prompts;
+    size_t                      cap_prompts;
+
+    /* Resource subscriptions: list of URIs the (single) peer subscribed
+     * to. Notification emit lands in Phase 2.4; we already store the
+     * set so subscribe/unsubscribe are real round-trips. */
+    char                      **sub_uris;
+    size_t                      n_subs;
+    size_t                      cap_subs;
 
     /* Negotiated peer info, set on initialize. */
     char                        *peer_name;
@@ -83,6 +117,19 @@ static void tool_clear(server_tool_t *t) {
     cmcp_json_free(t->input_schema);
 }
 
+static void resource_clear(server_resource_t *r) {
+    free(r->uri);
+    free(r->name);
+    free(r->description);
+    free(r->mime_type);
+}
+
+static void prompt_clear(server_prompt_t *p) {
+    free(p->name);
+    free(p->description);
+    cmcp_json_free(p->arguments);
+}
+
 void cmcp_server_free(cmcp_server_t *s) {
     if (!s) return;
     free(s->name);
@@ -91,6 +138,12 @@ void cmcp_server_free(cmcp_server_t *s) {
     free(s->peer_version);
     for (size_t i = 0; i < s->n_tools; i++) tool_clear(&s->tools[i]);
     free(s->tools);
+    for (size_t i = 0; i < s->n_resources; i++) resource_clear(&s->resources[i]);
+    free(s->resources);
+    for (size_t i = 0; i < s->n_prompts; i++) prompt_clear(&s->prompts[i]);
+    free(s->prompts);
+    for (size_t i = 0; i < s->n_subs; i++) free(s->sub_uris[i]);
+    free(s->sub_uris);
     free(s);
 }
 
@@ -174,6 +227,135 @@ cmcp_json_t *cmcp_tool_text_content(const char *text) {
 }
 
 /* ====================================================================== */
+/* Resource registry                                                       */
+/* ====================================================================== */
+
+static server_resource_t *resource_find(cmcp_server_t *s, const char *uri) {
+    if (!uri) return NULL;
+    for (size_t i = 0; i < s->n_resources; i++) {
+        if (strcmp(s->resources[i].uri, uri) == 0) return &s->resources[i];
+    }
+    return NULL;
+}
+
+int cmcp_server_add_resource(cmcp_server_t *s, const cmcp_resource_t *r) {
+    if (!s || !r || !r->uri || !r->name || !r->read) return CMCP_EINVAL;
+    if (resource_find(s, r->uri)) return CMCP_EPROTOCOL;
+
+    if (s->n_resources == s->cap_resources) {
+        size_t newcap = s->cap_resources ? s->cap_resources * 2 : 4;
+        server_resource_t *nr = (server_resource_t *)realloc(
+            s->resources, newcap * sizeof *nr);
+        if (!nr) return CMCP_ENOMEM;
+        s->resources = nr;
+        s->cap_resources = newcap;
+    }
+
+    server_resource_t *e = &s->resources[s->n_resources];
+    memset(e, 0, sizeof *e);
+    e->uri         = xstrdup(r->uri);
+    e->name        = xstrdup(r->name);
+    e->description = r->description ? xstrdup(r->description) : NULL;
+    e->mime_type   = r->mime_type ? xstrdup(r->mime_type) : NULL;
+    e->read        = r->read;
+    e->userdata    = r->userdata;
+    if (!e->uri || !e->name ||
+        (r->description && !e->description) ||
+        (r->mime_type && !e->mime_type)) {
+        resource_clear(e);
+        memset(e, 0, sizeof *e);
+        return CMCP_ENOMEM;
+    }
+    s->n_resources++;
+    return CMCP_OK;
+}
+
+cmcp_json_t *cmcp_resource_text_contents(const char *uri,
+                                          const char *mime_type,
+                                          const char *text) {
+    if (!uri || !text) return NULL;
+    cmcp_json_t *arr = cmcp_json_new_array();
+    if (!arr) return NULL;
+    cmcp_json_t *item = cmcp_json_new_object();
+    if (!item) { cmcp_json_free(arr); return NULL; }
+    cmcp_json_object_set(item, "uri", cmcp_json_new_string(uri));
+    if (mime_type)
+        cmcp_json_object_set(item, "mimeType", cmcp_json_new_string(mime_type));
+    cmcp_json_object_set(item, "text", cmcp_json_new_string(text));
+    cmcp_json_array_append(arr, item);
+    return arr;
+}
+
+/* ====================================================================== */
+/* Prompt registry                                                         */
+/* ====================================================================== */
+
+static server_prompt_t *prompt_find(cmcp_server_t *s, const char *name) {
+    if (!name) return NULL;
+    for (size_t i = 0; i < s->n_prompts; i++) {
+        if (strcmp(s->prompts[i].name, name) == 0) return &s->prompts[i];
+    }
+    return NULL;
+}
+
+int cmcp_server_add_prompt(cmcp_server_t *s, const cmcp_prompt_t *p) {
+    if (!s || !p || !p->name || !p->handler) return CMCP_EINVAL;
+    if (prompt_find(s, p->name)) return CMCP_EPROTOCOL;
+
+    cmcp_json_t *args = NULL;
+    if (p->arguments) {
+        args = cmcp_json_parse(p->arguments, strlen(p->arguments));
+        if (!args) return CMCP_EPARSE;
+        if (args->type != CMCP_JSON_ARRAY) {
+            cmcp_json_free(args);
+            return CMCP_EPARSE;
+        }
+    }
+
+    if (s->n_prompts == s->cap_prompts) {
+        size_t newcap = s->cap_prompts ? s->cap_prompts * 2 : 4;
+        server_prompt_t *np = (server_prompt_t *)realloc(
+            s->prompts, newcap * sizeof *np);
+        if (!np) { cmcp_json_free(args); return CMCP_ENOMEM; }
+        s->prompts = np;
+        s->cap_prompts = newcap;
+    }
+
+    server_prompt_t *e = &s->prompts[s->n_prompts];
+    memset(e, 0, sizeof *e);
+    e->name        = xstrdup(p->name);
+    e->description = p->description ? xstrdup(p->description) : NULL;
+    e->arguments   = args;
+    e->handler     = p->handler;
+    e->userdata    = p->userdata;
+    if (!e->name || (p->description && !e->description)) {
+        prompt_clear(e);
+        memset(e, 0, sizeof *e);
+        return CMCP_ENOMEM;
+    }
+    s->n_prompts++;
+    return CMCP_OK;
+}
+
+cmcp_json_t *cmcp_prompt_text_messages(const char *role, const char *text) {
+    if (!role || !text) return NULL;
+    cmcp_json_t *arr = cmcp_json_new_array();
+    if (!arr) return NULL;
+    cmcp_json_t *msg = cmcp_json_new_object();
+    cmcp_json_t *content = cmcp_json_new_object();
+    if (!msg || !content) {
+        cmcp_json_free(arr); cmcp_json_free(msg); cmcp_json_free(content);
+        return NULL;
+    }
+    cmcp_json_object_set(content, "type", cmcp_json_new_string("text"));
+    cmcp_json_object_set(content, "text", cmcp_json_new_string(text));
+    cmcp_json_object_set(msg, "role", cmcp_json_new_string(role));
+    cmcp_json_object_set(msg, "content", content);
+    cmcp_json_array_append(arr, msg);
+    return arr;
+}
+
+/* ====================================================================== */
 /* JSON helpers for capability ↔ object encoding                           */
 /* ====================================================================== */
 
@@ -193,7 +375,7 @@ static cmcp_json_t *server_caps_to_json(const cmcp_server_t *s) {
             cmcp_json_object_set(tools, "listChanged", cmcp_json_new_bool(1));
         cmcp_json_object_set(root, "tools", tools);
     }
-    if (c->resources_list_changed || c->resources_subscribe) {
+    if (s->n_resources > 0 || c->resources_list_changed || c->resources_subscribe) {
         cmcp_json_t *res = cmcp_json_new_object();
         if (c->resources_subscribe)
             cmcp_json_object_set(res, "subscribe", cmcp_json_new_bool(1));
@@ -201,9 +383,10 @@ static cmcp_json_t *server_caps_to_json(const cmcp_server_t *s) {
             cmcp_json_object_set(res, "listChanged", cmcp_json_new_bool(1));
         cmcp_json_object_set(root, "resources", res);
     }
-    if (c->prompts_list_changed) {
+    if (s->n_prompts > 0 || c->prompts_list_changed) {
         cmcp_json_t *pr = cmcp_json_new_object();
-        cmcp_json_object_set(pr, "listChanged", cmcp_json_new_bool(1));
+        if (c->prompts_list_changed)
+            cmcp_json_object_set(pr, "listChanged", cmcp_json_new_bool(1));
         cmcp_json_object_set(root, "prompts", pr);
     }
     if (c->logging) cmcp_json_object_set(root, "logging", cmcp_json_new_object());
@@ -412,6 +595,255 @@ static void handle_tools_call(cmcp_server_t *s,
 }
 
 /* ====================================================================== */
+/* resources/list                                                          */
+/* ====================================================================== */
+
+static cmcp_json_t *resource_to_descriptor(const server_resource_t *r) {
+    cmcp_json_t *o = cmcp_json_new_object();
+    if (!o) return NULL;
+    cmcp_json_object_set(o, "uri",  cmcp_json_new_string(r->uri));
+    cmcp_json_object_set(o, "name", cmcp_json_new_string(r->name));
+    if (r->description)
+        cmcp_json_object_set(o, "description",
+                              cmcp_json_new_string(r->description));
+    if (r->mime_type)
+        cmcp_json_object_set(o, "mimeType",
+                              cmcp_json_new_string(r->mime_type));
+    return o;
+}
+
+static void handle_resources_list(cmcp_server_t *s,
+                                   const cmcp_rpc_message_t *req,
+                                   cmcp_rpc_message_t *resp) {
+    cmcp_json_t *result = cmcp_json_new_object();
+    cmcp_json_t *arr    = cmcp_json_new_array();
+    for (size_t i = 0; i < s->n_resources; i++) {
+        cmcp_json_array_append(arr, resource_to_descriptor(&s->resources[i]));
+    }
+    cmcp_json_object_set(result, "resources", arr);
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
+/* resources/read                                                          */
+/* ====================================================================== */
+
+static void handle_resources_read(cmcp_server_t *s,
+                                   const cmcp_rpc_message_t *req,
+                                   cmcp_rpc_message_t *resp) {
+    if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
+        reply_invalid_params(resp, &req->id,
+                              "resources/read requires params object", NULL);
+        return;
+    }
+    const cmcp_json_t *uri_v = cmcp_json_object_get(req->params, "uri");
+    if (!uri_v || uri_v->type != CMCP_JSON_STRING) {
+        reply_invalid_params(resp, &req->id,
+                              "resources/read requires `uri` string", NULL);
+        return;
+    }
+    server_resource_t *r = resource_find(s, uri_v->str.s);
+    if (!r) {
+        cmcp_json_t *data = cmcp_json_new_object();
+        cmcp_json_object_set(data, "uri", cmcp_json_new_string(uri_v->str.s));
+        reply_invalid_params(resp, &req->id, "Unknown resource", data);
+        return;
+    }
+
+    cmcp_json_t *contents = NULL;
+    int is_error = 0;
+    int rc = r->read(r->uri, r->userdata, &contents, &is_error);
+    if (rc != CMCP_OK) {
+        cmcp_json_free(contents);
+        cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                             "Resource read handler failed", NULL);
+        return;
+    }
+
+    cmcp_json_t *result = cmcp_json_new_object();
+    if (!contents) contents = cmcp_json_new_array();
+    cmcp_json_object_set(result, "contents", contents);
+    if (is_error)
+        cmcp_json_object_set(result, "isError", cmcp_json_new_bool(1));
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
+/* resources/subscribe + unsubscribe                                       */
+/* ====================================================================== */
+
+static int sub_index(cmcp_server_t *s, const char *uri) {
+    for (size_t i = 0; i < s->n_subs; i++) {
+        if (strcmp(s->sub_uris[i], uri) == 0) return (int)i;
+    }
+    return -1;
+}
+
+static int sub_add(cmcp_server_t *s, const char *uri) {
+    if (sub_index(s, uri) >= 0) return CMCP_OK;        /* already subscribed */
+    if (s->n_subs == s->cap_subs) {
+        size_t newcap = s->cap_subs ? s->cap_subs * 2 : 4;
+        char **n = (char **)realloc(s->sub_uris, newcap * sizeof *n);
+        if (!n) return CMCP_ENOMEM;
+        s->sub_uris = n;
+        s->cap_subs = newcap;
+    }
+    char *dup = xstrdup(uri);
+    if (!dup) return CMCP_ENOMEM;
+    s->sub_uris[s->n_subs++] = dup;
+    return CMCP_OK;
+}
+
+static void sub_remove(cmcp_server_t *s, const char *uri) {
+    int idx = sub_index(s, uri);
+    if (idx < 0) return;
+    free(s->sub_uris[idx]);
+    /* Compact: shift the tail. */
+    for (size_t i = (size_t)idx + 1; i < s->n_subs; i++) {
+        s->sub_uris[i - 1] = s->sub_uris[i];
+    }
+    s->n_subs--;
+}
+
+static void handle_resources_subscribe(cmcp_server_t *s,
+                                        const cmcp_rpc_message_t *req,
+                                        cmcp_rpc_message_t *resp,
+                                        int subscribing) {
+    if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
+        reply_invalid_params(resp, &req->id,
+                              "expected params object with `uri`", NULL);
+        return;
+    }
+    const cmcp_json_t *uri_v = cmcp_json_object_get(req->params, "uri");
+    if (!uri_v || uri_v->type != CMCP_JSON_STRING) {
+        reply_invalid_params(resp, &req->id, "missing `uri` string", NULL);
+        return;
+    }
+    /* Subscribe is allowed against any URI — including ones the server
+     * could later mint. The spec doesn't require the URI exist at
+     * subscribe time. */
+    if (subscribing) {
+        if (sub_add(s, uri_v->str.s) != CMCP_OK) {
+            cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                                 "subscription tracking failed", NULL);
+            return;
+        }
+    } else {
+        sub_remove(s, uri_v->str.s);
+    }
+    cmcp_rpc_make_response(resp, &req->id, cmcp_json_new_object());
+}
+
+/* ====================================================================== */
+/* prompts/list                                                            */
+/* ====================================================================== */
+
+static cmcp_json_t *prompt_to_descriptor(const server_prompt_t *p) {
+    cmcp_json_t *o = cmcp_json_new_object();
+    if (!o) return NULL;
+    cmcp_json_object_set(o, "name", cmcp_json_new_string(p->name));
+    if (p->description)
+        cmcp_json_object_set(o, "description",
+                              cmcp_json_new_string(p->description));
+    if (p->arguments)
+        cmcp_json_object_set(o, "arguments", cmcp_json_clone(p->arguments));
+    return o;
+}
+
+static void handle_prompts_list(cmcp_server_t *s,
+                                 const cmcp_rpc_message_t *req,
+                                 cmcp_rpc_message_t *resp) {
+    cmcp_json_t *result = cmcp_json_new_object();
+    cmcp_json_t *arr    = cmcp_json_new_array();
+    for (size_t i = 0; i < s->n_prompts; i++) {
+        cmcp_json_array_append(arr, prompt_to_descriptor(&s->prompts[i]));
+    }
+    cmcp_json_object_set(result, "prompts", arr);
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
+/* prompts/get                                                             */
+/* ====================================================================== */
+
+/* Walk the prompt's argument descriptor array and reject if any entry
+ * marked `required: true` is absent from `args`. Soft validation —
+ * full schemas are not modelled for prompt args (the spec uses a flat
+ * descriptor list, not JSON Schema). */
+static int check_required_prompt_args(const server_prompt_t *p,
+                                       const cmcp_json_t *args,
+                                       char **missing_name) {
+    *missing_name = NULL;
+    if (!p->arguments || p->arguments->type != CMCP_JSON_ARRAY) return 1;
+    for (size_t i = 0; i < p->arguments->arr.len; i++) {
+        const cmcp_json_t *desc = p->arguments->arr.items[i];
+        if (!desc || desc->type != CMCP_JSON_OBJECT) continue;
+        const cmcp_json_t *req = cmcp_json_object_get(desc, "required");
+        if (!req || req->type != CMCP_JSON_BOOL || !req->b) continue;
+        const cmcp_json_t *name = cmcp_json_object_get(desc, "name");
+        if (!name || name->type != CMCP_JSON_STRING) continue;
+        if (!args || args->type != CMCP_JSON_OBJECT ||
+            !cmcp_json_object_get(args, name->str.s)) {
+            *missing_name = name->str.s;       /* borrowed pointer */
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void handle_prompts_get(cmcp_server_t *s,
+                                const cmcp_rpc_message_t *req,
+                                cmcp_rpc_message_t *resp) {
+    if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
+        reply_invalid_params(resp, &req->id,
+                              "prompts/get requires params object", NULL);
+        return;
+    }
+    const cmcp_json_t *name_v = cmcp_json_object_get(req->params, "name");
+    if (!name_v || name_v->type != CMCP_JSON_STRING) {
+        reply_invalid_params(resp, &req->id,
+                              "prompts/get requires `name` string", NULL);
+        return;
+    }
+    server_prompt_t *p = prompt_find(s, name_v->str.s);
+    if (!p) {
+        cmcp_json_t *data = cmcp_json_new_object();
+        cmcp_json_object_set(data, "name",
+                              cmcp_json_new_string(name_v->str.s));
+        reply_invalid_params(resp, &req->id, "Unknown prompt", data);
+        return;
+    }
+
+    const cmcp_json_t *args = cmcp_json_object_get(req->params, "arguments");
+
+    char *missing = NULL;
+    if (!check_required_prompt_args(p, args, &missing)) {
+        cmcp_json_t *data = cmcp_json_new_object();
+        cmcp_json_object_set(data, "name", cmcp_json_new_string(missing));
+        reply_invalid_params(resp, &req->id,
+                              "missing required prompt argument", data);
+        return;
+    }
+
+    cmcp_json_t *messages = NULL;
+    int rc = p->handler(args, p->userdata, &messages);
+    if (rc != CMCP_OK) {
+        cmcp_json_free(messages);
+        cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                             "Prompt handler failed", NULL);
+        return;
+    }
+
+    cmcp_json_t *result = cmcp_json_new_object();
+    if (p->description)
+        cmcp_json_object_set(result, "description",
+                              cmcp_json_new_string(p->description));
+    if (!messages) messages = cmcp_json_new_array();
+    cmcp_json_object_set(result, "messages", messages);
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
 /* Per-frame handler                                                       */
 /* ====================================================================== */
 
@@ -458,6 +890,30 @@ static void server_handle_message(cmcp_server_t *s,
     }
     if (strcmp(msg->method, "tools/call") == 0) {
         handle_tools_call(s, msg, resp);
+        return;
+    }
+    if (strcmp(msg->method, "resources/list") == 0) {
+        handle_resources_list(s, msg, resp);
+        return;
+    }
+    if (strcmp(msg->method, "resources/read") == 0) {
+        handle_resources_read(s, msg, resp);
+        return;
+    }
+    if (strcmp(msg->method, "resources/subscribe") == 0) {
+        handle_resources_subscribe(s, msg, resp, 1);
+        return;
+    }
+    if (strcmp(msg->method, "resources/unsubscribe") == 0) {
+        handle_resources_subscribe(s, msg, resp, 0);
+        return;
+    }
+    if (strcmp(msg->method, "prompts/list") == 0) {
+        handle_prompts_list(s, msg, resp);
+        return;
+    }
+    if (strcmp(msg->method, "prompts/get") == 0) {
+        handle_prompts_get(s, msg, resp);
         return;
     }
 
