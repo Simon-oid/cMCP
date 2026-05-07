@@ -134,6 +134,11 @@ struct cmcp_client {
     cmcp_notification_fn        notif_fn;
     void                       *notif_ud;
 
+    /* Sampling (server-initiated `sampling/createMessage`). NULL fn
+     * means "decline" — the reader emits -32601 in that case. */
+    cmcp_sampling_handler_fn    sampling_fn;
+    void                       *sampling_ud;
+
     /* Spawned child (cmcp_client_connect_stdio). */
     pid_t                       child_pid;
 };
@@ -256,6 +261,37 @@ static void reply_method_not_found(cmcp_client_t *c, const cmcp_id_t *id) {
     cmcp_rpc_message_clear(&err);
 }
 
+/* Dispatch `sampling/createMessage` to the host's handler. If no
+ * handler is registered, fall through to the generic -32601 path —
+ * the host effectively declines server-initiated sampling. Handler
+ * runs on the reader thread; a slow LLM call therefore stalls
+ * inbound frames until it returns. Document, don't fix in v0.2. */
+static void handle_sampling_request(cmcp_client_t *c,
+                                     const cmcp_rpc_message_t *req) {
+    if (!c->sampling_fn) {
+        reply_method_not_found(c, &req->id);
+        return;
+    }
+    cmcp_json_t *result = NULL;
+    int rc = c->sampling_fn(req->params, c->sampling_ud, &result);
+
+    cmcp_rpc_message_t resp;
+    if (rc != CMCP_OK) {
+        cmcp_json_free(result);
+        if (cmcp_rpc_make_error(&resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                                 "sampling handler failed", NULL) != CMCP_OK) {
+            return;
+        }
+    } else {
+        if (!result) result = cmcp_json_new_object();
+        if (cmcp_rpc_make_response(&resp, &req->id, result) != CMCP_OK) {
+            return;
+        }
+    }
+    send_message(c, &resp);
+    cmcp_rpc_message_clear(&resp);
+}
+
 /* Wake every still-pending waiter with cancelled=1. Idempotent: safe
  * to call multiple times — the per-completion `done` check stops a
  * second broadcast. Used by the reader on transport failure (so a
@@ -312,8 +348,12 @@ static void *reader_main(void *arg) {
                 cmcp_rpc_message_clear(m);
                 break;
             case CMCP_MSG_REQUEST:
-                /* Server → client requests aren't supported in v0.1. */
-                reply_method_not_found(c, &m->id);
+                if (m->method &&
+                    strcmp(m->method, "sampling/createMessage") == 0) {
+                    handle_sampling_request(c, m);
+                } else {
+                    reply_method_not_found(c, &m->id);
+                }
                 cmcp_rpc_message_clear(m);
                 break;
             default:
@@ -421,6 +461,36 @@ void cmcp_client_set_notification_handler(cmcp_client_t *c,
     if (!c) return;
     c->notif_fn = fn;
     c->notif_ud = userdata;
+}
+
+void cmcp_client_set_sampling_handler(cmcp_client_t *c,
+                                       cmcp_sampling_handler_fn fn,
+                                       void *userdata) {
+    if (!c) return;
+    c->sampling_fn = fn;
+    c->sampling_ud = userdata;
+}
+
+cmcp_json_t *cmcp_sampling_text_result(const char *text,
+                                        const char *model,
+                                        const char *stop_reason) {
+    if (!text) return NULL;
+    cmcp_json_t *result  = cmcp_json_new_object();
+    cmcp_json_t *content = cmcp_json_new_object();
+    if (!result || !content) {
+        cmcp_json_free(result); cmcp_json_free(content);
+        return NULL;
+    }
+    cmcp_json_object_set(content, "type", cmcp_json_new_string("text"));
+    cmcp_json_object_set(content, "text", cmcp_json_new_string(text));
+    cmcp_json_object_set(result, "role",    cmcp_json_new_string("assistant"));
+    cmcp_json_object_set(result, "content", content);
+    if (model)
+        cmcp_json_object_set(result, "model", cmcp_json_new_string(model));
+    if (stop_reason)
+        cmcp_json_object_set(result, "stopReason",
+                              cmcp_json_new_string(stop_reason));
+    return result;
 }
 
 const cmcp_server_capabilities_t *cmcp_client_server_caps(const cmcp_client_t *c) {

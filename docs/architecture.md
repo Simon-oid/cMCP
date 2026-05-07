@@ -497,6 +497,59 @@ in v0.2. Tool/resource handlers run inline on the run-loop thread and
 are not cancellable; honoring cancel meaningfully would require a
 worker pool with cooperative cancellation, deferred to Tier 3.
 
+## Sampling (server → host LLM)
+
+A server can request that the host's LLM produce a completion via
+`sampling/createMessage` — useful for tools that want to feed raw
+output back through the model before surfacing it. This is the only
+*request* direction that goes server-to-client in the current spec
+surface.
+
+API:
+
+- `cmcp_client_set_sampling_handler(c, fn, ud)` registers a handler
+  that receives the params and produces a result object.
+- `cmcp_sampling_text_result(text, model, stop_reason)` builds the
+  spec-shaped `{role, content, model, stopReason}` envelope.
+- `caps.sampling = 1` opts the client into the wire signal — set it
+  via `cmcp_client_set_capabilities` BEFORE handshake.
+
+The handler runs on the reader thread, which is single-threaded. A
+slow LLM call therefore stalls inbound frames until it returns.
+Acceptable for v0.2: real LLM calls take seconds, but in-flight
+client→server requests still complete (the server keeps writing
+responses; they queue at the transport and get processed once the
+handler returns). Moving sampling to a worker pool is a Tier 3 item
+and is only worth doing if a real workload demands it.
+
+### Authorisation
+
+cMCP does **not** impose its own allow-list. A server with no handler
+attached to its `cmcp_client_t` gets the default `-32601` reply, so
+the trust gate is "did the host bother to register a handler for
+this server?" In a multi-server `cmcp_session_t`, each `cmcp_client_t`
+is its own decision — register a handler only on clients whose
+servers you trust to spend tokens. Don't generalise; trust per-server.
+
+The cap flag is a separate opt-in. Setting the handler does NOT
+automatically advertise the cap, because the wire signal is what the
+server uses to decide whether to issue the request at all — and a
+handler attached *after* handshake will see requests the server
+sent based on a stale cap-state. The library forces both calls so
+the order is explicit:
+
+```
+cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+    .sampling = 1,
+});
+cmcp_client_set_sampling_handler(cli, my_handler, my_ud);
+cmcp_client_handshake(cli, transport);
+```
+
+If only the cap is set, sampling requests get `-32601` — server
+sent something we said we'd handle, but we forgot to wire it.
+Default-deny in both directions.
+
 ## What's deliberately *not* in v0.2
 
 - TLS. Deploy behind nginx/caddy. Hand-rolling TLS in C is a project

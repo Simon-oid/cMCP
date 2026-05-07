@@ -97,6 +97,52 @@ int cmcp_client_notify(cmcp_client_t *c, const char *method,
                         cmcp_json_t *params);
 
 /* ====================================================================== */
+/* Sampling (server → host LLM call)                                        */
+/* ====================================================================== */
+
+/* Handler for `sampling/createMessage`. Servers invoke this when they
+ * want the host to run a completion through its configured LLM (e.g.
+ * a tool that wants the model to summarise its raw output before
+ * surfacing it).
+ *
+ *   `params`     The full params object: messages array + optional
+ *                modelPreferences, systemPrompt, includeContext,
+ *                temperature, maxTokens, stopSequences, metadata.
+ *                Borrowed.
+ *   `userdata`   What was passed to set_sampling_handler.
+ *   `out_result` OUT. Owned cmcp_json_t object, e.g.
+ *                {"role":"assistant","content":{...},"model":"...",
+ *                 "stopReason":"endTurn"}.
+ *                The library takes ownership on success.
+ *
+ * Return CMCP_OK on success, non-zero for INTERNAL_ERROR (-32603).
+ *
+ * Authorisation note: cMCP does NOT impose its own allow-list. The
+ * host (openclawd) decides per-server whether to register a handler;
+ * a server with no handler attached gets the default -32601 response.
+ * That's the trust gate. Don't register a handler for a server you
+ * don't trust to spend tokens. */
+typedef int (*cmcp_sampling_handler_fn)(const cmcp_json_t *params,
+                                          void *userdata,
+                                          cmcp_json_t **out_result);
+
+/* Register a sampling handler. Pass fn=NULL to clear. Setting the
+ * handler does NOT automatically advertise the `sampling` capability
+ * — call cmcp_client_set_capabilities to opt in to the wire signal
+ * (and do so BEFORE cmcp_client_handshake; the cap travels in the
+ * initialize request and isn't re-negotiated). */
+void cmcp_client_set_sampling_handler(cmcp_client_t *c,
+                                       cmcp_sampling_handler_fn fn,
+                                       void *userdata);
+
+/* Convenience: build a sampling result with a single-text-content
+ * assistant message. stop_reason is one of "endTurn", "stopSequence",
+ * "maxTokens" per spec. Returns NULL on allocation failure. */
+cmcp_json_t *cmcp_sampling_text_result(const char *text,
+                                        const char *model,
+                                        const char *stop_reason);
+
+/* ====================================================================== */
 /* Server identity (post-handshake)                                        */
 /* ====================================================================== */
 
