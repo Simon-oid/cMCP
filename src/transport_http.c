@@ -810,8 +810,70 @@ static int http_read_fn(cmcp_transport_t *t, char **out_buf, size_t *out_len) {
     return CMCP_OK;
 }
 
+/* Frame `body` as an SSE event and send to one fd. Each event is a
+ * single `data: <body>\n\n`. Newlines inside `body` are emitted as
+ * separate `data:` continuation lines, per the EventSource spec. */
+static int sse_emit_event(int fd, const char *body, size_t len) {
+    /* Use a small write buffer to avoid one send() per byte. */
+    size_t cap = len + 16;
+    char *out = (char *)malloc(cap);
+    if (!out) return CMCP_ENOMEM;
+    size_t n = 0;
+    /* Open the line. */
+    memcpy(out + n, "data: ", 6); n += 6;
+    /* Walk body, splitting on '\n' into continuation `data:` lines. */
+    for (size_t i = 0; i < len; i++) {
+        char c = body[i];
+        if (n + 8 >= cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(out, cap);
+            if (!nb) { free(out); return CMCP_ENOMEM; }
+            out = nb;
+        }
+        if (c == '\n') {
+            out[n++] = '\n';
+            memcpy(out + n, "data: ", 6); n += 6;
+        } else {
+            out[n++] = c;
+        }
+    }
+    /* Close the event with a blank line. */
+    if (n + 2 > cap) {
+        cap += 2;
+        char *nb = (char *)realloc(out, cap);
+        if (!nb) { free(out); return CMCP_ENOMEM; }
+        out = nb;
+    }
+    out[n++] = '\n';
+    out[n++] = '\n';
+    int rc = send_all(fd, out, n);
+    free(out);
+    return rc;
+}
+
 static int http_write_fn(cmcp_transport_t *t, const char *buf, size_t len) {
     http_impl_t *impl = (http_impl_t *)t->impl;
+
+    /* Server-initiated notifications (no `id` field) ride the SSE
+     * channel rather than the request/response slot — they're not
+     * answers to a POST, so there's no waiting POST handler to hand
+     * them to. We send synchronously to every currently-held SSE
+     * connection. If none are open, the notification is dropped (the
+     * spec allows this; the client should open the SSE stream if it
+     * wants to receive). */
+    body_kind_t kind = classify_body(buf, len);
+    if (kind.is_notif) {
+        pthread_mutex_lock(&impl->sse_mu);
+        sse_conn_t *c = impl->sse_head;
+        while (c) {
+            sse_emit_event(c->fd, buf, len);
+            c = c->next;
+        }
+        pthread_mutex_unlock(&impl->sse_mu);
+        return CMCP_OK;
+    }
+
+    /* Response path: into the slot mailbox. */
     char *copy = (char *)malloc(len + 1);
     if (!copy) return CMCP_ENOMEM;
     memcpy(copy, buf, len);

@@ -430,6 +430,73 @@ name is what an LLM-facing menu can present without surprising the
 model. Servers don't see the qualified form — the session strips the
 prefix before dispatch.
 
+## Server-initiated notifications
+
+The server can push frames at the client without going through the
+request/response path. Two reasons it has to: list-changed signalling
+(`tools/list_changed`, `resources/list_changed`, `prompts/list_changed`),
+and resource-update events for clients that subscribed.
+
+API:
+
+- `cmcp_server_notify(s, method, params)` — generic. Caller passes the
+  full method including the `notifications/` prefix.
+- `cmcp_server_notify_{tools,resources,prompts}_changed(s)` — capability-
+  gated convenience wrappers. Each refuses with `CMCP_EPROTOCOL` if the
+  matching cap (`caps.tools_list_changed`, etc.) wasn't opted in via
+  `cmcp_server_set_capabilities`. The intent is to fail loud when a
+  server tries to emit a notification it never told the peer it might
+  send — a peer that wasn't expecting the cap might not even be
+  listening.
+- `cmcp_server_notify_resource_updated(s, uri)` — same gating on
+  `resources_subscribe`, plus a silent no-op for URIs that no peer
+  subscribed to (no point cluttering the wire).
+
+`cmcp_server_notify` is valid only between `cmcp_server_run()` entry
+and exit. Outside that window the active transport is `NULL` and the
+call returns `CMCP_EINVAL`. Inside the window it's safe from any
+thread — the run loop and external callers serialise via a per-server
+`notify_mu` for the pointer access, and via the transport's own
+writer mutex for the wire write itself.
+
+### Wire routing
+
+For **stdio**, notifications and responses share the same wire and
+are interleaved by the transport's writer mutex. The client reader
+thread reads frames in order and dispatches by kind (notification →
+user callback, response → pending-table waiter).
+
+For **HTTP**, the routing is asymmetric. POST responses ride the slot
+mailbox back through the request/response cycle, but server-initiated
+notifications have no waiting POST to return through. Instead, the
+HTTP transport's `write_fn` peeks the JSON-RPC body via
+`classify_body()`:
+
+```
+write_fn(buf, len)
+   │
+   ▼
+classify_body(buf)
+   │
+   ├── is_notif:   walk impl->sse_head, send `data: <body>\n\n` to each fd
+   │               (if no SSE conn is held open, the notification is
+   │               dropped — the spec allows this)
+   │
+   └── otherwise:  copy → resp slot, broadcast write_cv → POST handler
+                   wakes, sends 200 + body, returns to acceptor pool
+```
+
+The client side already supports this end-to-end: the HTTP client's
+SSE reader thread (Phase 2.2) parses `data: <json>\n\n` frames and
+pushes them onto the same read queue that POST responses use, where
+`client.c`'s reader thread routes them to the notification callback
+just like a stdio transport would.
+
+Cancellation (`notifications/cancelled`) is *accepted but not honored*
+in v0.2. Tool/resource handlers run inline on the run-loop thread and
+are not cancellable; honoring cancel meaningfully would require a
+worker pool with cooperative cancellation, deferred to Tier 3.
+
 ## What's deliberately *not* in v0.2
 
 - TLS. Deploy behind nginx/caddy. Hand-rolling TLS in C is a project

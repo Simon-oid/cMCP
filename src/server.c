@@ -5,6 +5,7 @@
 #include "cmcp_types.h"
 #include "cmcp_transport.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,6 +83,13 @@ struct cmcp_server {
     char                        *peer_name;
     char                        *peer_version;
     cmcp_client_capabilities_t   peer_caps;
+
+    /* Active transport, valid only during cmcp_server_run. notify_mu
+     * serialises pointer access between the run loop (which sets +
+     * clears it) and external threads calling cmcp_server_notify. */
+    cmcp_transport_t            *active_transport;
+    pthread_mutex_t              notify_mu;
+    int                          notify_mu_init;
 };
 
 /* ====================================================================== */
@@ -108,6 +116,11 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
         return NULL;
     }
     s->state = SS_UNINIT;
+    if (pthread_mutex_init(&s->notify_mu, NULL) != 0) {
+        free(s->name); free(s->version); free(s);
+        return NULL;
+    }
+    s->notify_mu_init = 1;
     return s;
 }
 
@@ -144,6 +157,7 @@ void cmcp_server_free(cmcp_server_t *s) {
     free(s->prompts);
     for (size_t i = 0; i < s->n_subs; i++) free(s->sub_uris[i]);
     free(s->sub_uris);
+    if (s->notify_mu_init) pthread_mutex_destroy(&s->notify_mu);
     free(s);
 }
 
@@ -949,6 +963,12 @@ static void send_parse_error(cmcp_transport_t *t) {
 int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
     if (!s || !t) return CMCP_EINVAL;
 
+    /* Make the transport available to cmcp_server_notify callers
+     * (handlers + external threads). */
+    pthread_mutex_lock(&s->notify_mu);
+    s->active_transport = t;
+    pthread_mutex_unlock(&s->notify_mu);
+
     for (;;) {
         char *frame = NULL; size_t flen = 0;
         int rc = cmcp_transport_read(t, &frame, &flen);
@@ -1000,6 +1020,10 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
         cmcp_rpc_messages_free(msgs, n);
     }
 
+    pthread_mutex_lock(&s->notify_mu);
+    s->active_transport = NULL;
+    pthread_mutex_unlock(&s->notify_mu);
+
     s->state = SS_CLOSED;
     return CMCP_OK;
 }
@@ -1010,4 +1034,75 @@ int cmcp_server_run_stdio(cmcp_server_t *s) {
     int rc = cmcp_server_run(s, t);
     cmcp_transport_close(t);
     return rc;
+}
+
+/* ====================================================================== */
+/* Server-initiated notifications                                          */
+/* ====================================================================== */
+
+int cmcp_server_notify(cmcp_server_t *s,
+                        const char *method,
+                        cmcp_json_t *params) {
+    if (!s || !method) {
+        cmcp_json_free(params);
+        return CMCP_EINVAL;
+    }
+
+    cmcp_rpc_message_t m;
+    cmcp_rpc_message_init(&m);
+    int rc = cmcp_rpc_make_notification(&m, method, params);
+    if (rc != CMCP_OK) {
+        cmcp_rpc_message_clear(&m);
+        return rc;
+    }
+    char *wire = cmcp_rpc_emit(&m);
+    cmcp_rpc_message_clear(&m);
+    if (!wire) return CMCP_ENOMEM;
+
+    /* Acquire a transport pointer atomically. */
+    pthread_mutex_lock(&s->notify_mu);
+    cmcp_transport_t *t = s->active_transport;
+    pthread_mutex_unlock(&s->notify_mu);
+    if (!t) {
+        free(wire);
+        return CMCP_EINVAL;
+    }
+
+    /* The transport's own write_fn is internally mutex-guarded against
+     * concurrent writers (stdio's write mutex; HTTP's slot mutex). For
+     * HTTP, write_fn classifies the body and routes notifications to
+     * the SSE channel. */
+    rc = cmcp_transport_write(t, wire, strlen(wire));
+    free(wire);
+    return rc;
+}
+
+int cmcp_server_notify_tools_changed(cmcp_server_t *s) {
+    if (!s) return CMCP_EINVAL;
+    if (!s->caps.tools_list_changed) return CMCP_EPROTOCOL;
+    return cmcp_server_notify(s, "notifications/tools/list_changed", NULL);
+}
+
+int cmcp_server_notify_resources_changed(cmcp_server_t *s) {
+    if (!s) return CMCP_EINVAL;
+    if (!s->caps.resources_list_changed) return CMCP_EPROTOCOL;
+    return cmcp_server_notify(s, "notifications/resources/list_changed", NULL);
+}
+
+int cmcp_server_notify_prompts_changed(cmcp_server_t *s) {
+    if (!s) return CMCP_EINVAL;
+    if (!s->caps.prompts_list_changed) return CMCP_EPROTOCOL;
+    return cmcp_server_notify(s, "notifications/prompts/list_changed", NULL);
+}
+
+int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri) {
+    if (!s || !uri) return CMCP_EINVAL;
+    if (!s->caps.resources_subscribe) return CMCP_EPROTOCOL;
+    /* Skip if no peer subscribed to this URI. */
+    if (sub_index(s, uri) < 0) return CMCP_OK;
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "uri", cmcp_json_new_string(uri));
+    return cmcp_server_notify(s, "notifications/resources/updated", params);
 }

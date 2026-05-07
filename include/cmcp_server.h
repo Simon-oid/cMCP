@@ -204,4 +204,44 @@ const cmcp_client_capabilities_t *cmcp_server_client_caps(const cmcp_server_t *s
 const char *cmcp_server_client_name(const cmcp_server_t *s);
 const char *cmcp_server_client_version(const cmcp_server_t *s);
 
+/* ====================================================================== */
+/* Server-initiated notifications                                          */
+/* ====================================================================== */
+
+/* Emit a JSON-RPC notification on the active transport.
+ *
+ * Valid only between cmcp_server_run() entry and exit; calling before
+ * or after returns CMCP_EINVAL. May be called from a tool/resource/
+ * prompt handler (runs on the run-loop thread) OR from a background
+ * thread; both paths are serialised by the transport's writer mutex.
+ *
+ * For HTTP transports, notifications are routed to held-open SSE
+ * connections; if no client has opened the SSE channel, the
+ * notification is dropped on the floor (the spec allows this — a
+ * client that wants to receive notifications is expected to open
+ * `GET /mcp` first).
+ *
+ * `params` is consumed (may be NULL). */
+int cmcp_server_notify(cmcp_server_t *s,
+                        const char *method,
+                        cmcp_json_t *params);
+
+/* Capability-gated convenience wrappers for the standard MCP
+ * list-changed and updated notifications.
+ *
+ * Each wrapper checks the corresponding capability flag was opted in
+ * via cmcp_server_set_capabilities(); if not, returns CMCP_EPROTOCOL
+ * (you said you wouldn't emit this — peers may not even be listening).
+ * Otherwise emits the spec-defined method with the spec-defined
+ * (empty or single-key) params shape. */
+int cmcp_server_notify_tools_changed(cmcp_server_t *s);
+int cmcp_server_notify_resources_changed(cmcp_server_t *s);
+int cmcp_server_notify_prompts_changed(cmcp_server_t *s);
+
+/* Emit `notifications/resources/updated` for the given URI. Requires
+ * `caps.resources_subscribe = 1` (CMCP_EPROTOCOL otherwise). Silently
+ * no-ops (returns CMCP_OK) if no peer has subscribed to this URI —
+ * keeps the wire quiet for resources nobody cares about. */
+int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri);
+
 #endif
