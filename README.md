@@ -18,7 +18,7 @@ MCP is the standard interface that lets an LLM agent call tools (file
 systems, databases, search, custom services) without each agent needing
 a custom integration per tool. The reference SDKs are written in
 TypeScript and Python. cMCP is the C answer — built so an embedded /
-systems agent (in this case [openclawd](https://github.com/Simon-oid/openclawd))
+systems agent (in this case [butlerbot](https://github.com/Simon-oid/butlerbot))
 can speak MCP without dragging a Node or Python runtime alongside it.
 
 The protocol layer is generic; the cRAG server (`tools/crag-mcp/`) is
@@ -27,29 +27,35 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
-**v0.1 server + client + multi-server session — all shipped.** A C
-host can: spawn one or more MCP servers as child processes, run the
-initialize handshake over stdio, list and call their tools, route
-notifications back, and present a unified `<server>:<tool>` namespace
-across multiple servers. Async by design — one reader thread per
-client, multiple in-flight calls, any-order completion.
+**v0.2 protocol surface — complete.** stdio + Streamable HTTP
+transports, tools / resources / prompts on the server side, sampling
+and roots on the host side, server-initiated notifications with
+subscriber-aware filtering, multi-server multiplexing on the client.
+A C host can spawn or connect to one or more MCP servers, run the
+initialize handshake, list and call their tools, read and subscribe
+to resources, get prompts, route notifications back, and present a
+unified `<server>:<tool>` namespace across them. Async by design —
+one reader thread per client, multiple in-flight calls, any-order
+completion.
 
-Remaining for v0.1: README + architecture doc (this commit).
-Streamable HTTP transport, resources/prompts, and `notifications/*` are
-v0.2. See [`TODO.md`](TODO.md) for the full phasing.
+Tier 3 (OAuth 2.1, conformance harness against Anthropic's reference
+implementations, a non-cRAG reference server, connection pooling) is
+deferred — none block real consumers. See [`TODO.md`](TODO.md) for
+the full phasing.
 
 ## Build & test
 
 ```bash
 make            # libs (core/server/client) + cmcp-inspect + examples
-make test       # build and run the test binaries — currently 1967 assertions
+make test       # build and run the test binaries — currently 2301 assertions across 13 binaries
 make valgrind   # same, under valgrind (optional)
 make crag-mcp   # build the cRAG reference server (needs sibling ../cRAG/)
 make clean
 ```
 
 System dependency: `libcurl` headers (`pkg-config --cflags libcurl`
-must work). Everything else is hand-rolled or system-standard.
+must work) — used by the Streamable HTTP client transport. Everything
+else is hand-rolled or system-standard.
 
 ## Five-minute tour
 
@@ -119,11 +125,11 @@ make crag-mcp                           # needs ../cRAG built
 
 | Target | Purpose |
 |---|---|
-| `libcmcp_core.a`     | JSON, JSON-RPC 2.0, schema validator, transports, types |
-| `libcmcp_server.a`   | Tool registry, dispatch, handshake, lifecycle |
-| `libcmcp_client.a`   | Async client with reader thread, `connect_stdio`, multi-server `cmcp_session_t` |
+| `libcmcp_core.a`     | JSON, JSON-RPC 2.0, schema validator, types, stdio + Streamable HTTP transports |
+| `libcmcp_server.a`   | Tools / resources / prompts registries, dispatch, handshake, lifecycle, server-initiated notifications |
+| `libcmcp_client.a`   | Async client with reader thread, `connect_stdio`, sampling + roots host handlers, multi-server `cmcp_session_t` |
 | `tools/cmcp-inspect/`     | CLI: spawn a server, dump tools, call one |
-| `tools/crag-mcp/`         | Reference server wrapping [cRAG](https://github.com/Simon-oid/cRAG) |
+| `tools/crag-mcp/`         | Reference server wrapping [cRAG](https://github.com/Simon-oid/cRAG) — two tools (`crag_search`, `crag_stats`) plus the `crag://stats` resource |
 | `examples/echo-server.c`     | A two-tool server in <80 lines |
 | `examples/minimal-client.c`  | Spawn a server, list tools, call `echo` |
 
@@ -133,18 +139,18 @@ Tracking [MCP spec date `2025-06-18`](https://modelcontextprotocol.io/specificat
 
 | Feature | v0.1 | v0.2 | v0.3 |
 |---|---|---|---|
-| stdio transport               | ✓ | ✓ | ✓ |
-| Streamable HTTP transport     |   | ✓ | ✓ |
-| Tools (list, call)            | ✓ | ✓ | ✓ |
-| Multi-server multiplexing (client) | ✓ | ✓ | ✓ |
+| stdio transport                          | ✓ | ✓ | ✓ |
+| Streamable HTTP transport                |   | ✓ | ✓ |
+| Tools (list, call)                       | ✓ | ✓ | ✓ |
+| Multi-server multiplexing (client)       | ✓ | ✓ | ✓ |
 | Server-to-client notifications (routing) | ✓ | ✓ | ✓ |
-| Resources (list, read, subscribe) |   | ✓ | ✓ |
-| Prompts (list, get)           |   | ✓ | ✓ |
-| Sampling (host-side)          |   | ✓ | ✓ |
-| Roots (host-side)             |   | ✓ | ✓ |
-| `*/list_changed` emit (server side) |   | ✓ | ✓ |
-| `$/cancel`, `$/progress`      |   | ✓ | ✓ |
-| OAuth 2.1 (HTTP only)         |   |   | ✓ |
+| Resources (list, read, subscribe)        |   | ✓ | ✓ |
+| Prompts (list, get)                      |   | ✓ | ✓ |
+| Sampling (host-side)                     |   | ✓ | ✓ |
+| Roots (host-side)                        |   | ✓ | ✓ |
+| `*/list_changed` emit (server side)      |   | ✓ | ✓ |
+| `notifications/cancelled`, `progressToken` |   |   | ✓ |
+| OAuth 2.1 (HTTP only)                    |   |   | ✓ |
 
 ## Layout
 
@@ -152,13 +158,14 @@ Tracking [MCP spec date `2025-06-18`](https://modelcontextprotocol.io/specificat
 include/    public headers (cmcp.h, cmcp_json.h, cmcp_types.h,
             cmcp_transport.h, cmcp_schema.h, cmcp_server.h,
             cmcp_client.h, cmcp_session.h)
-src/        json, rpc, schema, types, transport_stdio
+src/        json, rpc, schema, types,
+            transport_stdio, transport_http (server), transport_http_client
             → libcmcp_core.a
             server.c → libcmcp_server.a
             client.c, session.c → libcmcp_client.a
 tools/      cmcp-inspect (CLI), crag-mcp (reference server)
 examples/   echo-server, minimal-client
-tests/      one binary per test_*.c, all use tests/test.h
+tests/      one binary per test_*.c (13 total), all use tests/test.h
 docs/       architecture, schema-subset, design notes
 ```
 

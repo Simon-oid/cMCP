@@ -399,7 +399,7 @@ write side, in lock-step with the read side.
 
 ## Multi-server session
 
-`cmcp_session_t` is the aggregator a multi-server host (openclawd) uses
+`cmcp_session_t` is the aggregator a multi-server host (butlerbot) uses
 to present a flat tool surface across N child servers:
 
 ```
@@ -607,14 +607,18 @@ the lock is held.
 - Concurrent HTTP sessions on a single transport. One session per
   `cmcp_transport_t`; concurrent multi-tenant deployments instantiate
   multiple transports.
-- HTTP client transport. Phase 2.2.
 - Worker pool / per-handler timeouts on the server. Tools today are
   fast; concurrency adds machinery without a motivating need.
-- Resources, prompts, sampling, roots. The `*/list_changed` and
-  `resources/updated` notifications. The full async cancel/progress
-  machinery. All Phase 2.3+.
+- `notifications/cancelled` and `progressToken`-based progress
+  notifications. Cancellation is currently shutdown-scoped only
+  (all in-flight waiters wake with `CMCP_ECANCELLED` when the client
+  is freed); per-request mid-flight cancel is Tier 3.
+- OAuth 2.1 on the HTTP transport. Tier 3 — deferred until there's a
+  remote cMCP server worth publishing.
+- A conformance harness running cMCP against Anthropic's reference
+  client/server implementations. Tier 3.
 - Connection pooling at the session layer. One client per server is
-  the v0.1 shape; openclawd's actual usage hasn't yet shown a need
+  the current shape; butlerbot's actual usage hasn't yet shown a need
   for more.
 
 The full phase plan is in [`TODO.md`](../TODO.md).
