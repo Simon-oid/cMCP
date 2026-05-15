@@ -5,7 +5,8 @@
  *   crag_search   { query: string, k?: integer 1..20 }
  *                 Hybrid retrieval (BM25 + cosine, RRF-fused) over the
  *                 cRAG index. Returns up to k chunks, one text content
- *                 item per chunk.
+ *                 item per chunk, gated on cosine relevance (see
+ *                 CRAG_SEARCH_MIN_COSINE / CRAG_MIN_COSINE).
  *
  *   crag_stats    {}
  *                 One-line summary: db path, chunk count, file count,
@@ -37,6 +38,10 @@
  *   CRAG_EMBED_BACKEND   local|openai|ollama (default: local)
  *   CRAG_EMBED_URL       embedding endpoint
  *   OPENAI_API_KEY       for openai backend
+ *
+ * Environment specific to this server:
+ *   CRAG_MIN_COSINE      crag_search relevance gate (default: 0.50;
+ *                        <= -1 disables gating)
  */
 
 #include "cmcp.h"
@@ -61,6 +66,7 @@ typedef struct {
     crag_store_t           store;
     crag_embed_backend_t  *embed;
     const char            *db_path;
+    float                  min_cosine;  /* relevance gate, see below */
 } crag_mcp_ctx_t;
 
 /* ====================================================================== */
@@ -94,6 +100,19 @@ static cmcp_json_t *single_text_array(const char *text) {
 #define CRAG_SEARCH_DEFAULT_K  5
 #define CRAG_SEARCH_MAX_K      20
 
+/* Minimum cosine similarity for a hybrid-search result to count as a
+ * real match. The RRF fusion score cannot be thresholded — its range is
+ * structural (~0.033 = ranked #1 by both retrievers, ~0.016 = by one) —
+ * so we gate on the raw cosine, a calibrated [-1,1] relevance.
+ *
+ * 0.50 was calibrated against mxbai-embed-large, which has a high cosine
+ * floor: genuine matches land at 0.62-0.72, while irrelevant queries
+ * still score ~0.30-0.41. 0.50 sits in the gap with margin on both
+ * sides. A different embedding model will need a different cutoff —
+ * override with CRAG_MIN_COSINE (mirrors cRAG's own CRAG_GEN_MIN_SCORE
+ * convention); set it <= -1 to disable gating entirely. */
+#define CRAG_SEARCH_MIN_COSINE  0.50f
+
 static int crag_search_handler(const cmcp_json_t *args, void *userdata,
                                 cmcp_json_t **out_content, int *out_is_error) {
     crag_mcp_ctx_t *ctx = (crag_mcp_ctx_t *)userdata;
@@ -119,7 +138,7 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
 
     /* Run hybrid retrieval. */
     crag_chunk_t *results = (crag_chunk_t *)calloc((size_t)k, sizeof *results);
-    float        *scores  = (float *)calloc((size_t)k, sizeof *scores);
+    crag_score_t *scores  = (crag_score_t *)calloc((size_t)k, sizeof *scores);
     if (!results || !scores) {
         free(results); free(scores);
         *out_is_error = 1;
@@ -143,9 +162,11 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
         return CMCP_OK;
     }
 
-    /* Format one content item per chunk:
-     *   [score 0.842] path/to/source.md
-     *   <chunk body>                                                  */
+    /* Format one content item per chunk that clears the relevance gate:
+     *   [cos 0.612  bm25 8.40  fusion 0.033] path/to/source.md
+     *   <chunk body>
+     * cosine leads because it is the only calibrated relevance signal;
+     * bm25 and fusion follow for transparency / debugging.            */
     cmcp_json_t *arr = cmcp_json_new_array();
     if (!arr) {
         for (int i = 0; i < n; i++) {
@@ -158,21 +179,45 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
         return CMCP_OK;
     }
 
+    int emitted = 0;
     for (int i = 0; i < n; i++) {
-        const char *src = results[i].source ? results[i].source : "(unknown)";
-        const char *txt = results[i].text   ? results[i].text   : "";
-        size_t need = strlen(src) + strlen(txt) + 64;
-        char *buf = (char *)malloc(need);
-        if (buf) {
-            snprintf(buf, need, "[score %.3f] %s\n%s",
-                      (double)scores[i], src, txt);
-            cmcp_json_array_append(arr, text_item(buf));
-            free(buf);
+        /* Relevance gate. Results come back ranked by the RRF fusion
+         * score, which can't be thresholded — a lexical-only or weak
+         * hit lands at the same fusion floor as a real semantic match.
+         * The raw cosine separates them, so drop anything below the
+         * cutoff rather than hand the model the one-retriever floor. */
+        if (scores[i].cosine >= ctx->min_cosine) {
+            const char *src = results[i].source ? results[i].source
+                                                : "(unknown)";
+            const char *txt = results[i].text   ? results[i].text   : "";
+            size_t need = strlen(src) + strlen(txt) + 96;
+            char *buf = (char *)malloc(need);
+            if (buf) {
+                snprintf(buf, need,
+                          "[cos %.3f  bm25 %.2f  fusion %.3f] %s\n%s",
+                          (double)scores[i].cosine, (double)scores[i].bm25,
+                          (double)scores[i].fusion, src, txt);
+                cmcp_json_array_append(arr, text_item(buf));
+                free(buf);
+                emitted++;
+            }
         }
         free(results[i].source);
         free(results[i].text);
     }
     free(results); free(scores);
+
+    /* Every hit fell below the relevance gate: report "no match"
+     * explicitly rather than returning the junk the fusion ranking
+     * would otherwise surface. Not an error — an empty result is a
+     * valid answer to a query nothing matches. */
+    if (emitted == 0) {
+        cmcp_json_free(arr);
+        *out_is_error = 0;
+        *out_content  = single_text_array(
+            "(no chunk cleared the relevance threshold)");
+        return CMCP_OK;
+    }
 
     *out_is_error = 0;
     *out_content  = arr;
@@ -250,6 +295,21 @@ int main(int argc, char **argv) {
 
     crag_mcp_ctx_t ctx = {0};
     ctx.db_path = resolve_db_path(argc, argv);
+
+    /* Relevance gate for hybrid search. CRAG_MIN_COSINE overrides the
+     * compiled-in default; a malformed or above-1 value is rejected and
+     * the default kept. A value <= -1 disables gating. */
+    ctx.min_cosine = CRAG_SEARCH_MIN_COSINE;
+    const char *mc = getenv("CRAG_MIN_COSINE");
+    if (mc && *mc) {
+        char *end = NULL;
+        float v = strtof(mc, &end);
+        if (end != mc && *end == '\0' && v <= 1.0f)
+            ctx.min_cosine = v;
+        else
+            fprintf(stderr,
+                    "crag-mcp: ignoring invalid CRAG_MIN_COSINE '%s'\n", mc);
+    }
 
     if (store_open(ctx.db_path, &ctx.store) != 0) {
         fprintf(stderr, "crag-mcp: cannot open DB at %s\n", ctx.db_path);

@@ -447,19 +447,16 @@ static void handle_initialize(cmcp_server_t *s,
         return;
     }
 
-    /* Pin protocol version. */
+    /* Protocol version negotiation. Per MCP spec: if the client
+     * requests a version we don't support, we MUST still respond
+     * (with our own supported version below) and let the client
+     * decide whether to disconnect. Only a missing or malformed
+     * `protocolVersion` field is a -32602. */
     const cmcp_json_t *pv = cmcp_json_object_get(req->params, "protocolVersion");
-    if (!pv || pv->type != CMCP_JSON_STRING ||
-        strcmp(pv->str.s, CMCP_PROTOCOL_VERSION) != 0) {
-        cmcp_json_t *data = cmcp_json_new_object();
-        cmcp_json_object_set(data, "supported",
-                              cmcp_json_new_string(CMCP_PROTOCOL_VERSION));
-        if (pv && pv->type == CMCP_JSON_STRING) {
-            cmcp_json_object_set(data, "requested",
-                                  cmcp_json_new_string(pv->str.s));
-        }
+    if (!pv || pv->type != CMCP_JSON_STRING) {
         reply_invalid_params(resp, &req->id,
-                              "Unsupported protocol version", data);
+                              "initialize requires protocolVersion (string)",
+                              NULL);
         return;
     }
 

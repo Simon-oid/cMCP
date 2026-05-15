@@ -134,7 +134,11 @@ static void test_happy_path(void) {
     cmcp_transport_close(p.server_t);
 }
 
-static void test_version_mismatch(void) {
+static void test_version_negotiation(void) {
+    /* Per MCP spec: if the client requests a protocol version the
+     * server doesn't support, the server MUST still respond (success)
+     * with its own supported version. The client then decides whether
+     * to disconnect. The server does NOT error out. */
     transport_pair_t p;
     TEST_ASSERT(make_pair(&p) == 0);
 
@@ -143,7 +147,7 @@ static void test_version_mismatch(void) {
     pthread_t th;
     TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
 
-    /* Build initialize with a bogus protocol version. */
+    /* Build initialize with a bogus (but well-formed) protocol version. */
     cmcp_json_t *params = cmcp_json_new_object();
     cmcp_json_object_set(params, "protocolVersion",
                          cmcp_json_new_string("1999-01-01"));
@@ -163,16 +167,44 @@ static void test_version_mismatch(void) {
 
     TEST_ASSERT(resp.kind == CMCP_MSG_RESPONSE);
     TEST_ASSERT(resp.id.kind == CMCP_ID_INT && resp.id.i == 1);
+    TEST_ASSERT(resp.error == NULL);
+    TEST_ASSERT(resp.result != NULL && resp.result->type == CMCP_JSON_OBJECT);
+    const cmcp_json_t *pv = cmcp_json_object_get(resp.result, "protocolVersion");
+    TEST_ASSERT(pv && pv->type == CMCP_JSON_STRING);
+    TEST_ASSERT(strcmp(pv->str.s, CMCP_PROTOCOL_VERSION) == 0);
+    cmcp_rpc_message_clear(&resp);
+
+    cmcp_transport_close(p.client_t);
+    pthread_join(th, NULL);
+    cmcp_server_free(srv);
+    cmcp_transport_close(p.server_t);
+}
+
+static void test_missing_protocol_version(void) {
+    /* A missing or non-string `protocolVersion` field is still a
+     * malformed request — -32602. Distinct from version negotiation. */
+    transport_pair_t p;
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    cmcp_server_t *srv = cmcp_server_new("test-server", "0.1.0");
+    server_arg_t sa = { srv, p.server_t, 0 };
+    pthread_t th;
+    TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "capabilities", cmcp_json_new_object());
+
+    cmcp_rpc_message_t req;
+    TEST_ASSERT(cmcp_rpc_make_request(&req, 1, "initialize", params)
+                == CMCP_OK);
+
+    cmcp_rpc_message_t resp;
+    TEST_ASSERT(rpc_round_trip(p.client_t, &req, &resp) == CMCP_OK);
+    cmcp_rpc_message_clear(&req);
+
+    TEST_ASSERT(resp.kind == CMCP_MSG_RESPONSE);
     TEST_ASSERT(resp.error != NULL);
     TEST_ASSERT(resp.error->code == CMCP_RPC_INVALID_PARAMS);
-    TEST_ASSERT(resp.error->data != NULL);
-    TEST_ASSERT(resp.error->data->type == CMCP_JSON_OBJECT);
-    const cmcp_json_t *sup = cmcp_json_object_get(resp.error->data, "supported");
-    const cmcp_json_t *got = cmcp_json_object_get(resp.error->data, "requested");
-    TEST_ASSERT(sup && sup->type == CMCP_JSON_STRING);
-    TEST_ASSERT(strcmp(sup->str.s, CMCP_PROTOCOL_VERSION) == 0);
-    TEST_ASSERT(got && got->type == CMCP_JSON_STRING);
-    TEST_ASSERT(strcmp(got->str.s, "1999-01-01") == 0);
     cmcp_rpc_message_clear(&resp);
 
     cmcp_transport_close(p.client_t);
@@ -316,7 +348,8 @@ int main(void) {
     fprintf(stderr, "test_lifecycle:\n");
 
     TEST_RUN(test_happy_path);
-    TEST_RUN(test_version_mismatch);
+    TEST_RUN(test_version_negotiation);
+    TEST_RUN(test_missing_protocol_version);
     TEST_RUN(test_double_initialize);
     TEST_RUN(test_operate_before_initialized);
     TEST_RUN(test_unknown_method_after_init);

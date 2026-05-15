@@ -34,12 +34,27 @@ make crag-mcp CRAG_DIR=/path/to/cRAG
 }
 ```
 
-Returns one MCP `text` content item per retrieved chunk, in score order:
+Returns one MCP `text` content item per retrieved chunk, fusion-ranked:
 
 ```
-[score 0.842] path/to/source.md
+[cos 0.715  bm25 12.62  fusion 0.033] path/to/source.md
 <chunk body>
 ```
+
+Three scores lead each item:
+
+- `cos` — raw cosine similarity, the only *calibrated* relevance signal
+  (`[-1, 1]`, higher = better).
+- `bm25` — lexical score; `0.00` means no lexical hit (cosine-only).
+- `fusion` — the RRF score results are *ranked* by. Its range is
+  structural (`~0.033` = ranked #1 by both retrievers, `~0.016` = by
+  one), so it **cannot** be read as relevance — that's what `cos` is for.
+
+Results are gated on `cos`: a chunk below the cutoff (default `0.50`,
+see `CRAG_MIN_COSINE`) is dropped as the one-retriever floor rather than
+a real match. If every hit falls below it, the tool returns a single
+`(no chunk cleared the relevance threshold)` item — a valid, non-error
+answer to a query nothing matches.
 
 Default `k` is 5; the server also clamps to `[1, 20]` defensively.
 
@@ -99,6 +114,22 @@ Embedder selection — passes through to cRAG unchanged:
 The embedder model used at search time **must match** the one used to
 build the index (same dim, same provider). cRAG itself doesn't enforce
 this — pick one combination and keep it.
+
+### Relevance gating
+
+`crag_search` drops results whose cosine similarity falls below a
+cutoff, so a query that matches nothing returns an explicit "no match"
+instead of the junk the fusion ranking would otherwise surface.
+
+| Variable          | Meaning                                       | Default |
+|-------------------|-----------------------------------------------|---------|
+| `CRAG_MIN_COSINE` | Minimum cosine for a result to count as a hit | `0.50`  |
+
+The default is calibrated for `mxbai-embed-large` (genuine matches land
+at cosine 0.62–0.72, irrelevant queries still score 0.30–0.41 — that
+model has a high cosine floor). A different embedding model has a
+different floor — recalibrate. Set `CRAG_MIN_COSINE` to a value `<= -1`
+to disable gating and return raw fusion-ranked results.
 
 ## Quick start
 
