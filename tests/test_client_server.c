@@ -383,6 +383,100 @@ static void test_server_notification(void) {
 }
 
 /* ====================================================================== */
+/* test_version_negotiation / _malformed — client-side protocol handling   */
+/* ====================================================================== */
+/* Per the MCP spec a version mismatch is non-fatal: the client captures
+ * the server's advertised version and proceeds, leaving the host to
+ * decide. Only a missing/malformed protocolVersion aborts the
+ * handshake. We hand-roll a mini-server emitting a controllable
+ * initialize response to exercise both paths. */
+
+typedef struct {
+    cmcp_transport_t *t;
+    const char       *pv;   /* protocolVersion to advertise; NULL = omit */
+} version_srv_arg_t;
+
+static void *version_srv_thread(void *arg) {
+    version_srv_arg_t *a = (version_srv_arg_t *)arg;
+    cmcp_transport_t  *t = a->t;
+
+    /* 1. Read initialize. */
+    char *frame = NULL; size_t flen = 0;
+    if (cmcp_transport_read(t, &frame, &flen) != CMCP_OK) return NULL;
+    cmcp_rpc_message_t *msgs = NULL; size_t nmsgs = 0;
+    int prc = cmcp_rpc_parse(frame, flen, &msgs, &nmsgs);
+    free(frame);
+    if (prc != CMCP_OK || nmsgs != 1) {
+        cmcp_rpc_messages_free(msgs, nmsgs);
+        return NULL;
+    }
+
+    /* 2. Reply. protocolVersion is included only when pv != NULL, so one
+     *    fixture covers both the mismatch and the missing-field cases. */
+    cmcp_json_t *result = cmcp_json_new_object();
+    if (a->pv)
+        cmcp_json_object_set(result, "protocolVersion",
+                              cmcp_json_new_string(a->pv));
+    cmcp_json_object_set(result, "capabilities", cmcp_json_new_object());
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    cmcp_rpc_make_response(&resp, &msgs[0].id, result);
+    char *wire = cmcp_rpc_emit(&resp);
+    cmcp_transport_write(t, wire, strlen(wire));
+    free(wire);
+    cmcp_rpc_message_clear(&resp);
+    cmcp_rpc_messages_free(msgs, nmsgs);
+
+    /* 3. Drain whatever follows (notifications/initialized on success,
+     *    nothing on the rejected path) until the client closes. */
+    while (cmcp_transport_read(t, &frame, &flen) == CMCP_OK) free(frame);
+    return NULL;
+}
+
+static void test_version_negotiation(void) {
+    transport_pair_t p;
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    version_srv_arg_t sa = { p.server_t, "2099-12-31" };
+    pthread_t th;
+    TEST_ASSERT(pthread_create(&th, NULL, version_srv_thread, &sa) == 0);
+
+    cmcp_client_t *cli = cmcp_client_new("ver-cli", "0.0.1");
+    /* A differing protocol version is NOT a handshake failure. */
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+    /* The server's version is captured and exposed for the host. */
+    const char *sp = cmcp_client_server_protocol(cli);
+    TEST_ASSERT(sp != NULL);
+    TEST_ASSERT(sp && strcmp(sp, "2099-12-31") == 0);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(p.server_t);
+}
+
+static void test_version_malformed(void) {
+    transport_pair_t p;
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    /* pv = NULL → server omits protocolVersion entirely. */
+    version_srv_arg_t sa = { p.server_t, NULL };
+    pthread_t th;
+    TEST_ASSERT(pthread_create(&th, NULL, version_srv_thread, &sa) == 0);
+
+    cmcp_client_t *cli = cmcp_client_new("ver-cli", "0.0.1");
+    /* A missing protocolVersion IS fatal. */
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_EPROTOCOL);
+    TEST_ASSERT(cmcp_client_server_protocol(cli) == NULL);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(p.server_t);
+}
+
+/* ====================================================================== */
 /* test_session_two_servers — aggregation + qualified routing              */
 /* ====================================================================== */
 
@@ -512,6 +606,8 @@ int main(void) {
     TEST_RUN(test_async_call);
     TEST_RUN(test_async_wait_unknown_id);
     TEST_RUN(test_server_notification);
+    TEST_RUN(test_version_negotiation);
+    TEST_RUN(test_version_malformed);
     TEST_RUN(test_session_two_servers);
 
     TEST_DONE();

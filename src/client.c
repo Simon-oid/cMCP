@@ -120,6 +120,7 @@ struct cmcp_client {
     /* Server identity captured during handshake. */
     char                       *server_name;
     char                       *server_version;
+    char                       *server_protocol;   /* advertised protocol version */
     cmcp_server_capabilities_t  server_caps;
 
     /* Reader thread + active completions. */
@@ -502,6 +503,7 @@ void cmcp_client_free(cmcp_client_t *c) {
     free(c->version);
     free(c->server_name);
     free(c->server_version);
+    free(c->server_protocol);
     cmcp_rpc_pending_free(c->pending);
     pthread_mutex_destroy(&c->list_mu);
     for (size_t i = 0; i < c->n_roots; i++) {
@@ -619,6 +621,9 @@ const char *cmcp_client_server_name(const cmcp_client_t *c) {
 }
 const char *cmcp_client_server_version(const cmcp_client_t *c) {
     return c ? c->server_version : NULL;
+}
+const char *cmcp_client_server_protocol(const cmcp_client_t *c) {
+    return c ? c->server_protocol : NULL;
 }
 
 /* ====================================================================== */
@@ -747,11 +752,25 @@ static int do_initialize(cmcp_client_t *c) {
         cmcp_rpc_message_clear(&resp);
         return CMCP_EPROTOCOL;
     }
+    /* Protocol version negotiation. Per the MCP spec a version mismatch
+     * is not a wire error: the client decides whether to continue. We
+     * capture whatever the server advertised (exposed via
+     * cmcp_client_server_protocol) and proceed — a host that wants
+     * stricter behaviour inspects it and disconnects itself. Only a
+     * missing or malformed protocolVersion field is fatal here, which
+     * mirrors the server side. */
     const cmcp_json_t *pv = cmcp_json_object_get(resp.result, "protocolVersion");
-    if (!pv || pv->type != CMCP_JSON_STRING ||
-        strcmp(pv->str.s, CMCP_PROTOCOL_VERSION) != 0) {
+    if (!pv || pv->type != CMCP_JSON_STRING) {
         cmcp_rpc_message_clear(&resp);
         return CMCP_EPROTOCOL;
+    }
+    free(c->server_protocol);
+    c->server_protocol = xstrdup(pv->str.s);
+    if (strcmp(pv->str.s, CMCP_PROTOCOL_VERSION) != 0) {
+        fprintf(stderr,
+                "cmcp_client: server speaks protocol %s, we pin %s; "
+                "proceeding (host may disconnect)\n",
+                pv->str.s, CMCP_PROTOCOL_VERSION);
     }
     const cmcp_json_t *si = cmcp_json_object_get(resp.result, "serverInfo");
     if (si && si->type == CMCP_JSON_OBJECT) {

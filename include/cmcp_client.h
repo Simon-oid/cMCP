@@ -187,4 +187,11 @@ const cmcp_server_capabilities_t *cmcp_client_server_caps(const cmcp_client_t *c
 const char *cmcp_client_server_name(const cmcp_client_t *c);
 const char *cmcp_client_server_version(const cmcp_client_t *c);
 
+/* The protocol version the server advertised at handshake. Per the MCP
+ * spec this may differ from CMCP_PROTOCOL_VERSION — negotiation is
+ * non-fatal, the handshake still succeeds. A host that requires an
+ * exact match should inspect this and disconnect on mismatch. Returns
+ * NULL before the handshake completes. */
+const char *cmcp_client_server_protocol(const cmcp_client_t *c);
+
 #endif
