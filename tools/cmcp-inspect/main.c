@@ -298,7 +298,13 @@ int main(int argc, char **argv) {
     }
 
     if (call_name) {
-        if (!json_mode) printf("\nCalling %s:\n", call_name);
+        if (!json_mode) {
+            printf("\nCalling %s:\n", call_name);
+            /* Flush stdout before the call: a JSON-RPC error inside
+             * do_call goes to stderr (unbuffered), so without this the
+             * error would interleave ahead of this line under a pipe. */
+            fflush(stdout);
+        }
         int crc = do_call(cli, call_name, call_args, json_mode);
         if (crc != 0) exit_code = crc;
     }
