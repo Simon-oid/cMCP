@@ -40,6 +40,11 @@ BUILT_LIBS := $(if $(SERVER_OBJ),$(SERVER_LIB)) \
 INSPECT_BIN  := tools/cmcp-inspect/cmcp-inspect
 INSPECT_SRC  := $(wildcard tools/cmcp-inspect/main.c)
 
+# filesystem-mcp has no external dependency, so unlike crag-mcp it is
+# built by `make all`.
+FS_MCP_BIN   := tools/filesystem-mcp/filesystem-mcp
+FS_MCP_SRC   := $(wildcard tools/filesystem-mcp/main.c)
+
 # crag-mcp links cRAG statically. Override CRAG_DIR if cRAG isn't a sibling.
 CRAG_DIR     ?= ../cRAG
 CRAG_MCP_BIN := tools/crag-mcp/crag-mcp
@@ -56,6 +61,7 @@ TEST_BIN := $(TEST_SRC:tests/%.c=tests/%)
 # --- Targets ---------------------------------------------------------------
 all: $(BUILT_LIBS) \
      $(if $(INSPECT_SRC),$(INSPECT_BIN)) \
+     $(if $(FS_MCP_SRC),$(FS_MCP_BIN)) \
      $(EXAMPLE_BINS)
 
 $(CORE_LIB): $(CORE_OBJ)
@@ -73,6 +79,9 @@ src/%.o: src/%.c
 $(INSPECT_BIN): $(INSPECT_SRC) $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
+$(FS_MCP_BIN): $(FS_MCP_SRC) $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
 examples/%: examples/%.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
@@ -87,6 +96,12 @@ $(CRAG_MCP_BIN): $(CRAG_MCP_SRC) $(BUILT_LIBS)
 	    $(filter-out $(CRAG_DIR)/src/main.o, $(wildcard $(CRAG_DIR)/src/*.o)) \
 	    $(CRAG_DIR)/third_party/sqlite3.o \
 	    $(LDFLAGS) $(LDLIBS) -lm -ldl
+
+# test_fs_server spawns the built filesystem-mcp binary as a child, so
+# it depends on that binary in addition to the libs. This specific rule
+# overrides the generic tests/% pattern below.
+tests/test_fs_server: tests/test_fs_server.c $(BUILT_LIBS) $(FS_MCP_BIN)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
 tests/%: tests/%.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
@@ -105,8 +120,9 @@ valgrind: $(TEST_BIN)
 clean:
 	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
-	      $(INSPECT_BIN) $(CRAG_MCP_BIN) \
+	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) \
-	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o examples/*.o
+	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
+	      tools/filesystem-mcp/*.o examples/*.o
 
 .PHONY: all test valgrind clean crag-mcp

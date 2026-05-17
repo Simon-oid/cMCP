@@ -6,6 +6,7 @@ build/
 # Reference binaries
 tools/crag-mcp/crag-mcp
 tools/cmcp-inspect/cmcp-inspect
+tools/filesystem-mcp/filesystem-mcp
 
 # Example binaries
 examples/echo-server
