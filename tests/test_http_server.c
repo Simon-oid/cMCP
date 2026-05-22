@@ -175,6 +175,35 @@ static char *build_post(const char *body, const char *session_id) {
     return out;
 }
 
+/* Like build_post, but also emits an MCP-Protocol-Version header when
+ * `pv` is non-NULL. */
+static char *build_post_pv(const char *body, const char *session_id,
+                            const char *pv) {
+    size_t body_len = body ? strlen(body) : 0;
+    size_t cap = body_len + 512;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    int n = snprintf(out, cap,
+        "POST /mcp HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\n"
+        "%s%s%s"
+        "%s%s%s"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s",
+        session_id ? "Mcp-Session-Id: " : "",
+        session_id ? session_id : "",
+        session_id ? "\r\n" : "",
+        pv ? "MCP-Protocol-Version: " : "",
+        pv ? pv : "",
+        pv ? "\r\n" : "",
+        body_len,
+        body ? body : "");
+    if (n < 0 || (size_t)n >= cap) { free(out); return NULL; }
+    return out;
+}
+
 /* Build a GET /mcp request for SSE. */
 static char *build_get_sse(const char *session_id) {
     size_t cap = 512;
@@ -439,6 +468,65 @@ static void test_get_sse_handshake(void) {
     cmcp_server_free(s);
 }
 
+/* The MCP-Protocol-Version header (2025-06-18): a post-handshake POST
+ * carrying a version cMCP does not speak is rejected with 400; the
+ * matching version is accepted; an absent header falls back to the
+ * spec default and is also accepted. */
+static void test_protocol_version_header(void) {
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+    server_arg_t sa = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &sa);
+
+    /* Initialize → harvest session id, then notifications/initialized. */
+    char *req = build_post(INIT_BODY, NULL);
+    char *resp = NULL; size_t rlen = 0;
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    char sid[64] = {0};
+    TEST_ASSERT(extract_header(resp, "Mcp-Session-Id", sid, sizeof sid) == 1);
+    free(resp);
+
+    const char *initialized_body =
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
+    req = build_post(initialized_body, sid);
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    free(resp);
+
+    const char *list_body =
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
+
+    /* Matching MCP-Protocol-Version → 200. */
+    req = build_post_pv(list_body, sid, CMCP_PROTOCOL_VERSION);
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    TEST_ASSERT(strncmp(resp, "HTTP/1.1 200 OK\r\n", 17) == 0);
+    free(resp);
+
+    /* Unsupported MCP-Protocol-Version → 400. */
+    req = build_post_pv(list_body, sid, "1999-01-01");
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    TEST_ASSERT(strncmp(resp, "HTTP/1.1 400", 12) == 0);
+    free(resp);
+
+    /* Absent MCP-Protocol-Version → accepted (spec default fallback). */
+    req = build_post(list_body, sid);
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    TEST_ASSERT(strncmp(resp, "HTTP/1.1 200 OK\r\n", 17) == 0);
+    free(resp);
+
+    cmcp_transport_close(t);
+    pthread_join(th, NULL);
+    cmcp_server_free(s);
+}
+
 static void test_close_unblocks_reader(void) {
     /* If nothing ever connects, cmcp_server_run is parked in read_fn.
      * Closing the transport must wake it so the server thread can exit. */
@@ -473,6 +561,7 @@ int main(void) {
     TEST_RUN(test_session_id_required_after_init);
     TEST_RUN(test_malformed_request);
     TEST_RUN(test_get_sse_handshake);
+    TEST_RUN(test_protocol_version_header);
     TEST_RUN(test_close_unblocks_reader);
 
     TEST_DONE();

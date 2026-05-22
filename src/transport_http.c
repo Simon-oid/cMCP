@@ -704,6 +704,20 @@ static void handle_get_sse(http_impl_t *impl, int fd, http_request_t *req) {
     }
 }
 
+/* Validate the MCP-Protocol-Version header (2025-06-18 transports
+ * section). Absent → accept: per spec the server falls back to the
+ * default revision. Present but not the version cMCP speaks → 400.
+ * Returns 1 to proceed, 0 if a 400 was already sent. */
+static int check_protocol_version(int fd, const http_request_t *req) {
+    const char *pv = http_header_get(req, "MCP-Protocol-Version");
+    if (pv && strcmp(pv, CMCP_PROTOCOL_VERSION) != 0) {
+        reply_error(fd, 400, "Bad Request",
+                     "unsupported MCP-Protocol-Version\n");
+        return 0;
+    }
+    return 1;
+}
+
 static void handle_one_connection(http_impl_t *impl, int fd) {
     http_request_t req = {0};
     int rc = http_read_request(fd, &req);
@@ -730,11 +744,13 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
                         strcmp(path, "/mcp") == 0);
 
     if (is_post_mcp) {
-        handle_post(impl, fd, &req);
+        if (check_protocol_version(fd, &req)) handle_post(impl, fd, &req);
         close(fd);
     } else if (is_get_mcp) {
         const char *acc = http_header_get(&req, "Accept");
-        if (acc && strstr(acc, "text/event-stream")) {
+        if (!check_protocol_version(fd, &req)) {
+            close(fd);
+        } else if (acc && strstr(acc, "text/event-stream")) {
             handle_get_sse(impl, fd, &req);
             /* fd ownership moves to the holder thread; do NOT close. */
         } else {

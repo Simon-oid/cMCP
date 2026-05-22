@@ -23,6 +23,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,6 +283,241 @@ static void test_close_unblocks_reader(void) {
 }
 
 /* ====================================================================== */
+/* Protocol-version header — a raw-socket sniffer that records whether    */
+/* the cMCP client emits MCP-Protocol-Version on the wire.                */
+/* ====================================================================== */
+
+typedef struct {
+    unsigned short  port;
+    int             listen_fd;
+    pthread_mutex_t mu;
+    int             stop;          /* teardown signal for the accept loop */
+    int             init_had_pv;   /* header on the initialize POST? (expect 0) */
+    int             req_seen;      /* a post-handshake request was processed */
+    int             req_had_pv;    /* header on that request? (expect 1) */
+} sniffer_t;
+
+static int send_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, buf + sent, len - sent, 0);
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+/* Read one HTTP request: head (through \r\n\r\n) plus a Content-Length
+ * body. Both buffers are malloc'd and NUL-terminated. */
+static int read_http_req(int fd, char **out_head, char **out_body,
+                          size_t *out_body_len) {
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) return -1;
+    char *hdr_end = NULL;
+    while (!hdr_end) {
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) { free(buf); return -1; }
+            buf = nb;
+        }
+        ssize_t n = recv(fd, buf + len, cap - 1 - len, 0);
+        if (n <= 0) { free(buf); return -1; }
+        len += (size_t)n;
+        buf[len] = '\0';
+        hdr_end = strstr(buf, "\r\n\r\n");
+    }
+    size_t head_len = (size_t)(hdr_end - buf) + 4;
+    size_t body_len = 0;
+    const char *cl = strstr(buf, "\r\nContent-Length:");
+    if (cl) body_len = (size_t)strtoul(cl + 17, NULL, 10);
+    while (len - head_len < body_len) {
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) { free(buf); return -1; }
+            buf = nb;
+        }
+        ssize_t n = recv(fd, buf + len, cap - 1 - len, 0);
+        if (n <= 0) { free(buf); return -1; }
+        len += (size_t)n;
+    }
+    char *head = (char *)malloc(head_len + 1);
+    char *body = (char *)malloc(body_len + 1);
+    if (!head || !body) { free(head); free(body); free(buf); return -1; }
+    memcpy(head, buf, head_len);     head[head_len] = '\0';
+    memcpy(body, buf + head_len, body_len); body[body_len] = '\0';
+    free(buf);
+    *out_head = head; *out_body = body; *out_body_len = body_len;
+    return 0;
+}
+
+/* Send an HTTP 200 wrapping a JSON-RPC response for `id`. */
+static void send_rpc_response(int fd, const cmcp_id_t *id,
+                               cmcp_json_t *result, const char *extra) {
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    cmcp_rpc_make_response(&resp, id, result);
+    char *json = cmcp_rpc_emit(&resp);
+    cmcp_rpc_message_clear(&resp);
+    if (!json) return;
+    char hdr[256];
+    int hn = snprintf(hdr, sizeof hdr,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "%s"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n",
+        extra ? extra : "", strlen(json));
+    if (hn > 0 && (size_t)hn < sizeof hdr) {
+        send_all(fd, hdr, (size_t)hn);
+        send_all(fd, json, strlen(json));
+    }
+    free(json);
+}
+
+static void handle_sniff_conn(sniffer_t *sn, int fd) {
+    char *head = NULL, *body = NULL; size_t blen = 0;
+    if (read_http_req(fd, &head, &body, &blen) != 0) return;
+
+    if (strncmp(head, "GET ", 4) == 0) {
+        /* The client's SSE GET — answer the upgrade and close. */
+        const char *sse = "HTTP/1.1 200 OK\r\n"
+                          "Content-Type: text/event-stream\r\n"
+                          "Connection: close\r\n\r\n";
+        send_all(fd, sse, strlen(sse));
+        free(head); free(body);
+        return;
+    }
+
+    int has_pv =
+        strstr(head, "MCP-Protocol-Version: " CMCP_PROTOCOL_VERSION) != NULL;
+
+    cmcp_rpc_message_t *msgs = NULL; size_t n = 0;
+    if (cmcp_rpc_parse(body, blen, &msgs, &n) != CMCP_OK || n != 1) {
+        cmcp_rpc_messages_free(msgs, n);
+        const char *e = "HTTP/1.1 400 Bad Request\r\n"
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        send_all(fd, e, strlen(e));
+        free(head); free(body);
+        return;
+    }
+    cmcp_rpc_message_t *m = &msgs[0];
+
+    if (m->kind == CMCP_MSG_NOTIFICATION) {
+        const char *acc = "HTTP/1.1 202 Accepted\r\n"
+                          "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        send_all(fd, acc, strlen(acc));
+    } else if (m->method && strcmp(m->method, "initialize") == 0) {
+        pthread_mutex_lock(&sn->mu);
+        sn->init_had_pv = has_pv;
+        pthread_mutex_unlock(&sn->mu);
+        cmcp_json_t *result = cmcp_json_new_object();
+        cmcp_json_object_set(result, "protocolVersion",
+                              cmcp_json_new_string(CMCP_PROTOCOL_VERSION));
+        cmcp_json_object_set(result, "capabilities", cmcp_json_new_object());
+        cmcp_json_t *si = cmcp_json_new_object();
+        cmcp_json_object_set(si, "name", cmcp_json_new_string("sniff-srv"));
+        cmcp_json_object_set(si, "version", cmcp_json_new_string("0.1.0"));
+        cmcp_json_object_set(result, "serverInfo", si);
+        send_rpc_response(fd, &m->id, result, "Mcp-Session-Id: sniff-1\r\n");
+    } else {
+        /* A post-handshake request — the one we want to inspect. */
+        pthread_mutex_lock(&sn->mu);
+        sn->req_had_pv = has_pv;
+        sn->req_seen   = 1;
+        pthread_mutex_unlock(&sn->mu);
+        send_rpc_response(fd, &m->id, cmcp_json_new_object(), NULL);
+    }
+    cmcp_rpc_messages_free(msgs, n);
+    free(head); free(body);
+}
+
+/* poll-with-timeout accept loop: close() does not reliably unblock a
+ * thread parked in accept(), so the loop polls and checks a stop flag
+ * (the same pattern the real HTTP server's acceptor uses). */
+static void *sniffer_main(void *arg) {
+    sniffer_t *sn = (sniffer_t *)arg;
+    for (;;) {
+        pthread_mutex_lock(&sn->mu);
+        int stop = sn->stop;
+        pthread_mutex_unlock(&sn->mu);
+        if (stop) return NULL;
+
+        struct pollfd p = { sn->listen_fd, POLLIN, 0 };
+        if (poll(&p, 1, 100) <= 0) continue;
+        int cfd = accept(sn->listen_fd, NULL, NULL);
+        if (cfd < 0) continue;
+        handle_sniff_conn(sn, cfd);
+        close(cfd);
+    }
+}
+
+static int sniffer_listen(unsigned short port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family      = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port        = htons(port);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        close(fd); return -1;
+    }
+    if (listen(fd, 16) != 0) { close(fd); return -1; }
+    return fd;
+}
+
+static void test_client_sends_protocol_version(void) {
+    sniffer_t sn;
+    memset(&sn, 0, sizeof sn);
+    pthread_mutex_init(&sn.mu, NULL);
+    sn.port = pick_port();
+    TEST_ASSERT(sn.port != 0);
+    sn.listen_fd = sniffer_listen(sn.port);
+    TEST_ASSERT(sn.listen_fd >= 0);
+
+    pthread_t th;
+    TEST_ASSERT(pthread_create(&th, NULL, sniffer_main, &sn) == 0);
+
+    char *url = make_url(sn.port);
+    cmcp_transport_t *ct = cmcp_transport_http_connect(url);
+    free(url);
+    TEST_ASSERT(ct != NULL);
+
+    cmcp_client_t *cli = cmcp_client_new("pv-cli", "0.0.1");
+    TEST_ASSERT(cmcp_client_handshake(cli, ct) == CMCP_OK);
+
+    /* One post-handshake request — its POST must carry the header. */
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    TEST_ASSERT(cmcp_client_request(cli, "ping", NULL, &resp) == CMCP_OK);
+    cmcp_rpc_message_clear(&resp);
+
+    pthread_mutex_lock(&sn.mu);
+    int init_pv  = sn.init_had_pv;
+    int req_seen = sn.req_seen;
+    int req_pv   = sn.req_had_pv;
+    pthread_mutex_unlock(&sn.mu);
+
+    TEST_ASSERT(init_pv  == 0);   /* not sent before the version is known */
+    TEST_ASSERT(req_seen == 1);
+    TEST_ASSERT(req_pv   == 1);   /* sent on every post-handshake request */
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(ct);
+    pthread_mutex_lock(&sn.mu);
+    sn.stop = 1;                  /* the poll loop exits within ~100ms */
+    pthread_mutex_unlock(&sn.mu);
+    pthread_join(th, NULL);
+    close(sn.listen_fd);
+    pthread_mutex_destroy(&sn.mu);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_http_client:\n");
@@ -290,6 +526,7 @@ int main(void) {
     TEST_RUN(test_async_multi_inflight);
     TEST_RUN(test_session_id_propagates);
     TEST_RUN(test_close_unblocks_reader);
+    TEST_RUN(test_client_sends_protocol_version);
 
     TEST_DONE();
 }

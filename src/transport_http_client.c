@@ -187,12 +187,18 @@ static int do_post(http_client_impl_t *impl,
 
     char sid_header[96] = {0};
     pthread_mutex_lock(&impl->session_mu);
-    if (impl->session_set) {
+    int post_init = impl->session_set;
+    if (post_init) {
         snprintf(sid_header, sizeof sid_header,
                   "Mcp-Session-Id: %s", impl->session_id);
     }
     pthread_mutex_unlock(&impl->session_mu);
     if (sid_header[0]) headers = curl_slist_append(headers, sid_header);
+    /* Once the handshake has latched a session, every subsequent
+     * request MUST carry the negotiated protocol version. */
+    if (post_init)
+        headers = curl_slist_append(headers,
+                    "MCP-Protocol-Version: " CMCP_PROTOCOL_VERSION);
 
     post_state_t ps = {0};
 
@@ -360,6 +366,8 @@ static void *sse_thread_main(void *arg) {
     headers = curl_slist_append(headers, "Accept: text/event-stream");
     headers = curl_slist_append(headers, "Cache-Control: no-cache");
     headers = curl_slist_append(headers, sid_header);
+    headers = curl_slist_append(headers,
+                "MCP-Protocol-Version: " CMCP_PROTOCOL_VERSION);
 
     curl_easy_setopt(c, CURLOPT_URL,             impl->url);
     curl_easy_setopt(c, CURLOPT_HTTPGET,         1L);
