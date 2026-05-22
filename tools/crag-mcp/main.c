@@ -114,7 +114,9 @@ static cmcp_json_t *single_text_array(const char *text) {
 #define CRAG_SEARCH_MIN_COSINE  0.50f
 
 static int crag_search_handler(const cmcp_json_t *args, void *userdata,
+                                cmcp_handler_ctx_t *hctx,
                                 cmcp_json_t **out_content, int *out_is_error) {
+    (void)hctx;
     crag_mcp_ctx_t *ctx = (crag_mcp_ctx_t *)userdata;
 
     /* Schema validator already enforced shape; safe to assume args is
@@ -229,8 +231,9 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
 /* ====================================================================== */
 
 static int crag_stats_handler(const cmcp_json_t *args, void *userdata,
+                               cmcp_handler_ctx_t *hctx,
                                cmcp_json_t **out_content, int *out_is_error) {
-    (void)args;
+    (void)args; (void)hctx;
     crag_mcp_ctx_t *ctx = (crag_mcp_ctx_t *)userdata;
 
     crag_store_stats_t stats = {0};
@@ -255,7 +258,9 @@ static int crag_stats_handler(const cmcp_json_t *args, void *userdata,
 /* ====================================================================== */
 
 static int crag_stats_resource(const char *uri, void *userdata,
+                                cmcp_handler_ctx_t *hctx,
                                 cmcp_json_t **out_contents, int *out_is_error) {
+    (void)hctx;
     crag_mcp_ctx_t *ctx = (crag_mcp_ctx_t *)userdata;
 
     crag_store_stats_t stats = {0};

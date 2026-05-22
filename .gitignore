@@ -17,6 +17,12 @@ tests/test_*
 !tests/test_*.c
 !tests/test.h
 
+# Conformance harness: the built C driver + npm-installed reference SDKs.
+# package.json / *.mjs ARE tracked; node_modules and the binary are not.
+conformance/client_vs_ts
+conformance/node_modules/
+conformance/package-lock.json
+
 # Editor / tool state
 .claude/
 

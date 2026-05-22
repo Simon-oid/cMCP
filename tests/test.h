@@ -21,6 +21,13 @@ static int g_test_fails = 0;
     fn();                                                                       \
 } while (0)
 
+/* Like TEST_RUN, but for test functions taking a single argument —
+ * e.g. a fixture or connection reused across cases. */
+#define TEST_RUN_ARG(fn, arg) do {                                             \
+    fprintf(stderr, "  - %s\n", #fn);                                          \
+    fn(arg);                                                                    \
+} while (0)
+
 #define TEST_DONE() do {                                                       \
     fprintf(stderr, "  %d/%d assertions passed\n",                             \
             g_test_count - g_test_fails, g_test_count);                        \

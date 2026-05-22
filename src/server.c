@@ -1,13 +1,19 @@
+/* _POSIX_C_SOURCE: clock_gettime, CLOCK_MONOTONIC, pthread_condattr_setclock
+ * — used by the handler-timeout watchdog. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "cmcp.h"
 #include "cmcp_server.h"
 #include "cmcp_json.h"
 #include "cmcp_schema.h"
 #include "cmcp_types.h"
 #include "cmcp_transport.h"
+#include "worker.h"
 
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ====================================================================== */
 /* Lifecycle states                                                        */
@@ -50,6 +56,14 @@ typedef struct {
     void                   *userdata;
 } server_prompt_t;
 
+/* One in-flight pool request: its id, the handler ctx whose cancel flag
+ * to flip, and a monotonic deadline for the timeout watchdog. */
+typedef struct {
+    cmcp_id_t            id;        /* owned copy of the request id */
+    cmcp_handler_ctx_t  *ctx;       /* borrowed: lives in the work_item */
+    struct timespec      deadline;  /* CLOCK_MONOTONIC; {0,0} = no timeout */
+} inflight_entry_t;
+
 struct cmcp_server {
     char                       *name;
     char                       *version;
@@ -90,6 +104,16 @@ struct cmcp_server {
     cmcp_transport_t            *active_transport;
     pthread_mutex_t              notify_mu;
     int                          notify_mu_init;
+
+    /* In-flight pool requests, for cancellation + the timeout watchdog.
+     * Registered at enqueue, removed when the worker finishes. inflight_mu
+     * guards the table AND each ctx's `cancelled` flag. */
+    inflight_entry_t            *inflight;
+    size_t                       n_inflight;
+    size_t                       cap_inflight;
+    pthread_mutex_t              inflight_mu;
+    int                          inflight_mu_init;
+    long                         handler_timeout_ms;  /* 0 = watchdog off */
 };
 
 /* ====================================================================== */
@@ -121,6 +145,12 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
         return NULL;
     }
     s->notify_mu_init = 1;
+    if (pthread_mutex_init(&s->inflight_mu, NULL) != 0) {
+        pthread_mutex_destroy(&s->notify_mu);
+        free(s->name); free(s->version); free(s);
+        return NULL;
+    }
+    s->inflight_mu_init = 1;
     return s;
 }
 
@@ -157,7 +187,13 @@ void cmcp_server_free(cmcp_server_t *s) {
     free(s->prompts);
     for (size_t i = 0; i < s->n_subs; i++) free(s->sub_uris[i]);
     free(s->sub_uris);
+    /* The run loop drains the pool before returning, so no in-flight
+     * entry should survive; clear any stray id copies defensively. */
+    for (size_t i = 0; i < s->n_inflight; i++)
+        cmcp_id_clear(&s->inflight[i].id);
+    free(s->inflight);
     if (s->notify_mu_init) pthread_mutex_destroy(&s->notify_mu);
+    if (s->inflight_mu_init) pthread_mutex_destroy(&s->inflight_mu);
     free(s);
 }
 
@@ -529,12 +565,265 @@ static void handle_tools_list(cmcp_server_t *s,
 }
 
 /* ====================================================================== */
+/* Handler context                                                         */
+/* ====================================================================== */
+
+/* Per-call handle passed to every handler. Created on the worker (or
+ * loop) stack for the duration of one handler call; the borrowed
+ * pointers (server, progress_token) are valid only that long. */
+struct cmcp_handler_ctx {
+    cmcp_server_t      *server;          /* for emitting progress */
+    const cmcp_json_t  *progress_token;  /* params._meta.progressToken,
+                                          * NULL if the caller sent none */
+    int                 cancelled;       /* set by notifications/cancelled;
+                                          * wired in Phase 3.4 Step 3 */
+};
+
+/* params._meta.progressToken — a string or int per spec — or NULL. The
+ * returned pointer is borrowed from `params`. */
+static const cmcp_json_t *meta_progress_token(const cmcp_json_t *params) {
+    if (!params || params->type != CMCP_JSON_OBJECT) return NULL;
+    const cmcp_json_t *meta = cmcp_json_object_get(params, "_meta");
+    if (!meta || meta->type != CMCP_JSON_OBJECT) return NULL;
+    const cmcp_json_t *tok = cmcp_json_object_get(meta, "progressToken");
+    if (tok && (tok->type == CMCP_JSON_STRING || tok->type == CMCP_JSON_INT))
+        return tok;
+    return NULL;
+}
+
+int cmcp_handler_cancelled(const cmcp_handler_ctx_t *hctx) {
+    if (!hctx) return 0;
+    /* `cancelled` is written by the cancel / watchdog paths under
+     * inflight_mu; read it under the same lock. */
+    pthread_mutex_lock(&hctx->server->inflight_mu);
+    int c = hctx->cancelled;
+    pthread_mutex_unlock(&hctx->server->inflight_mu);
+    return c;
+}
+
+int cmcp_handler_progress(cmcp_handler_ctx_t *hctx,
+                          double progress, double total,
+                          const char *message) {
+    if (!hctx || !hctx->progress_token) return CMCP_OK;
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "progressToken",
+                         cmcp_json_clone(hctx->progress_token));
+    cmcp_json_object_set(params, "progress", cmcp_json_new_double(progress));
+    if (total >= 0)
+        cmcp_json_object_set(params, "total", cmcp_json_new_double(total));
+    if (message)
+        cmcp_json_object_set(params, "message",
+                             cmcp_json_new_string(message));
+    return cmcp_server_notify(hctx->server, "notifications/progress", params);
+}
+
+/* ====================================================================== */
+/* In-flight registry + cancellation                                       */
+/* ====================================================================== */
+
+/* Compare an owned request id against the JSON `requestId` of a
+ * notifications/cancelled frame. Returns 1 on a match. */
+static int id_equals_json(const cmcp_id_t *id, const cmcp_json_t *j) {
+    if (!id || !j) return 0;
+    if (id->kind == CMCP_ID_INT && j->type == CMCP_JSON_INT)
+        return id->i == j->i;
+    if (id->kind == CMCP_ID_STRING && j->type == CMCP_JSON_STRING)
+        return j->str.s && strcmp(id->s, j->str.s) == 0;
+    return 0;
+}
+
+/* Register a pool request before it is submitted, so a cancel arriving
+ * while the request is still queued is not lost. Copies the id; the
+ * `ctx` pointer is borrowed (it lives in the work_item). Stamps a
+ * monotonic deadline when the timeout watchdog is enabled. */
+static int inflight_register(cmcp_server_t *s, const cmcp_id_t *id,
+                             cmcp_handler_ctx_t *ctx) {
+    pthread_mutex_lock(&s->inflight_mu);
+    if (s->n_inflight == s->cap_inflight) {
+        size_t newcap = s->cap_inflight ? s->cap_inflight * 2 : 8;
+        inflight_entry_t *ni = (inflight_entry_t *)realloc(
+            s->inflight, newcap * sizeof *ni);
+        if (!ni) { pthread_mutex_unlock(&s->inflight_mu); return CMCP_ENOMEM; }
+        s->inflight     = ni;
+        s->cap_inflight = newcap;
+    }
+    inflight_entry_t *e = &s->inflight[s->n_inflight];
+    memset(e, 0, sizeof *e);
+    if (cmcp_id_copy(&e->id, id) != CMCP_OK) {
+        pthread_mutex_unlock(&s->inflight_mu);
+        return CMCP_ENOMEM;
+    }
+    e->ctx = ctx;
+    if (s->handler_timeout_ms > 0) {
+        struct timespec d;
+        clock_gettime(CLOCK_MONOTONIC, &d);
+        long ms = s->handler_timeout_ms;
+        d.tv_sec  += ms / 1000;
+        d.tv_nsec += (ms % 1000) * 1000000L;
+        if (d.tv_nsec >= 1000000000L) { d.tv_sec++; d.tv_nsec -= 1000000000L; }
+        e->deadline = d;
+    }
+    s->n_inflight++;
+    pthread_mutex_unlock(&s->inflight_mu);
+    return CMCP_OK;
+}
+
+/* Remove the entry for `ctx` and report, under the same lock, whether
+ * it had been cancelled — so the caller's decision can't race a cancel
+ * that lands a moment later. Once removed, no cancel/watchdog thread can
+ * reach `ctx`, which is about to be freed with its work_item. */
+static int inflight_finish(cmcp_server_t *s, const cmcp_handler_ctx_t *ctx) {
+    int cancelled = 0;
+    pthread_mutex_lock(&s->inflight_mu);
+    for (size_t i = 0; i < s->n_inflight; i++) {
+        if (s->inflight[i].ctx == ctx) {
+            cancelled = s->inflight[i].ctx->cancelled;
+            cmcp_id_clear(&s->inflight[i].id);
+            for (size_t j = i + 1; j < s->n_inflight; j++)
+                s->inflight[j - 1] = s->inflight[j];
+            s->n_inflight--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s->inflight_mu);
+    return cancelled;
+}
+
+/* Flag the in-flight request whose id matches `request_id` (a cancel
+ * notification's payload). A no-op if it already finished. */
+static void inflight_cancel(cmcp_server_t *s, const cmcp_json_t *request_id) {
+    pthread_mutex_lock(&s->inflight_mu);
+    for (size_t i = 0; i < s->n_inflight; i++) {
+        if (id_equals_json(&s->inflight[i].id, request_id)) {
+            s->inflight[i].ctx->cancelled = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s->inflight_mu);
+}
+
+/* Flag every in-flight request — used at shutdown, when the peer is
+ * gone and any response would only fail on a dead transport. */
+static void inflight_cancel_all(cmcp_server_t *s) {
+    pthread_mutex_lock(&s->inflight_mu);
+    for (size_t i = 0; i < s->n_inflight; i++)
+        s->inflight[i].ctx->cancelled = 1;
+    pthread_mutex_unlock(&s->inflight_mu);
+}
+
+/* ====================================================================== */
+/* Handler-timeout watchdog                                                */
+/* ====================================================================== */
+
+/* Per-handler timeout from $CMCP_HANDLER_TIMEOUT_MS (default 30000).
+ * A value of 0 disables the watchdog entirely. */
+static long resolve_handler_timeout(void) {
+    const char *e = getenv("CMCP_HANDLER_TIMEOUT_MS");
+    if (e && *e) {
+        char *end;
+        long v = strtol(e, &end, 10);
+        if (*end == '\0' && v >= 0) return v;
+    }
+    return 30000;
+}
+
+/* A background thread that periodically flags in-flight requests whose
+ * deadline has passed. It only sets the cooperative `cancelled` bit —
+ * it never kills a thread; a handler that ignores the bit still runs to
+ * completion (its response is then dropped, like any cancellation). */
+typedef struct {
+    cmcp_server_t  *server;
+    pthread_t       thread;
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;       /* CLOCK_MONOTONIC */
+    int             stop;
+    int             started;
+} watchdog_t;
+
+static void watchdog_sweep(cmcp_server_t *s) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    pthread_mutex_lock(&s->inflight_mu);
+    for (size_t i = 0; i < s->n_inflight; i++) {
+        inflight_entry_t *e = &s->inflight[i];
+        if (e->deadline.tv_sec == 0 && e->deadline.tv_nsec == 0) continue;
+        if (now.tv_sec > e->deadline.tv_sec ||
+            (now.tv_sec == e->deadline.tv_sec &&
+             now.tv_nsec >= e->deadline.tv_nsec)) {
+            e->ctx->cancelled = 1;
+        }
+    }
+    pthread_mutex_unlock(&s->inflight_mu);
+}
+
+static void *watchdog_main(void *arg) {
+    watchdog_t *wd = (watchdog_t *)arg;
+    pthread_mutex_lock(&wd->mu);
+    while (!wd->stop) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_nsec += 200 * 1000 * 1000;   /* 200ms poll */
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&wd->cv, &wd->mu, &ts);
+        if (wd->stop) break;
+        pthread_mutex_unlock(&wd->mu);
+        watchdog_sweep(wd->server);
+        pthread_mutex_lock(&wd->mu);
+    }
+    pthread_mutex_unlock(&wd->mu);
+    return NULL;
+}
+
+/* Start the watchdog. A no-op (leaving wd->started == 0) when the
+ * timeout is disabled. */
+static int watchdog_start(watchdog_t *wd, cmcp_server_t *s) {
+    memset(wd, 0, sizeof *wd);
+    wd->server = s;
+    if (s->handler_timeout_ms <= 0) return CMCP_OK;   /* disabled */
+
+    pthread_condattr_t ca;
+    pthread_condattr_init(&ca);
+    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+    if (pthread_mutex_init(&wd->mu, NULL) != 0) {
+        pthread_condattr_destroy(&ca);
+        return CMCP_ENOMEM;
+    }
+    if (pthread_cond_init(&wd->cv, &ca) != 0) {
+        pthread_condattr_destroy(&ca);
+        pthread_mutex_destroy(&wd->mu);
+        return CMCP_ENOMEM;
+    }
+    pthread_condattr_destroy(&ca);
+    if (pthread_create(&wd->thread, NULL, watchdog_main, wd) != 0) {
+        pthread_mutex_destroy(&wd->mu);
+        pthread_cond_destroy(&wd->cv);
+        return CMCP_ENOMEM;
+    }
+    wd->started = 1;
+    return CMCP_OK;
+}
+
+static void watchdog_stop(watchdog_t *wd) {
+    if (!wd->started) return;
+    pthread_mutex_lock(&wd->mu);
+    wd->stop = 1;
+    pthread_cond_signal(&wd->cv);
+    pthread_mutex_unlock(&wd->mu);
+    pthread_join(wd->thread, NULL);
+    pthread_mutex_destroy(&wd->mu);
+    pthread_cond_destroy(&wd->cv);
+    wd->started = 0;
+}
+
+/* ====================================================================== */
 /* tools/call                                                              */
 /* ====================================================================== */
 
 static void handle_tools_call(cmcp_server_t *s,
                                const cmcp_rpc_message_t *req,
-                               cmcp_rpc_message_t *resp) {
+                               cmcp_rpc_message_t *resp,
+                               cmcp_handler_ctx_t *hctx) {
     if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
         reply_invalid_params(resp, &req->id,
                               "tools/call requires params object", NULL);
@@ -587,9 +876,19 @@ static void handle_tools_call(cmcp_server_t *s,
         }
     }
 
+    /* The pool path supplies a ctx (registered for cancel + timeout);
+     * a NULL hctx — only the inline safety-net path — gets a transient
+     * one with no cancellation wiring. */
+    cmcp_handler_ctx_t local;
+    if (!hctx) {
+        local.server         = s;
+        local.progress_token = meta_progress_token(req->params);
+        local.cancelled      = 0;
+        hctx = &local;
+    }
     cmcp_json_t *content = NULL;
     int is_error = 0;
-    int rc = t->handler(args, t->userdata, &content, &is_error);
+    int rc = t->handler(args, t->userdata, hctx, &content, &is_error);
     if (rc != CMCP_OK) {
         cmcp_json_free(content);
         cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
@@ -641,7 +940,8 @@ static void handle_resources_list(cmcp_server_t *s,
 
 static void handle_resources_read(cmcp_server_t *s,
                                    const cmcp_rpc_message_t *req,
-                                   cmcp_rpc_message_t *resp) {
+                                   cmcp_rpc_message_t *resp,
+                                   cmcp_handler_ctx_t *hctx) {
     if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
         reply_invalid_params(resp, &req->id,
                               "resources/read requires params object", NULL);
@@ -661,9 +961,16 @@ static void handle_resources_read(cmcp_server_t *s,
         return;
     }
 
+    cmcp_handler_ctx_t local;
+    if (!hctx) {
+        local.server         = s;
+        local.progress_token = meta_progress_token(req->params);
+        local.cancelled      = 0;
+        hctx = &local;
+    }
     cmcp_json_t *contents = NULL;
     int is_error = 0;
-    int rc = r->read(r->uri, r->userdata, &contents, &is_error);
+    int rc = r->read(r->uri, r->userdata, hctx, &contents, &is_error);
     if (rc != CMCP_OK) {
         cmcp_json_free(contents);
         cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
@@ -804,7 +1111,8 @@ static int check_required_prompt_args(const server_prompt_t *p,
 
 static void handle_prompts_get(cmcp_server_t *s,
                                 const cmcp_rpc_message_t *req,
-                                cmcp_rpc_message_t *resp) {
+                                cmcp_rpc_message_t *resp,
+                                cmcp_handler_ctx_t *hctx) {
     if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
         reply_invalid_params(resp, &req->id,
                               "prompts/get requires params object", NULL);
@@ -836,8 +1144,15 @@ static void handle_prompts_get(cmcp_server_t *s,
         return;
     }
 
+    cmcp_handler_ctx_t local;
+    if (!hctx) {
+        local.server         = s;
+        local.progress_token = meta_progress_token(req->params);
+        local.cancelled      = 0;
+        hctx = &local;
+    }
     cmcp_json_t *messages = NULL;
-    int rc = p->handler(args, p->userdata, &messages);
+    int rc = p->handler(args, p->userdata, hctx, &messages);
     if (rc != CMCP_OK) {
         cmcp_json_free(messages);
         cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
@@ -859,10 +1174,13 @@ static void handle_prompts_get(cmcp_server_t *s,
 /* ====================================================================== */
 
 /* Dispatch one parsed message. For requests, *resp is initialised by
- * this function and the caller must clear it. */
+ * this function and the caller must clear it. `hctx` is the per-call
+ * handle for handler-invoking requests (cancellation + progress); it is
+ * NULL for the inline path, where no handler runs. */
 static void server_handle_message(cmcp_server_t *s,
                                    const cmcp_rpc_message_t *msg,
-                                   cmcp_rpc_message_t *resp) {
+                                   cmcp_rpc_message_t *resp,
+                                   cmcp_handler_ctx_t *hctx) {
     cmcp_rpc_message_init(resp);
 
     if (msg->kind == CMCP_MSG_RESPONSE) {
@@ -877,6 +1195,13 @@ static void server_handle_message(cmcp_server_t *s,
             strcmp(msg->method, "notifications/initialized") == 0) {
             if (s->state == SS_HANDSHAKE) s->state = SS_READY;
             /* Otherwise: stray initialized; ignore. */
+        } else if (msg->method &&
+                   strcmp(msg->method, "notifications/cancelled") == 0) {
+            /* Cooperative cancellation: flag the in-flight request so
+             * its handler can bail and its response is dropped. */
+            const cmcp_json_t *rid = msg->params
+                ? cmcp_json_object_get(msg->params, "requestId") : NULL;
+            if (rid) inflight_cancel(s, rid);
         }
         /* All other notifications: drop silently per JSON-RPC spec. */
         return;
@@ -900,7 +1225,7 @@ static void server_handle_message(cmcp_server_t *s,
         return;
     }
     if (strcmp(msg->method, "tools/call") == 0) {
-        handle_tools_call(s, msg, resp);
+        handle_tools_call(s, msg, resp, hctx);
         return;
     }
     if (strcmp(msg->method, "resources/list") == 0) {
@@ -908,7 +1233,7 @@ static void server_handle_message(cmcp_server_t *s,
         return;
     }
     if (strcmp(msg->method, "resources/read") == 0) {
-        handle_resources_read(s, msg, resp);
+        handle_resources_read(s, msg, resp, hctx);
         return;
     }
     if (strcmp(msg->method, "resources/subscribe") == 0) {
@@ -924,7 +1249,7 @@ static void server_handle_message(cmcp_server_t *s,
         return;
     }
     if (strcmp(msg->method, "prompts/get") == 0) {
-        handle_prompts_get(s, msg, resp);
+        handle_prompts_get(s, msg, resp, hctx);
         return;
     }
 
@@ -954,11 +1279,81 @@ static void send_parse_error(cmcp_transport_t *t) {
 }
 
 /* ====================================================================== */
+/* Worker-pool dispatch                                                     */
+/* ====================================================================== */
+
+/* Methods whose handling invokes a user-supplied handler. These are
+ * dispatched to the worker pool so a slow handler can't stall the run
+ * loop. Every other method (the handshake, the list queries,
+ * subscribe/unsubscribe) is cheap and either read-only or touches the
+ * lifecycle FSM, so it stays inline on the loop thread — that keeps the
+ * FSM single-threaded and lock-free. */
+static int is_pool_method(const char *method) {
+    return method && (
+        strcmp(method, "tools/call")     == 0 ||
+        strcmp(method, "resources/read") == 0 ||
+        strcmp(method, "prompts/get")    == 0);
+}
+
+/* Worker-thread count from $CMCP_WORKERS, clamped to [1,64], default 4. */
+static size_t resolve_worker_count(void) {
+    const char *e = getenv("CMCP_WORKERS");
+    if (e && *e) {
+        char *end;
+        long v = strtol(e, &end, 10);
+        if (*end == '\0' && v >= 1 && v <= 64) return (size_t)v;
+    }
+    return 4;
+}
+
+/* A request handed to the pool. It owns `msg` and embeds the `ctx`
+ * that the in-flight table points at; `server` and `transport` are
+ * borrowed — both outlive the pool, because the run loop joins the pool
+ * (cmcp_pool_free) before it returns. */
+typedef struct {
+    cmcp_server_t      *server;
+    cmcp_transport_t   *transport;
+    cmcp_rpc_message_t  msg;
+    cmcp_handler_ctx_t  ctx;
+} work_item_t;
+
+/* Worker entry point: run one request to completion and reply. The
+ * transport's write_fn is internally mutex-guarded, so concurrent
+ * workers (and cmcp_server_notify) never interleave frames. */
+static void process_work(void *arg) {
+    work_item_t *w = (work_item_t *)arg;
+    cmcp_rpc_message_t resp;
+    server_handle_message(w->server, &w->msg, &resp, &w->ctx);
+    /* Deregister before the reply decision (and before freeing the
+     * work_item that holds `ctx`): inflight_finish removes the entry
+     * and reports the final cancelled state under one lock. */
+    int cancelled = inflight_finish(w->server, &w->ctx);
+    /* Per the MCP spec a cancelled request SHOULD NOT get a response. */
+    if (!cancelled)
+        send_message(w->transport, &resp);
+    cmcp_rpc_message_clear(&resp);
+    cmcp_rpc_message_clear(&w->msg);
+    free(w);
+}
+
+/* ====================================================================== */
 /* Run loop                                                                */
 /* ====================================================================== */
 
 int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
     if (!s || !t) return CMCP_EINVAL;
+
+    cmcp_pool_t *pool = cmcp_pool_new(resolve_worker_count());
+    if (!pool) return CMCP_ENOMEM;
+
+    /* Handler-timeout watchdog — disabled when the timeout resolves
+     * to 0. Started before the loop so the first request is covered. */
+    s->handler_timeout_ms = resolve_handler_timeout();
+    watchdog_t wd;
+    if (watchdog_start(&wd, s) != CMCP_OK) {
+        cmcp_pool_free(pool);
+        return CMCP_ENOMEM;
+    }
 
     /* Make the transport available to cmcp_server_notify callers
      * (handlers + external threads). */
@@ -1006,8 +1401,59 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
             continue;
         }
 
+        /* Exactly one well-formed message. A handler-invoking request,
+         * once the handshake is complete, goes to the worker pool so a
+         * slow handler can't stall this loop. Everything else — the
+         * handshake itself, list/subscribe queries, notifications — is
+         * handled inline, keeping the lifecycle FSM on this one thread. */
+        if (msgs[0].kind == CMCP_MSG_REQUEST &&
+            s->state == SS_READY &&
+            is_pool_method(msgs[0].method)) {
+            work_item_t *w = (work_item_t *)malloc(sizeof *w);
+            if (!w) {
+                /* Can't queue it — answer -32603 inline so the caller
+                 * is not left waiting forever. */
+                cmcp_rpc_message_t e;
+                if (cmcp_rpc_make_error(&e, &msgs[0].id,
+                        CMCP_RPC_INTERNAL_ERROR,
+                        "Server out of memory", NULL) == CMCP_OK) {
+                    send_message(t, &e);
+                    cmcp_rpc_message_clear(&e);
+                }
+                cmcp_rpc_messages_free(msgs, n);
+                continue;
+            }
+            w->server    = s;
+            w->transport = t;
+            w->msg       = msgs[0];   /* move: w->msg now owns the fields */
+            free(msgs);               /* free the array container only   */
+            w->ctx.server         = s;
+            w->ctx.progress_token = meta_progress_token(w->msg.params);
+            w->ctx.cancelled      = 0;
+            /* Register before submit so a cancel racing in while the
+             * request is still queued is not lost. */
+            if (inflight_register(s, &w->msg.id, &w->ctx) != CMCP_OK) {
+                cmcp_rpc_message_t e;
+                if (cmcp_rpc_make_error(&e, &w->msg.id,
+                        CMCP_RPC_INTERNAL_ERROR,
+                        "Server out of memory", NULL) == CMCP_OK) {
+                    send_message(t, &e);
+                    cmcp_rpc_message_clear(&e);
+                }
+                cmcp_rpc_message_clear(&w->msg);
+                free(w);
+                continue;
+            }
+            if (cmcp_pool_submit(pool, process_work, w) != CMCP_OK) {
+                /* Pool not accepting — only happens at shutdown, which
+                 * can't occur mid-loop. Run inline as a safety net. */
+                process_work(w);
+            }
+            continue;
+        }
+
         cmcp_rpc_message_t resp;
-        server_handle_message(s, &msgs[0], &resp);
+        server_handle_message(s, &msgs[0], &resp, NULL);
 
         /* Only requests get replies. */
         if (msgs[0].kind == CMCP_MSG_REQUEST) {
@@ -1016,6 +1462,19 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
         cmcp_rpc_message_clear(&resp);
         cmcp_rpc_messages_free(msgs, n);
     }
+
+    /* The peer is gone: flag every in-flight handler so cooperative
+     * ones bail early and their undeliverable responses are dropped. */
+    inflight_cancel_all(s);
+
+    /* Drain + join the pool BEFORE detaching the transport: a draining
+     * worker may still call send_message / cmcp_server_notify, both of
+     * which need the transport to still be live. */
+    cmcp_pool_free(pool);
+
+    /* Pool is joined — the in-flight table is now empty — so stop the
+     * watchdog; it has nothing left to sweep. */
+    watchdog_stop(&wd);
 
     pthread_mutex_lock(&s->notify_mu);
     s->active_transport = NULL;

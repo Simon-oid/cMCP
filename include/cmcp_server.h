@@ -22,6 +22,32 @@ void cmcp_server_set_capabilities(cmcp_server_t *s,
                                    const cmcp_server_capabilities_t *caps);
 
 /* ====================================================================== */
+/* Handler context                                                         */
+/* ====================================================================== */
+
+/* Opaque per-call handle the library passes to every handler. It is the
+ * handler's channel back to the run loop for two things: cooperative
+ * cancellation and progress reporting. Valid only for the duration of
+ * the handler call — do not retain the pointer past it. */
+typedef struct cmcp_handler_ctx cmcp_handler_ctx_t;
+
+/* Non-zero once the peer has asked to cancel this call (sent a
+ * `notifications/cancelled` for this request id) or the handler timeout
+ * has elapsed. A long-running handler should poll this and return early
+ * when set; cancellation is cooperative — a handler that never polls
+ * simply runs to completion. NULL-safe (returns 0). */
+int cmcp_handler_cancelled(const cmcp_handler_ctx_t *hctx);
+
+/* Emit a `notifications/progress` update for this call. `progress` is
+ * the amount done so far; `total` is the expected total, or negative if
+ * unknown. `message` is an optional human-readable status (may be
+ * NULL). If the caller attached no progressToken this is a no-op
+ * returning CMCP_OK — a handler never has to branch on that. NULL-safe. */
+int cmcp_handler_progress(cmcp_handler_ctx_t *hctx,
+                          double progress, double total,
+                          const char *message);
+
+/* ====================================================================== */
 /* Tool registry                                                           */
 /* ====================================================================== */
 
@@ -31,6 +57,8 @@ void cmcp_server_set_capabilities(cmcp_server_t *s,
  *                    request. May be NULL if the caller sent no args.
  *                    Borrowed — handler must NOT free.
  *   `userdata`       Whatever was passed at registration time.
+ *   `hctx`           Per-call handle — cancellation + progress. See
+ *                    cmcp_handler_cancelled / cmcp_handler_progress.
  *   `out_content`    OUT. Handler must set to an owned cmcp_json_t array
  *                    of content items, e.g. [{"type":"text","text":...}].
  *                    Library wraps NULL as an empty array. The library
@@ -46,6 +74,7 @@ void cmcp_server_set_capabilities(cmcp_server_t *s,
  * INTERNAL_ERROR (-32603) and `out_*` values are ignored. */
 typedef int (*cmcp_tool_handler_fn)(const cmcp_json_t *arguments,
                                      void *userdata,
+                                     cmcp_handler_ctx_t *hctx,
                                      cmcp_json_t **out_content,
                                      int *out_is_error);
 
@@ -90,6 +119,8 @@ cmcp_json_t *cmcp_tool_text_content(const char *text);
  *                   resource's registered URI (the dispatcher matches
  *                   before invoking). Borrowed.
  *   `userdata`      Whatever was passed at registration time.
+ *   `hctx`          Per-call handle — cancellation + progress. See
+ *                   cmcp_handler_cancelled / cmcp_handler_progress.
  *   `out_contents`  OUT. Owned cmcp_json_t array of content items, e.g.
  *                   [{"uri":..., "mimeType":..., "text":...}]. The
  *                   library takes ownership on success. NULL is treated
@@ -103,6 +134,7 @@ cmcp_json_t *cmcp_tool_text_content(const char *text);
  * INTERNAL_ERROR (-32603) and `out_*` values are ignored. */
 typedef int (*cmcp_resource_read_fn)(const char *uri,
                                       void *userdata,
+                                      cmcp_handler_ctx_t *hctx,
                                       cmcp_json_t **out_contents,
                                       int *out_is_error);
 
@@ -137,6 +169,8 @@ cmcp_json_t *cmcp_resource_text_contents(const char *uri,
  *   `arguments`    The parsed `params.arguments` object from the
  *                  request. May be NULL. Borrowed.
  *   `userdata`     Whatever was passed at registration time.
+ *   `hctx`         Per-call handle — cancellation + progress. See
+ *                  cmcp_handler_cancelled / cmcp_handler_progress.
  *   `out_messages` OUT. Owned cmcp_json_t array of message objects:
  *                  [{"role":"user|assistant", "content":{...}}]. The
  *                  library takes ownership on success. NULL is treated
@@ -146,6 +180,7 @@ cmcp_json_t *cmcp_resource_text_contents(const char *uri,
  * INTERNAL_ERROR (-32603). */
 typedef int (*cmcp_prompt_handler_fn)(const cmcp_json_t *arguments,
                                        void *userdata,
+                                       cmcp_handler_ctx_t *hctx,
                                        cmcp_json_t **out_messages);
 
 /* Prompt descriptor (caller-owned, copied by add_prompt). */

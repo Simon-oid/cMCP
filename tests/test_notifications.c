@@ -155,8 +155,9 @@ typedef struct {
 } trigger_ctx_t;
 
 static int trig_resources_changed(const cmcp_json_t *args, void *userdata,
+                                   cmcp_handler_ctx_t *hctx,
                                    cmcp_json_t **out_content, int *out_is_error) {
-    (void)args;
+    (void)args; (void)hctx;
     trigger_ctx_t *c = (trigger_ctx_t *)userdata;
     *out_is_error = 0;
     int rc = cmcp_server_notify_resources_changed(c->server);
@@ -165,8 +166,9 @@ static int trig_resources_changed(const cmcp_json_t *args, void *userdata,
 }
 
 static int trig_tools_changed(const cmcp_json_t *args, void *userdata,
+                               cmcp_handler_ctx_t *hctx,
                                cmcp_json_t **out_content, int *out_is_error) {
-    (void)args;
+    (void)args; (void)hctx;
     trigger_ctx_t *c = (trigger_ctx_t *)userdata;
     *out_is_error = 0;
     cmcp_server_notify_tools_changed(c->server);
@@ -175,8 +177,9 @@ static int trig_tools_changed(const cmcp_json_t *args, void *userdata,
 }
 
 static int trig_prompts_changed(const cmcp_json_t *args, void *userdata,
+                                 cmcp_handler_ctx_t *hctx,
                                  cmcp_json_t **out_content, int *out_is_error) {
-    (void)args;
+    (void)args; (void)hctx;
     trigger_ctx_t *c = (trigger_ctx_t *)userdata;
     *out_is_error = 0;
     cmcp_server_notify_prompts_changed(c->server);
@@ -185,7 +188,9 @@ static int trig_prompts_changed(const cmcp_json_t *args, void *userdata,
 }
 
 static int trig_resource_updated(const cmcp_json_t *args, void *userdata,
+                                  cmcp_handler_ctx_t *hctx,
                                   cmcp_json_t **out_content, int *out_is_error) {
+    (void)hctx;
     trigger_ctx_t *c = (trigger_ctx_t *)userdata;
     *out_is_error = 0;
     const cmcp_json_t *uri = args ? cmcp_json_object_get(args, "uri") : NULL;
@@ -202,8 +207,9 @@ static int trig_resource_updated(const cmcp_json_t *args, void *userdata,
  * caller-supplied method and params. Used for the progress-ordering
  * test below. */
 static int trig_progress(const cmcp_json_t *args, void *userdata,
+                          cmcp_handler_ctx_t *hctx,
                           cmcp_json_t **out_content, int *out_is_error) {
-    (void)args;
+    (void)args; (void)hctx;
     trigger_ctx_t *c = (trigger_ctx_t *)userdata;
     *out_is_error = 0;
     cmcp_json_t *params = cmcp_json_new_object();
@@ -229,8 +235,9 @@ static cmcp_json_t *call_args(const char *name, cmcp_json_t *arguments) {
 /* Spec: a resource handler that's never actually read but exists so
  * subscribe() targets a registered URI. */
 static int sample_read(const char *uri, void *userdata,
+                        cmcp_handler_ctx_t *hctx,
                         cmcp_json_t **out_contents, int *out_is_error) {
-    (void)userdata; (void)uri;
+    (void)userdata; (void)uri; (void)hctx;
     *out_is_error = 0;
     *out_contents = cmcp_resource_text_contents(uri, "text/plain", "x");
     return *out_contents ? CMCP_OK : CMCP_ENOMEM;

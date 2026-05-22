@@ -71,8 +71,9 @@ static void *server_thread(void *arg) {
 /* Returns content [{"type":"text","text": <prefix><message>}].
  * userdata is a const char * prefix. */
 static int echo_tool(const cmcp_json_t *arguments, void *userdata,
+                      cmcp_handler_ctx_t *hctx,
                       cmcp_json_t **out_content, int *out_is_error) {
-    (void)out_is_error;
+    (void)out_is_error; (void)hctx;
     const char *prefix = userdata ? (const char *)userdata : "";
     const cmcp_json_t *m = arguments
         ? cmcp_json_object_get(arguments, "message") : NULL;

@@ -279,16 +279,50 @@ under host-supplied names, then per primitive:
 
 ### Server side
 
-Single-threaded run loop. `cmcp_server_run` owns the transport, reads
-one frame at a time, dispatches it inline, writes one response back.
-No worker pool yet — handlers must return promptly (or the run loop
-stalls). This is fine for v0.1 because:
+`cmcp_server_run` owns the transport and runs the read loop on one
+thread: read a frame, parse it, dispatch. Dispatch then forks two ways.
 
-- Tools shipped today (echo, add, crag_search, crag_stats) all return
-  in milliseconds.
-- A worker pool would add per-handler-timeout machinery and ordering
-  rules; cleaner to ship single-threaded and add concurrency when
-  there's a real long-running tool to motivate the design.
+- **Inline on the loop thread:** the handshake, `*/list` queries,
+  `resources/subscribe`/`unsubscribe`, and every notification. These
+  are cheap and either read-only or touch the lifecycle FSM — keeping
+  them single-threaded means the FSM needs no lock.
+- **On a worker pool:** the three handler-invoking methods
+  (`tools/call`, `resources/read`, `prompts/get`), once the handshake
+  is complete. A slow user handler therefore can't stall the loop, and
+  several handlers run concurrently — replies come back in completion
+  order, not request order, which JSON-RPC ids already tolerate.
+
+The pool (`src/worker.c`, internal `worker.h`) is a fixed set of N
+threads fed by a bounded blocking queue. `cmcp_pool_submit` blocks when
+the queue is full, so backpressure propagates to the loop rather than
+growing memory unbounded. `cmcp_pool_free` drains every queued job
+before joining, so each job runs exactly once. N comes from
+`CMCP_WORKERS` (default 4, clamped `[1,64]`). The HTTP transport
+self-serializes one request at a time, so the pool needs no
+HTTP-specific special-casing — it is transport-agnostic.
+
+The transport's `write_fn` is internally mutex-guarded, so concurrent
+workers (and `cmcp_server_notify` from any thread) never interleave
+frames.
+
+**Handler context.** Each pool request carries a `cmcp_handler_ctx_t`,
+passed to the handler. It exposes `cmcp_handler_cancelled()` (a
+cooperative cancel check) and `cmcp_handler_progress()` (emits
+`notifications/progress` carrying the caller's `progressToken` from
+`params._meta`). The ctx lives inside the work item and is registered
+in the server's in-flight table at *enqueue* time.
+
+**Cancellation + timeout.** An in-flight table maps request id → ctx,
+guarded by `inflight_mu` (which also guards each ctx's `cancelled`
+flag). `notifications/cancelled` is handled inline on the loop thread;
+it matches `requestId` against the table and flips the flag. A handler
+that polls `cmcp_handler_cancelled()` can then bail; either way, once
+flagged, `process_work` drops the response (the MCP spec says a
+cancelled request SHOULD NOT get one). A background watchdog thread
+sweeps the table every 200ms and flags any request past its deadline —
+`CMCP_HANDLER_TIMEOUT_MS` (default 30000, `0` disables). At shutdown
+the loop flags every in-flight request before draining the pool, so
+handlers stuck on a dead transport unwind instead of writing into it.
 
 ### Client side
 
@@ -492,10 +526,13 @@ pushes them onto the same read queue that POST responses use, where
 `client.c`'s reader thread routes them to the notification callback
 just like a stdio transport would.
 
-Cancellation (`notifications/cancelled`) is *accepted but not honored*
-in v0.2. Tool/resource handlers run inline on the run-loop thread and
-are not cancellable; honoring cancel meaningfully would require a
-worker pool with cooperative cancellation, deferred to Tier 3.
+Cancellation (`notifications/cancelled`) is honored *cooperatively*:
+handler-invoking methods run on the worker pool, and the in-flight
+table lets a cancel — or the timeout watchdog — flag a request's
+`cmcp_handler_ctx_t`. A handler that polls `cmcp_handler_cancelled()`
+stops early; a handler that ignores the flag still runs to completion,
+but its response is dropped either way. See *Threading model → Server
+side* for the full machinery.
 
 ## Sampling (server → host LLM)
 
@@ -607,12 +644,6 @@ the lock is held.
 - Concurrent HTTP sessions on a single transport. One session per
   `cmcp_transport_t`; concurrent multi-tenant deployments instantiate
   multiple transports.
-- Worker pool / per-handler timeouts on the server. Tools today are
-  fast; concurrency adds machinery without a motivating need.
-- `notifications/cancelled` and `progressToken`-based progress
-  notifications. Cancellation is currently shutdown-scoped only
-  (all in-flight waiters wake with `CMCP_ECANCELLED` when the client
-  is freed); per-request mid-flight cancel is Tier 3.
 - OAuth 2.1 on the HTTP transport. Tier 3 — deferred until there's a
   remote cMCP server worth publishing.
 - A conformance harness running cMCP against Anthropic's reference

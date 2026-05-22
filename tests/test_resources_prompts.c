@@ -68,7 +68,9 @@ static void *server_thread(void *arg) {
 typedef struct { int reads; } stats_ctx_t;
 
 static int stats_read(const char *uri, void *userdata,
+                       cmcp_handler_ctx_t *hctx,
                        cmcp_json_t **out_contents, int *out_is_error) {
+    (void)hctx;
     stats_ctx_t *ctx = (stats_ctx_t *)userdata;
     if (ctx) ctx->reads++;
     *out_is_error = 0;
@@ -78,8 +80,9 @@ static int stats_read(const char *uri, void *userdata,
 }
 
 static int unhealthy_read(const char *uri, void *userdata,
+                           cmcp_handler_ctx_t *hctx,
                            cmcp_json_t **out_contents, int *out_is_error) {
-    (void)userdata;
+    (void)userdata; (void)hctx;
     *out_is_error = 1;
     *out_contents = cmcp_resource_text_contents(uri, "text/plain",
                                                  "transient backend error");
@@ -87,8 +90,9 @@ static int unhealthy_read(const char *uri, void *userdata,
 }
 
 static int code_review_handler(const cmcp_json_t *args, void *userdata,
+                                cmcp_handler_ctx_t *hctx,
                                 cmcp_json_t **out_messages) {
-    (void)userdata;
+    (void)userdata; (void)hctx;
     const cmcp_json_t *lang = args ? cmcp_json_object_get(args, "language") : NULL;
     const char *l = (lang && lang->type == CMCP_JSON_STRING) ? lang->str.s : "?";
     char buf[256];
@@ -98,8 +102,9 @@ static int code_review_handler(const cmcp_json_t *args, void *userdata,
 }
 
 static int empty_prompt_handler(const cmcp_json_t *args, void *userdata,
+                                 cmcp_handler_ctx_t *hctx,
                                  cmcp_json_t **out_messages) {
-    (void)args; (void)userdata;
+    (void)args; (void)userdata; (void)hctx;
     *out_messages = NULL;
     return CMCP_OK;
 }

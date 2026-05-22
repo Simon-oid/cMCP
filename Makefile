@@ -14,7 +14,7 @@ LDLIBS  ?= $(CURL_LIBS) -lpthread
 CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
-SERVER_CANDIDATES := src/server.c src/notif.c
+SERVER_CANDIDATES := src/server.c src/worker.c
 CLIENT_CANDIDATES := src/client.c src/session.c
 
 CORE_SRC   := $(wildcard $(CORE_CANDIDATES))
@@ -97,6 +97,28 @@ $(CRAG_MCP_BIN): $(CRAG_MCP_SRC) $(BUILT_LIBS)
 	    $(CRAG_DIR)/third_party/sqlite3.o \
 	    $(LDFLAGS) $(LDLIBS) -lm -ldl
 
+# --- Conformance harness ---------------------------------------------------
+# Opt-in: exercises cMCP against the MCP TypeScript reference implementation,
+# in both wire roles. Needs Node + npm + network (first run installs the
+# pinned reference SDKs into conformance/node_modules). Deliberately kept out
+# of `make test`, which stays hermetic and offline. See conformance/README.md.
+CONF_DIR   := conformance
+CONF_C_BIN := $(CONF_DIR)/client_vs_ts
+
+conformance: all $(CONF_C_BIN)
+	@command -v npm >/dev/null || { echo "npm not found — install Node.js"; exit 1; }
+	@echo "=== conformance: installing pinned reference SDKs ==="
+	npm install --prefix $(CONF_DIR) --silent --no-audit --no-fund
+	@echo
+	@echo "=== conformance A: cMCP client  vs  TS server-everything ==="
+	./$(CONF_C_BIN)
+	@echo
+	@echo "=== conformance B: TS client  vs  cMCP echo-server ==="
+	node $(CONF_DIR)/client_vs_cmcp.mjs
+
+$(CONF_C_BIN): $(CONF_DIR)/client_vs_ts.c $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
 # test_fs_server spawns the built filesystem-mcp binary as a child, so
 # it depends on that binary in addition to the libs. This specific rule
 # overrides the generic tests/% pattern below.
@@ -121,8 +143,8 @@ clean:
 	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) \
-	      $(EXAMPLE_BINS) $(TEST_BIN) \
+	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o
 
-.PHONY: all test valgrind clean crag-mcp
+.PHONY: all test valgrind clean crag-mcp conformance

@@ -80,8 +80,9 @@ static char *make_url(unsigned short port) {
 /* ====================================================================== */
 
 static int echo_tool(const cmcp_json_t *args, void *userdata,
+                      cmcp_handler_ctx_t *hctx,
                       cmcp_json_t **out_content, int *out_is_error) {
-    (void)userdata; (void)out_is_error;
+    (void)userdata; (void)out_is_error; (void)hctx;
     const cmcp_json_t *m = args ? cmcp_json_object_get(args, "message") : NULL;
     const char *msg = (m && m->type == CMCP_JSON_STRING) ? m->str.s : "";
     *out_content = cmcp_tool_text_content(msg);

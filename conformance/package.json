@@ -1,0 +1,11 @@
+{
+  "name": "cmcp-conformance",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Conformance harness — exercises cMCP against the MCP TypeScript reference implementation. Not part of the cMCP library; see conformance/README.md.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/server-everything": "^2026.1.26"
+  }
+}

@@ -56,8 +56,9 @@ static void *server_thread(void *arg) {
 
 /* `echo` tool — returns its `text` argument back as text content. */
 static int echo_handler(const cmcp_json_t *args, void *userdata,
+                         cmcp_handler_ctx_t *hctx,
                          cmcp_json_t **out_content, int *out_is_error) {
-    (void)userdata;
+    (void)userdata; (void)hctx;
     *out_is_error = 0;
     const cmcp_json_t *t = args ? cmcp_json_object_get(args, "text") : NULL;
     const char *s = (t && t->type == CMCP_JSON_STRING) ? t->str.s : "";
@@ -70,7 +71,9 @@ static int echo_handler(const cmcp_json_t *args, void *userdata,
 typedef struct { int calls; } add_ctx_t;
 
 static int add_handler(const cmcp_json_t *args, void *userdata,
+                        cmcp_handler_ctx_t *hctx,
                         cmcp_json_t **out_content, int *out_is_error) {
+    (void)hctx;
     add_ctx_t *ctx = (add_ctx_t *)userdata;
     ctx->calls++;
     *out_is_error = 0;
@@ -87,8 +90,9 @@ static int add_handler(const cmcp_json_t *args, void *userdata,
 /* `tool_error` — runs successfully but reports a tool-level error
  * (e.g. simulating "file not found"). */
 static int tool_error_handler(const cmcp_json_t *args, void *userdata,
+                               cmcp_handler_ctx_t *hctx,
                                cmcp_json_t **out_content, int *out_is_error) {
-    (void)args; (void)userdata;
+    (void)args; (void)userdata; (void)hctx;
     *out_is_error = 1;
     *out_content = cmcp_tool_text_content("file not found: foo.txt");
     return CMCP_OK;
@@ -97,9 +101,11 @@ static int tool_error_handler(const cmcp_json_t *args, void *userdata,
 /* `internal_error` — handler returns non-zero. Library should map this
  * to a JSON-RPC -32603 internal error. */
 static int internal_error_handler(const cmcp_json_t *args, void *userdata,
+                                   cmcp_handler_ctx_t *hctx,
                                    cmcp_json_t **out_content,
                                    int *out_is_error) {
     (void)args; (void)userdata; (void)out_content; (void)out_is_error;
+    (void)hctx;
     return CMCP_EHANDLER;
 }
 

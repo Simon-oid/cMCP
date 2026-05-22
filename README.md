@@ -38,20 +38,33 @@ unified `<server>:<tool>` namespace across them. Async by design —
 one reader thread per client, multiple in-flight calls, any-order
 completion.
 
-Tier 3 (OAuth 2.1, conformance harness against Anthropic's reference
-implementations, a non-cRAG reference server, connection pooling) is
-deferred — none block real consumers. See [`TODO.md`](TODO.md) for
-the full phasing.
+**v0.3 in progress.** The server now dispatches handler-invoking calls
+(`tools/call`, `resources/read`, `prompts/get`) onto a worker pool, so
+a slow handler can't stall the run loop and several run concurrently.
+Handlers get cooperative `notifications/cancelled`, `progressToken`
+progress, and a per-handler timeout watchdog. A second, non-cRAG
+reference server (`tools/filesystem-mcp/`) also ships, and `make
+conformance` cross-checks cMCP — in both wire roles — against the MCP
+TypeScript reference implementation.
+
+Tier 3 remaining (OAuth 2.1, connection pooling) is deferred — neither
+blocks real consumers. See [`TODO.md`](TODO.md) for the full phasing.
 
 ## Build & test
 
 ```bash
 make            # libs (core/server/client) + cmcp-inspect + examples
-make test       # build and run the test binaries — currently 2301 assertions across 13 binaries
+make test       # build and run the test binaries — currently 2422 assertions across 15 binaries
 make valgrind   # same, under valgrind (optional)
 make crag-mcp   # build the cRAG reference server (needs sibling ../cRAG/)
+make conformance # cross-check vs the MCP TS reference impl (needs Node + network)
 make clean
 ```
+
+`make test` is hermetic and offline. `make conformance` is the opt-in
+exception — it `npm install`s Anthropic's pinned TypeScript reference
+SDK and runs cMCP against it in both directions; see
+[`conformance/README.md`](conformance/README.md).
 
 System dependency: `libcurl` headers (`pkg-config --cflags libcurl`
 must work) — used by the Streamable HTTP client transport. Everything
@@ -126,7 +139,7 @@ make crag-mcp                           # needs ../cRAG built
 | Target | Purpose |
 |---|---|
 | `libcmcp_core.a`     | JSON, JSON-RPC 2.0, schema validator, types, stdio + Streamable HTTP transports |
-| `libcmcp_server.a`   | Tools / resources / prompts registries, dispatch, handshake, lifecycle, server-initiated notifications |
+| `libcmcp_server.a`   | Tools / resources / prompts registries, worker-pool dispatch, handshake, lifecycle, server-initiated notifications, cooperative cancellation + progress |
 | `libcmcp_client.a`   | Async client with reader thread, `connect_stdio`, sampling + roots host handlers, multi-server `cmcp_session_t` |
 | `tools/cmcp-inspect/`     | CLI: spawn a server, dump tools, call one |
 | `tools/crag-mcp/`         | Reference server wrapping [cRAG](https://github.com/Simon-oid/cRAG) — two tools (`crag_search`, `crag_stats`) plus the `crag://stats` resource |
@@ -150,7 +163,7 @@ Tracking [MCP spec date `2025-06-18`](https://modelcontextprotocol.io/specificat
 | Roots (host-side)                        |   | ✓ | ✓ |
 | `*/list_changed` emit (server side)      |   | ✓ | ✓ |
 | `notifications/cancelled`, `progressToken` |   |   | ✓ |
-| OAuth 2.1 (HTTP only)                    |   |   | ✓ |
+| OAuth 2.1 (HTTP only)                    |   |   |   |
 
 ## Layout
 
@@ -165,7 +178,7 @@ src/        json, rpc, schema, types,
             client.c, session.c → libcmcp_client.a
 tools/      cmcp-inspect (CLI), crag-mcp (reference server)
 examples/   echo-server, minimal-client
-tests/      one binary per test_*.c (13 total), all use tests/test.h
+tests/      one binary per test_*.c (15 total), all use tests/test.h
 docs/       architecture, schema-subset, design notes
 ```
 

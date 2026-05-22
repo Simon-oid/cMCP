@@ -17,8 +17,9 @@
 #include <string.h>
 
 static int echo_handler(const cmcp_json_t *args, void *userdata,
+                         cmcp_handler_ctx_t *hctx,
                          cmcp_json_t **out_content, int *out_is_error) {
-    (void)userdata;
+    (void)userdata; (void)hctx;
     *out_is_error = 0;
     const cmcp_json_t *t = args ? cmcp_json_object_get(args, "text") : NULL;
     const char *s = (t && t->type == CMCP_JSON_STRING) ? t->str.s : "";
@@ -27,8 +28,9 @@ static int echo_handler(const cmcp_json_t *args, void *userdata,
 }
 
 static int add_handler(const cmcp_json_t *args, void *userdata,
+                        cmcp_handler_ctx_t *hctx,
                         cmcp_json_t **out_content, int *out_is_error) {
-    (void)userdata;
+    (void)userdata; (void)hctx;
     *out_is_error = 0;
     const cmcp_json_t *a = args ? cmcp_json_object_get(args, "a") : NULL;
     const cmcp_json_t *b = args ? cmcp_json_object_get(args, "b") : NULL;
