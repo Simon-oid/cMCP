@@ -1213,6 +1213,14 @@ static void server_handle_message(cmcp_server_t *s,
         return;
     }
 
+    /* `ping` — a liveness probe. Either party may send it at any time;
+     * the receiver MUST respond with an empty result. Answered before
+     * the readiness gate so it works pre-handshake too. */
+    if (msg->method && strcmp(msg->method, "ping") == 0) {
+        cmcp_rpc_make_response(resp, &msg->id, cmcp_json_new_object());
+        return;
+    }
+
     if (s->state != SS_READY) {
         cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INVALID_REQUEST,
                              "Server is not ready: send `initialize` first",

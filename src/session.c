@@ -127,6 +127,37 @@ size_t cmcp_session_count(const cmcp_session_t *s) {
 }
 
 /* ====================================================================== */
+/* Pagination — shared by the three aggregated list functions               */
+/* ====================================================================== */
+
+/* The opaque pagination cursor from a list result, or NULL when the
+ * server returned the final page. Never interpreted — only echoed back
+ * verbatim as the `cursor` of the next request. */
+static const char *result_next_cursor(const cmcp_rpc_message_t *resp) {
+    if (!resp || resp->error || !resp->result ||
+        resp->result->type != CMCP_JSON_OBJECT) return NULL;
+    const cmcp_json_t *nc = cmcp_json_object_get(resp->result, "nextCursor");
+    return (nc && nc->type == CMCP_JSON_STRING) ? nc->str.s : NULL;
+}
+
+/* If `resp` (the current list page) carries a nextCursor, replace it in
+ * place with the next page — a synchronous `method` request carrying
+ * that cursor — and return 1. Otherwise return 0. `resp` is always left
+ * in a clearable state; on a request failure pagination simply stops,
+ * keeping the pages collected so far. */
+static int fetch_next_page(cmcp_client_t *client, const char *method,
+                            cmcp_rpc_message_t *resp) {
+    const char *cur = result_next_cursor(resp);
+    if (!cur) return 0;
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "cursor", cmcp_json_new_string(cur));
+    /* cur is copied into params above; the old page can be freed now. */
+    cmcp_rpc_message_clear(resp);
+    cmcp_rpc_message_init(resp);
+    return cmcp_client_request(client, method, params, resp) == CMCP_OK;
+}
+
+/* ====================================================================== */
 /* Aggregated tools/list                                                   */
 /* ====================================================================== */
 
@@ -199,10 +230,14 @@ int cmcp_session_tools_list(cmcp_session_t *s,
         cmcp_rpc_message_t resp;
         cmcp_rpc_message_init(&resp);
         int wr = cmcp_client_wait(s->entries[i].client, ids[i], &resp);
-        if (wr != CMCP_OK) continue;
-        if (!resp.error) {
-            absorb_one_tools_list(s->entries[i].server_name, &resp,
-                                    &arr, &arr_len, &arr_cap);
+        if (wr == CMCP_OK) {
+            /* Absorb page one, then follow nextCursor to the last page. */
+            do {
+                if (!resp.error)
+                    absorb_one_tools_list(s->entries[i].server_name, &resp,
+                                            &arr, &arr_len, &arr_cap);
+            } while (fetch_next_page(s->entries[i].client, "tools/list",
+                                      &resp));
         }
         cmcp_rpc_message_clear(&resp);
     }
@@ -334,9 +369,14 @@ int cmcp_session_resources_list(cmcp_session_t *s,
         cmcp_rpc_message_t resp;
         cmcp_rpc_message_init(&resp);
         int wr = cmcp_client_wait(s->entries[i].client, ids[i], &resp);
-        if (wr == CMCP_OK && !resp.error) {
-            absorb_one_resources_list(s->entries[i].server_name, &resp,
-                                       &arr, &arr_len, &arr_cap);
+        if (wr == CMCP_OK) {
+            do {
+                if (!resp.error)
+                    absorb_one_resources_list(s->entries[i].server_name,
+                                               &resp, &arr, &arr_len,
+                                               &arr_cap);
+            } while (fetch_next_page(s->entries[i].client, "resources/list",
+                                      &resp));
         }
         cmcp_rpc_message_clear(&resp);
     }
@@ -442,9 +482,13 @@ int cmcp_session_prompts_list(cmcp_session_t *s,
         cmcp_rpc_message_t resp;
         cmcp_rpc_message_init(&resp);
         int wr = cmcp_client_wait(s->entries[i].client, ids[i], &resp);
-        if (wr == CMCP_OK && !resp.error) {
-            absorb_one_prompts_list(s->entries[i].server_name, &resp,
-                                     &arr, &arr_len, &arr_cap);
+        if (wr == CMCP_OK) {
+            do {
+                if (!resp.error)
+                    absorb_one_prompts_list(s->entries[i].server_name, &resp,
+                                             &arr, &arr_len, &arr_cap);
+            } while (fetch_next_page(s->entries[i].client, "prompts/list",
+                                      &resp));
         }
         cmcp_rpc_message_clear(&resp);
     }

@@ -279,6 +279,16 @@ static void reply_method_not_found(cmcp_client_t *c, const cmcp_id_t *id) {
     cmcp_rpc_message_clear(&err);
 }
 
+/* Reply to a server-initiated `ping` with an empty result. The spec
+ * makes answering a ping mandatory; it carries no params. */
+static void handle_ping(cmcp_client_t *c, const cmcp_rpc_message_t *req) {
+    cmcp_rpc_message_t resp;
+    if (cmcp_rpc_make_response(&resp, &req->id,
+                                cmcp_json_new_object()) != CMCP_OK) return;
+    send_message(c, &resp);
+    cmcp_rpc_message_clear(&resp);
+}
+
 /* Reply to `roots/list` with the host's current root set. The list
  * is purely declarative (set via cmcp_client_set_roots); no host
  * callback runs. If the host never called set_roots, fall through to
@@ -399,7 +409,9 @@ static void *reader_main(void *arg) {
                 cmcp_rpc_message_clear(m);
                 break;
             case CMCP_MSG_REQUEST:
-                if (m->method &&
+                if (m->method && strcmp(m->method, "ping") == 0) {
+                    handle_ping(c, m);
+                } else if (m->method &&
                     strcmp(m->method, "sampling/createMessage") == 0) {
                     handle_sampling_request(c, m);
                 } else if (m->method &&
