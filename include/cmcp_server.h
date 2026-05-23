@@ -47,6 +47,19 @@ int cmcp_handler_progress(cmcp_handler_ctx_t *hctx,
                           double progress, double total,
                           const char *message);
 
+/* Attach a structured result to this tool call. The library wraps it
+ * as `structuredContent` in the tools/call response. If the tool has
+ * an `output_schema`, the value is validated against it before send;
+ * a validation failure surfaces as -32603 INTERNAL_ERROR per spec
+ * ("server MUST provide structuredContent that matches the schema").
+ *
+ * `value` is consumed (caller transfers ownership). Pass NULL to
+ * clear a previously-set value. Calling on a non-tool handler ctx
+ * (resource/prompt) is a no-op — only tool results carry
+ * structuredContent. NULL-safe on hctx. */
+void cmcp_handler_set_structured(cmcp_handler_ctx_t *hctx,
+                                  cmcp_json_t *value);
+
 /* ====================================================================== */
 /* Tool registry                                                           */
 /* ====================================================================== */
@@ -81,10 +94,18 @@ typedef int (*cmcp_tool_handler_fn)(const cmcp_json_t *arguments,
 /* Tool descriptor (caller-owned, copied by add_tool). */
 typedef struct {
     const char            *name;            /* required, unique per server */
+    const char            *title;           /* optional, human display name */
     const char            *description;     /* optional, may be NULL */
     /* JSON Schema for the input as JSON text. May be NULL. Phase 1.6
      * will validate inbound `arguments` against this. */
     const char            *input_schema;
+    /* JSON Schema for the structured output as JSON text. May be NULL.
+     * When set, any value the handler attaches via
+     * cmcp_handler_set_structured is validated against this schema
+     * before being sent — a mismatch surfaces as a -32603 internal
+     * error per spec ("server MUST provide structuredContent that
+     * matches"). Independent of `input_schema`. */
+    const char            *output_schema;
     cmcp_tool_handler_fn   handler;         /* required */
     void                  *userdata;        /* opaque, kept verbatim */
 } cmcp_tool_t;
@@ -108,6 +129,18 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool);
  * library will free it after emitting the response. Returns NULL on
  * allocation failure. */
 cmcp_json_t *cmcp_tool_text_content(const char *text);
+
+/* Convenience: build a content-array containing a single resource_link
+ * item — `{type: "resource_link", uri, name, description?, mimeType?}`
+ * per the 2025-06-18 spec. Use when a tool wants to point at a
+ * resource instead of inlining its content. Multiple items can be
+ * appended to a single array via cmcp_json_array_append; use this
+ * helper for the first one and build subsequent ones inline. NULL
+ * uri/name → returns NULL. */
+cmcp_json_t *cmcp_tool_resource_link_content(const char *uri,
+                                              const char *name,
+                                              const char *description,
+                                              const char *mime_type);
 
 /* ====================================================================== */
 /* Resource registry                                                       */
@@ -141,7 +174,11 @@ typedef int (*cmcp_resource_read_fn)(const char *uri,
 /* Resource descriptor (caller-owned, copied by add_resource). */
 typedef struct {
     const char            *uri;          /* required, unique per server */
-    const char            *name;         /* required, human display name */
+    const char            *name;         /* required, programmatic id */
+    const char            *title;        /* optional, human display name —
+                                          * distinct from `name`, which
+                                          * the spec scopes to identifier
+                                          * use; `title` is what UIs show */
     const char            *description;  /* optional */
     const char            *mime_type;    /* optional, e.g. "text/plain" */
     cmcp_resource_read_fn  read;         /* required */
@@ -186,6 +223,7 @@ typedef int (*cmcp_prompt_handler_fn)(const cmcp_json_t *arguments,
 /* Prompt descriptor (caller-owned, copied by add_prompt). */
 typedef struct {
     const char             *name;         /* required, unique per server */
+    const char             *title;        /* optional, human display name */
     const char             *description;  /* optional */
     /* JSON array text describing arguments, each: {name, description?,
      * required?}. May be NULL. Server validates required fields are

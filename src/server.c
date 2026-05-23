@@ -33,8 +33,10 @@ typedef enum {
 
 typedef struct {
     char                 *name;
+    char                 *title;            /* may be NULL */
     char                 *description;
     cmcp_json_t          *input_schema;     /* may be NULL */
+    cmcp_json_t          *output_schema;    /* may be NULL */
     cmcp_tool_handler_fn  handler;
     void                 *userdata;
 } server_tool_t;
@@ -42,6 +44,7 @@ typedef struct {
 typedef struct {
     char                  *uri;
     char                  *name;
+    char                  *title;            /* may be NULL */
     char                  *description;
     char                  *mime_type;
     cmcp_resource_read_fn  read;
@@ -50,6 +53,7 @@ typedef struct {
 
 typedef struct {
     char                   *name;
+    char                   *title;          /* may be NULL */
     char                   *description;
     cmcp_json_t            *arguments;     /* JSON array, may be NULL */
     cmcp_prompt_handler_fn  handler;
@@ -186,19 +190,23 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
 
 static void tool_clear(server_tool_t *t) {
     free(t->name);
+    free(t->title);
     free(t->description);
     cmcp_json_free(t->input_schema);
+    cmcp_json_free(t->output_schema);
 }
 
 static void resource_clear(server_resource_t *r) {
     free(r->uri);
     free(r->name);
+    free(r->title);
     free(r->description);
     free(r->mime_type);
 }
 
 static void prompt_clear(server_prompt_t *p) {
     free(p->name);
+    free(p->title);
     free(p->description);
     cmcp_json_free(p->arguments);
 }
@@ -260,12 +268,24 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
     if (!s || !tool || !tool->name || !tool->handler) return CMCP_EINVAL;
     if (tool_find(s, tool->name)) return CMCP_EPROTOCOL;
 
-    cmcp_json_t *schema = NULL;
+    cmcp_json_t *in_schema = NULL;
     if (tool->input_schema) {
-        schema = cmcp_json_parse(tool->input_schema, strlen(tool->input_schema));
-        if (!schema) return CMCP_EPARSE;
-        if (schema->type != CMCP_JSON_OBJECT) {
-            cmcp_json_free(schema);
+        in_schema = cmcp_json_parse(tool->input_schema,
+                                     strlen(tool->input_schema));
+        if (!in_schema) return CMCP_EPARSE;
+        if (in_schema->type != CMCP_JSON_OBJECT) {
+            cmcp_json_free(in_schema);
+            return CMCP_EPARSE;
+        }
+    }
+    cmcp_json_t *out_schema = NULL;
+    if (tool->output_schema) {
+        out_schema = cmcp_json_parse(tool->output_schema,
+                                      strlen(tool->output_schema));
+        if (!out_schema) { cmcp_json_free(in_schema); return CMCP_EPARSE; }
+        if (out_schema->type != CMCP_JSON_OBJECT) {
+            cmcp_json_free(in_schema);
+            cmcp_json_free(out_schema);
             return CMCP_EPARSE;
         }
     }
@@ -275,19 +295,26 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
         size_t newcap = s->cap_tools ? s->cap_tools * 2 : 4;
         server_tool_t *nt = (server_tool_t *)realloc(
             s->tools, newcap * sizeof *nt);
-        if (!nt) { cmcp_json_free(schema); return CMCP_ENOMEM; }
+        if (!nt) {
+            cmcp_json_free(in_schema); cmcp_json_free(out_schema);
+            return CMCP_ENOMEM;
+        }
         s->tools = nt;
         s->cap_tools = newcap;
     }
 
     server_tool_t *t = &s->tools[s->n_tools];
     memset(t, 0, sizeof *t);
-    t->name        = xstrdup(tool->name);
-    t->description = tool->description ? xstrdup(tool->description) : NULL;
-    t->input_schema = schema;
-    t->handler     = tool->handler;
-    t->userdata    = tool->userdata;
-    if (!t->name || (tool->description && !t->description)) {
+    t->name          = xstrdup(tool->name);
+    t->title         = tool->title       ? xstrdup(tool->title)       : NULL;
+    t->description   = tool->description ? xstrdup(tool->description) : NULL;
+    t->input_schema  = in_schema;
+    t->output_schema = out_schema;
+    t->handler       = tool->handler;
+    t->userdata      = tool->userdata;
+    if (!t->name ||
+        (tool->title       && !t->title) ||
+        (tool->description && !t->description)) {
         tool_clear(t);
         return CMCP_ENOMEM;
     }
@@ -303,6 +330,28 @@ cmcp_json_t *cmcp_tool_text_content(const char *text) {
     if (!item) { cmcp_json_free(arr); return NULL; }
     cmcp_json_object_set(item, "type", cmcp_json_new_string("text"));
     cmcp_json_object_set(item, "text", cmcp_json_new_string(text));
+    cmcp_json_array_append(arr, item);
+    return arr;
+}
+
+cmcp_json_t *cmcp_tool_resource_link_content(const char *uri,
+                                              const char *name,
+                                              const char *description,
+                                              const char *mime_type) {
+    if (!uri || !name) return NULL;
+    cmcp_json_t *arr = cmcp_json_new_array();
+    if (!arr) return NULL;
+    cmcp_json_t *item = cmcp_json_new_object();
+    if (!item) { cmcp_json_free(arr); return NULL; }
+    cmcp_json_object_set(item, "type", cmcp_json_new_string("resource_link"));
+    cmcp_json_object_set(item, "uri",  cmcp_json_new_string(uri));
+    cmcp_json_object_set(item, "name", cmcp_json_new_string(name));
+    if (description)
+        cmcp_json_object_set(item, "description",
+                              cmcp_json_new_string(description));
+    if (mime_type)
+        cmcp_json_object_set(item, "mimeType",
+                              cmcp_json_new_string(mime_type));
     cmcp_json_array_append(arr, item);
     return arr;
 }
@@ -336,13 +385,15 @@ int cmcp_server_add_resource(cmcp_server_t *s, const cmcp_resource_t *r) {
     memset(e, 0, sizeof *e);
     e->uri         = xstrdup(r->uri);
     e->name        = xstrdup(r->name);
+    e->title       = r->title       ? xstrdup(r->title)       : NULL;
     e->description = r->description ? xstrdup(r->description) : NULL;
-    e->mime_type   = r->mime_type ? xstrdup(r->mime_type) : NULL;
+    e->mime_type   = r->mime_type   ? xstrdup(r->mime_type)   : NULL;
     e->read        = r->read;
     e->userdata    = r->userdata;
     if (!e->uri || !e->name ||
+        (r->title       && !e->title) ||
         (r->description && !e->description) ||
-        (r->mime_type && !e->mime_type)) {
+        (r->mime_type   && !e->mime_type)) {
         resource_clear(e);
         memset(e, 0, sizeof *e);
         return CMCP_ENOMEM;
@@ -405,11 +456,14 @@ int cmcp_server_add_prompt(cmcp_server_t *s, const cmcp_prompt_t *p) {
     server_prompt_t *e = &s->prompts[s->n_prompts];
     memset(e, 0, sizeof *e);
     e->name        = xstrdup(p->name);
+    e->title       = p->title       ? xstrdup(p->title)       : NULL;
     e->description = p->description ? xstrdup(p->description) : NULL;
     e->arguments   = args;
     e->handler     = p->handler;
     e->userdata    = p->userdata;
-    if (!e->name || (p->description && !e->description)) {
+    if (!e->name ||
+        (p->title       && !e->title) ||
+        (p->description && !e->description)) {
         prompt_clear(e);
         memset(e, 0, sizeof *e);
         return CMCP_ENOMEM;
@@ -567,6 +621,8 @@ static cmcp_json_t *tool_to_descriptor(const server_tool_t *t) {
     cmcp_json_t *o = cmcp_json_new_object();
     if (!o) return NULL;
     cmcp_json_object_set(o, "name", cmcp_json_new_string(t->name));
+    if (t->title)
+        cmcp_json_object_set(o, "title", cmcp_json_new_string(t->title));
     if (t->description)
         cmcp_json_object_set(o, "description",
                               cmcp_json_new_string(t->description));
@@ -580,6 +636,9 @@ static cmcp_json_t *tool_to_descriptor(const server_tool_t *t) {
         cmcp_json_object_set(def, "type", cmcp_json_new_string("object"));
         cmcp_json_object_set(o, "inputSchema", def);
     }
+    if (t->output_schema)
+        cmcp_json_object_set(o, "outputSchema",
+                              cmcp_json_clone(t->output_schema));
     return o;
 }
 
@@ -602,13 +661,20 @@ static void handle_tools_list(cmcp_server_t *s,
 
 /* Per-call handle passed to every handler. Created on the worker (or
  * loop) stack for the duration of one handler call; the borrowed
- * pointers (server, progress_token) are valid only that long. */
+ * pointers (server, progress_token) are valid only that long.
+ *
+ * `structured` is OWNED — set via cmcp_handler_set_structured. The
+ * tools/call dispatcher reads it after the handler returns, attaches
+ * it to the response, and clears it. Resource/prompt dispatchers
+ * ignore the field (set_structured no-ops for them). */
 struct cmcp_handler_ctx {
     cmcp_server_t      *server;          /* for emitting progress */
     const cmcp_json_t  *progress_token;  /* params._meta.progressToken,
                                           * NULL if the caller sent none */
     int                 cancelled;       /* set by notifications/cancelled;
                                           * wired in Phase 3.4 Step 3 */
+    cmcp_json_t        *structured;      /* owned; attached to tool result */
+    int                 is_tool_call;    /* set_structured no-ops elsewhere */
 };
 
 /* params._meta.progressToken — a string or int per spec — or NULL. The
@@ -631,6 +697,19 @@ int cmcp_handler_cancelled(const cmcp_handler_ctx_t *hctx) {
     int c = hctx->cancelled;
     pthread_mutex_unlock(&hctx->server->inflight_mu);
     return c;
+}
+
+void cmcp_handler_set_structured(cmcp_handler_ctx_t *hctx,
+                                  cmcp_json_t *value) {
+    if (!hctx || !hctx->is_tool_call) {
+        /* Non-tool ctx (resource/prompt) or NULL — the value would
+         * never be consumed. Free it so the caller doesn't leak. */
+        cmcp_json_free(value);
+        return;
+    }
+    /* Replace any prior value. NULL clears. */
+    cmcp_json_free(hctx->structured);
+    hctx->structured = value;
 }
 
 int cmcp_handler_progress(cmcp_handler_ctx_t *hctx,
@@ -1001,22 +1080,62 @@ static void handle_tools_call(cmcp_server_t *s,
         local.server         = s;
         local.progress_token = meta_progress_token(req->params);
         local.cancelled      = 0;
+        local.structured     = NULL;
+        local.is_tool_call   = 1;
         hctx = &local;
+    } else {
+        hctx->is_tool_call = 1;
     }
     cmcp_json_t *content = NULL;
     int is_error = 0;
     int rc = t->handler(args, t->userdata, hctx, &content, &is_error);
     if (rc != CMCP_OK) {
         cmcp_json_free(content);
+        cmcp_json_free(hctx->structured);
+        hctx->structured = NULL;
         cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
                              "Tool handler failed", NULL);
         return;
     }
 
-    /* Wrap. NULL content → empty array (spec allows). */
+    /* If the handler attached structuredContent, validate it against
+     * output_schema (spec: "server MUST provide structuredContent that
+     * matches the schema") and surface validation failure as -32603. */
+    if (hctx->structured && t->output_schema) {
+        cmcp_schema_error_t serr;
+        int vr = cmcp_schema_validate(t->output_schema, hctx->structured, &serr);
+        cmcp_schema_error_clear(&serr);
+        if (vr != CMCP_OK) {
+            cmcp_json_free(content);
+            cmcp_json_free(hctx->structured);
+            hctx->structured = NULL;
+            cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                                 "structuredContent failed output_schema validation",
+                                 NULL);
+            return;
+        }
+    }
+
+    /* Wrap. NULL content → empty array (spec allows). If structuredContent
+     * is set and content is still empty, drop in a JSON-serialised
+     * rendering so legacy clients that only read `content` still get
+     * something — the spec calls for backwards-compat text. */
     cmcp_json_t *result = cmcp_json_new_object();
-    if (!content) content = cmcp_json_new_array();
+    if (!content) {
+        if (hctx->structured) {
+            char *rendered = cmcp_json_emit(hctx->structured);
+            content = rendered ? cmcp_tool_text_content(rendered)
+                                : cmcp_json_new_array();
+            free(rendered);
+        } else {
+            content = cmcp_json_new_array();
+        }
+    }
     cmcp_json_object_set(result, "content", content);
+    if (hctx->structured) {
+        cmcp_json_object_set(result, "structuredContent", hctx->structured);
+        hctx->structured = NULL;     /* moved into result */
+    }
     cmcp_json_object_set(result, "isError", cmcp_json_new_bool(is_error ? 1 : 0));
     cmcp_rpc_make_response(resp, &req->id, result);
 }
@@ -1030,6 +1149,8 @@ static cmcp_json_t *resource_to_descriptor(const server_resource_t *r) {
     if (!o) return NULL;
     cmcp_json_object_set(o, "uri",  cmcp_json_new_string(r->uri));
     cmcp_json_object_set(o, "name", cmcp_json_new_string(r->name));
+    if (r->title)
+        cmcp_json_object_set(o, "title", cmcp_json_new_string(r->title));
     if (r->description)
         cmcp_json_object_set(o, "description",
                               cmcp_json_new_string(r->description));
@@ -1083,7 +1204,11 @@ static void handle_resources_read(cmcp_server_t *s,
         local.server         = s;
         local.progress_token = meta_progress_token(req->params);
         local.cancelled      = 0;
+        local.structured     = NULL;
+        local.is_tool_call   = 0;
         hctx = &local;
+    } else {
+        hctx->is_tool_call = 0;
     }
     cmcp_json_t *contents = NULL;
     int is_error = 0;
@@ -1177,6 +1302,8 @@ static cmcp_json_t *prompt_to_descriptor(const server_prompt_t *p) {
     cmcp_json_t *o = cmcp_json_new_object();
     if (!o) return NULL;
     cmcp_json_object_set(o, "name", cmcp_json_new_string(p->name));
+    if (p->title)
+        cmcp_json_object_set(o, "title", cmcp_json_new_string(p->title));
     if (p->description)
         cmcp_json_object_set(o, "description",
                               cmcp_json_new_string(p->description));
@@ -1266,7 +1393,11 @@ static void handle_prompts_get(cmcp_server_t *s,
         local.server         = s;
         local.progress_token = meta_progress_token(req->params);
         local.cancelled      = 0;
+        local.structured     = NULL;
+        local.is_tool_call   = 0;
         hctx = &local;
+    } else {
+        hctx->is_tool_call = 0;
     }
     cmcp_json_t *messages = NULL;
     int rc = p->handler(args, p->userdata, hctx, &messages);
@@ -1564,6 +1695,8 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
             w->ctx.server         = s;
             w->ctx.progress_token = meta_progress_token(w->msg.params);
             w->ctx.cancelled      = 0;
+            w->ctx.structured     = NULL;
+            w->ctx.is_tool_call   = 0;   /* re-set by handle_tools_call */
             /* Register before submit so a cancel racing in while the
              * request is still queued is not lost. */
             if (inflight_register(s, &w->msg.id, &w->ctx) != CMCP_OK) {
