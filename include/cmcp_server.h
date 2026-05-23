@@ -279,4 +279,68 @@ int cmcp_server_notify_prompts_changed(cmcp_server_t *s);
  * keeps the wire quiet for resources nobody cares about. */
 int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri);
 
+/* ====================================================================== */
+/* Server → client requests                                                */
+/* ====================================================================== */
+
+/* Send a JSON-RPC request from the server to the client and block the
+ * calling thread until the response arrives.
+ *
+ * Intended to be called from a tool/resource/prompt handler running on
+ * the worker pool — the run-loop thread reads the response off the
+ * transport and routes it to this caller's completion record. Calling
+ * from the run-loop thread itself would deadlock (the loop would never
+ * get back to reading frames) so don't do that.
+ *
+ * Valid only between cmcp_server_run() entry and exit. `params` is
+ * consumed (may be NULL).
+ *
+ * On success, *out_response is initialised and owns its fields —
+ * caller must cmcp_rpc_message_clear() it. Inspect ->result vs
+ * ->error to distinguish a successful peer response from a peer-side
+ * JSON-RPC error.
+ *
+ * If `hctx` is non-NULL, this call polls its cancellation flag on a
+ * ~50ms tick and returns CMCP_ECANCELLED if the handler has been
+ * cancelled — so a server-initiated request inside a cancellable tool
+ * call doesn't strand the worker on a peer that's no longer answering.
+ *
+ * Returns:
+ *   CMCP_OK         response received (success or peer error)
+ *   CMCP_EINVAL     bad args, or no active transport
+ *   CMCP_ENOMEM     allocation failure
+ *   CMCP_EIO        transport closed before the response arrived
+ *   CMCP_ECANCELLED hctx was cancelled while waiting */
+int cmcp_server_send_request(cmcp_server_t *s,
+                              cmcp_handler_ctx_t *hctx,
+                              const char *method,
+                              cmcp_json_t *params,
+                              cmcp_rpc_message_t *out_response);
+
+/* Convenience: ask the peer (the host) for structured input via the
+ * `elicitation/create` request.
+ *
+ *   `message`           Human-readable prompt (required).
+ *   `requested_schema`  A flat JSON object describing the shape of the
+ *                       answer per the MCP spec (string/number/boolean/
+ *                       enum properties only — no nesting). Consumed on
+ *                       success; freed on failure. May be NULL — the
+ *                       library then sends an empty `{"type":"object"}`.
+ *   `out_result`        OUT. Owned cmcp_json_t object shaped
+ *                       {"action": "accept"|"decline"|"cancel",
+ *                        "content"?: ...}. Caller frees via
+ *                       cmcp_json_free.
+ *
+ * Cap-gated: returns CMCP_EUNSUPPORTED if the peer didn't advertise
+ * `elicitation` in its initialize capabilities.
+ *
+ * On CMCP_OK, `*out_result` is set. On any other return, `*out_result`
+ * is NULL. Forwards the underlying CMCP_ECANCELLED / CMCP_EIO /
+ * CMCP_EINVAL semantics from cmcp_server_send_request. A peer-side
+ * JSON-RPC error response is surfaced as CMCP_EPROTOCOL. */
+int cmcp_handler_elicit(cmcp_handler_ctx_t *hctx,
+                         const char *message,
+                         cmcp_json_t *requested_schema,
+                         cmcp_json_t **out_result);
+
 #endif

@@ -64,6 +64,20 @@ typedef struct {
     struct timespec      deadline;  /* CLOCK_MONOTONIC; {0,0} = no timeout */
 } inflight_entry_t;
 
+/* A server→client request awaiting its response. Created on the worker
+ * thread that called cmcp_server_send_request, parked on cv until the
+ * run loop routes the matching RESPONSE frame (sets done=1) or the
+ * peer dies (cancelled=1, broadcast by outgoing_cancel_all). */
+typedef struct outgoing_pending {
+    long long                  id;
+    pthread_mutex_t            mu;
+    pthread_cond_t             cv;
+    int                        done;        /* response arrived */
+    int                        cancelled;   /* transport gone, give up */
+    cmcp_rpc_message_t         response;    /* valid iff done && !cancelled */
+    struct outgoing_pending   *next, *prev;
+} outgoing_pending_t;
+
 struct cmcp_server {
     char                       *name;
     char                       *version;
@@ -114,6 +128,14 @@ struct cmcp_server {
     pthread_mutex_t              inflight_mu;
     int                          inflight_mu_init;
     long                         handler_timeout_ms;  /* 0 = watchdog off */
+
+    /* Server→client requests awaiting their response. outgoing_mu
+     * guards both the linked list and the monotonic id counter; each
+     * record then has its own mu/cv for the worker thread to park on. */
+    pthread_mutex_t              outgoing_mu;
+    int                          outgoing_mu_init;
+    long long                    outgoing_id_counter;
+    outgoing_pending_t          *outgoing_head;
 };
 
 /* ====================================================================== */
@@ -151,6 +173,14 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
         return NULL;
     }
     s->inflight_mu_init = 1;
+    if (pthread_mutex_init(&s->outgoing_mu, NULL) != 0) {
+        pthread_mutex_destroy(&s->notify_mu);
+        pthread_mutex_destroy(&s->inflight_mu);
+        free(s->name); free(s->version); free(s);
+        return NULL;
+    }
+    s->outgoing_mu_init = 1;
+    s->outgoing_id_counter = 0;
     return s;
 }
 
@@ -194,6 +224,7 @@ void cmcp_server_free(cmcp_server_t *s) {
     free(s->inflight);
     if (s->notify_mu_init) pthread_mutex_destroy(&s->notify_mu);
     if (s->inflight_mu_init) pthread_mutex_destroy(&s->inflight_mu);
+    if (s->outgoing_mu_init) pthread_mutex_destroy(&s->outgoing_mu);
     free(s);
 }
 
@@ -818,6 +849,91 @@ static void watchdog_stop(watchdog_t *wd) {
 }
 
 /* ====================================================================== */
+/* Outgoing-request pending table                                          */
+/* ====================================================================== */
+/* Server-initiated requests (sampling/elicitation/etc.). A worker-thread
+ * handler calls cmcp_server_send_request, which allocates a fresh
+ * outgoing id, links a completion record, sends the request, then parks
+ * on the record's cv. The run-loop thread reads the matching RESPONSE
+ * frame, moves it into the record, signals the cv. Shutdown unblocks
+ * any still-parked waiter via outgoing_cancel_all. */
+
+static outgoing_pending_t *outgoing_pending_new(long long id) {
+    outgoing_pending_t *p = (outgoing_pending_t *)calloc(1, sizeof *p);
+    if (!p) return NULL;
+    p->id = id;
+    pthread_mutex_init(&p->mu, NULL);
+    pthread_cond_init(&p->cv, NULL);
+    cmcp_rpc_message_init(&p->response);
+    return p;
+}
+
+static void outgoing_pending_free(outgoing_pending_t *p) {
+    if (!p) return;
+    cmcp_rpc_message_clear(&p->response);
+    pthread_mutex_destroy(&p->mu);
+    pthread_cond_destroy(&p->cv);
+    free(p);
+}
+
+static void outgoing_link(cmcp_server_t *s, outgoing_pending_t *p) {
+    pthread_mutex_lock(&s->outgoing_mu);
+    p->prev = NULL;
+    p->next = s->outgoing_head;
+    if (s->outgoing_head) s->outgoing_head->prev = p;
+    s->outgoing_head = p;
+    pthread_mutex_unlock(&s->outgoing_mu);
+}
+
+static void outgoing_unlink(cmcp_server_t *s, outgoing_pending_t *p) {
+    pthread_mutex_lock(&s->outgoing_mu);
+    if (p->prev) p->prev->next = p->next;
+    else if (s->outgoing_head == p) s->outgoing_head = p->next;
+    if (p->next) p->next->prev = p->prev;
+    p->prev = p->next = NULL;
+    pthread_mutex_unlock(&s->outgoing_mu);
+}
+
+/* Move `resp` into the matching completion's record and signal the
+ * waiter. `resp` is moved on success (caller frees the now-empty
+ * shell); left untouched on miss (caller must clear). */
+static void deliver_outgoing_response(cmcp_server_t *s,
+                                       cmcp_rpc_message_t *resp) {
+    if (resp->id.kind != CMCP_ID_INT) return;
+    pthread_mutex_lock(&s->outgoing_mu);
+    outgoing_pending_t *p = s->outgoing_head;
+    while (p && p->id != resp->id.i) p = p->next;
+    if (p) {
+        pthread_mutex_lock(&p->mu);
+        p->response = *resp;
+        cmcp_rpc_message_init(resp);
+        p->done = 1;
+        pthread_cond_broadcast(&p->cv);
+        pthread_mutex_unlock(&p->mu);
+    }
+    pthread_mutex_unlock(&s->outgoing_mu);
+}
+
+/* Wake every still-pending waiter with cancelled=1. Called at run-loop
+ * shutdown so a worker parked in cmcp_server_send_request doesn't
+ * deadlock when the peer is gone. */
+static void outgoing_cancel_all(cmcp_server_t *s) {
+    pthread_mutex_lock(&s->outgoing_mu);
+    outgoing_pending_t *p = s->outgoing_head;
+    while (p) {
+        pthread_mutex_lock(&p->mu);
+        if (!p->done) {
+            p->cancelled = 1;
+            p->done = 1;
+            pthread_cond_broadcast(&p->cv);
+        }
+        pthread_mutex_unlock(&p->mu);
+        p = p->next;
+    }
+    pthread_mutex_unlock(&s->outgoing_mu);
+}
+
+/* ====================================================================== */
 /* tools/call                                                              */
 /* ====================================================================== */
 
@@ -1410,11 +1526,20 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
             continue;
         }
 
-        /* Exactly one well-formed message. A handler-invoking request,
-         * once the handshake is complete, goes to the worker pool so a
-         * slow handler can't stall this loop. Everything else — the
-         * handshake itself, list/subscribe queries, notifications — is
-         * handled inline, keeping the lifecycle FSM on this one thread. */
+        /* Exactly one well-formed message. Responses to server→client
+         * requests (sampling/elicitation/etc.) are routed to the
+         * outgoing pending table — the worker that issued the request
+         * is parked on its cv. Handler-invoking requests, once the
+         * handshake is complete, go to the worker pool. Everything
+         * else — the handshake itself, list/subscribe queries,
+         * notifications — is handled inline, keeping the lifecycle FSM
+         * on this one thread. */
+        if (msgs[0].kind == CMCP_MSG_RESPONSE) {
+            deliver_outgoing_response(s, &msgs[0]);
+            cmcp_rpc_message_clear(&msgs[0]);
+            free(msgs);
+            continue;
+        }
         if (msgs[0].kind == CMCP_MSG_REQUEST &&
             s->state == SS_READY &&
             is_pool_method(msgs[0].method)) {
@@ -1473,8 +1598,11 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
     }
 
     /* The peer is gone: flag every in-flight handler so cooperative
-     * ones bail early and their undeliverable responses are dropped. */
+     * ones bail early and their undeliverable responses are dropped.
+     * Also wake any worker parked in cmcp_server_send_request — its
+     * response is never coming. */
     inflight_cancel_all(s);
+    outgoing_cancel_all(s);
 
     /* Drain + join the pool BEFORE detaching the transport: a draining
      * worker may still call send_message / cmcp_server_notify, both of
@@ -1570,4 +1698,131 @@ int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri) {
     if (!params) return CMCP_ENOMEM;
     cmcp_json_object_set(params, "uri", cmcp_json_new_string(uri));
     return cmcp_server_notify(s, "notifications/resources/updated", params);
+}
+
+/* ====================================================================== */
+/* Server → client requests                                                */
+/* ====================================================================== */
+
+int cmcp_server_send_request(cmcp_server_t *s,
+                              cmcp_handler_ctx_t *hctx,
+                              const char *method,
+                              cmcp_json_t *params,
+                              cmcp_rpc_message_t *out_response) {
+    if (!s || !method || !out_response) {
+        cmcp_json_free(params);
+        return CMCP_EINVAL;
+    }
+    cmcp_rpc_message_init(out_response);
+
+    pthread_mutex_lock(&s->notify_mu);
+    cmcp_transport_t *t = s->active_transport;
+    pthread_mutex_unlock(&s->notify_mu);
+    if (!t) {
+        cmcp_json_free(params);
+        return CMCP_EINVAL;
+    }
+
+    pthread_mutex_lock(&s->outgoing_mu);
+    long long id = ++s->outgoing_id_counter;
+    pthread_mutex_unlock(&s->outgoing_mu);
+
+    outgoing_pending_t *p = outgoing_pending_new(id);
+    if (!p) { cmcp_json_free(params); return CMCP_ENOMEM; }
+    outgoing_link(s, p);
+
+    cmcp_rpc_message_t req;
+    int rc = cmcp_rpc_make_request(&req, id, method, params);
+    if (rc != CMCP_OK) {
+        outgoing_unlink(s, p);
+        outgoing_pending_free(p);
+        cmcp_json_free(params);
+        return rc;
+    }
+    rc = send_message(t, &req);
+    cmcp_rpc_message_clear(&req);
+    if (rc != CMCP_OK) {
+        outgoing_unlink(s, p);
+        outgoing_pending_free(p);
+        return rc;
+    }
+
+    /* Park until the response arrives, the transport dies, or the
+     * handler is cancelled. The 50ms tick is the cancellation poll
+     * interval; a slow peer doesn't penalise it because the response
+     * broadcast wakes us instantly. */
+    int cancelled_by_handler = 0;
+    pthread_mutex_lock(&p->mu);
+    while (!p->done) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000 * 1000;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&p->cv, &p->mu, &ts);
+        if (p->done) break;
+        if (cmcp_handler_cancelled(hctx)) {
+            cancelled_by_handler = 1;
+            break;
+        }
+    }
+    int peer_gone = p->cancelled;
+    if (p->done && !p->cancelled) {
+        *out_response = p->response;
+        cmcp_rpc_message_init(&p->response);
+    }
+    pthread_mutex_unlock(&p->mu);
+
+    outgoing_unlink(s, p);
+    outgoing_pending_free(p);
+
+    if (cancelled_by_handler) return CMCP_ECANCELLED;
+    if (peer_gone)            return CMCP_EIO;
+    return CMCP_OK;
+}
+
+int cmcp_handler_elicit(cmcp_handler_ctx_t *hctx,
+                         const char *message,
+                         cmcp_json_t *requested_schema,
+                         cmcp_json_t **out_result) {
+    if (!hctx || !hctx->server || !message || !out_result) {
+        cmcp_json_free(requested_schema);
+        return CMCP_EINVAL;
+    }
+    *out_result = NULL;
+
+    cmcp_server_t *s = hctx->server;
+    if (!s->peer_caps.elicitation) {
+        cmcp_json_free(requested_schema);
+        return CMCP_EUNSUPPORTED;
+    }
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) {
+        cmcp_json_free(requested_schema);
+        return CMCP_ENOMEM;
+    }
+    cmcp_json_object_set(params, "message", cmcp_json_new_string(message));
+    if (requested_schema) {
+        cmcp_json_object_set(params, "requestedSchema", requested_schema);
+    } else {
+        cmcp_json_t *def = cmcp_json_new_object();
+        cmcp_json_object_set(def, "type", cmcp_json_new_string("object"));
+        cmcp_json_object_set(params, "requestedSchema", def);
+    }
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_server_send_request(s, hctx, "elicitation/create",
+                                       params, &resp);
+    if (rc != CMCP_OK) return rc;
+
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    /* Move the result out of the response shell. */
+    *out_result = resp.result;
+    resp.result = NULL;
+    cmcp_rpc_message_clear(&resp);
+    return CMCP_OK;
 }

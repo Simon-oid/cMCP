@@ -24,6 +24,7 @@
 #include "cmcp.h"
 #include "cmcp_client.h"
 #include "cmcp_json.h"
+#include "cmcp_server.h"
 #include "cmcp_transport.h"
 #include "cmcp_types.h"
 
@@ -410,6 +411,265 @@ static void test_helper_action_validation(void) {
 }
 
 /* ====================================================================== */
+/* Emit half — real cmcp_server tool calls cmcp_handler_elicit              */
+/* ====================================================================== */
+
+/* A demo tool whose handler asks the host to confirm via elicitation,
+ * then echoes the host's answer back in the tool's text response. The
+ * tool exists only for this test (and as a working example of the
+ * emit half — adopters can mirror this shape). */
+
+typedef struct {
+    int   confirm_seen;
+    char *captured_msg;
+    pthread_mutex_t mu;
+} confirm_capture_t;
+
+static int confirm_tool(const cmcp_json_t *arguments, void *userdata,
+                        cmcp_handler_ctx_t *hctx,
+                        cmcp_json_t **out_content, int *out_is_error) {
+    (void)arguments;
+    confirm_capture_t *cap = (confirm_capture_t *)userdata;
+
+    cmcp_json_t *schema = cmcp_json_new_object();
+    cmcp_json_object_set(schema, "type", cmcp_json_new_string("object"));
+    cmcp_json_t *props = cmcp_json_new_object();
+    cmcp_json_t *confirm = cmcp_json_new_object();
+    cmcp_json_object_set(confirm, "type", cmcp_json_new_string("boolean"));
+    cmcp_json_object_set(props, "confirm", confirm);
+    cmcp_json_object_set(schema, "properties", props);
+
+    cmcp_json_t *result = NULL;
+    int rc = cmcp_handler_elicit(hctx, "Confirm the action?", schema, &result);
+    if (rc != CMCP_OK) {
+        *out_is_error = 1;
+        *out_content  = cmcp_tool_text_content("elicit failed");
+        return CMCP_OK;
+    }
+
+    const cmcp_json_t *act     = cmcp_json_object_get(result, "action");
+    const cmcp_json_t *content = cmcp_json_object_get(result, "content");
+    const char *action_s = (act && act->type == CMCP_JSON_STRING) ? act->str.s : "?";
+    int confirmed = 0;
+    if (content && content->type == CMCP_JSON_OBJECT) {
+        const cmcp_json_t *cv = cmcp_json_object_get(content, "confirm");
+        if (cv && cv->type == CMCP_JSON_BOOL) confirmed = cv->b;
+    }
+    pthread_mutex_lock(&cap->mu);
+    cap->confirm_seen = confirmed;
+    free(cap->captured_msg);
+    cap->captured_msg = strdup(action_s);
+    pthread_mutex_unlock(&cap->mu);
+
+    /* Format BEFORE freeing the result tree — action_s borrows into it. */
+    char buf[64];
+    snprintf(buf, sizeof buf, "action=%s confirm=%d", action_s, confirmed);
+    *out_content  = cmcp_tool_text_content(buf);
+    *out_is_error = 0;
+    cmcp_json_free(result);
+    return CMCP_OK;
+}
+
+/* Host-side elicitation handler that always replies accept with the
+ * `confirm` field set true — what a real interactive UI would do after
+ * the user clicked OK. */
+static int host_accept_confirm(const cmcp_json_t *params, void *userdata,
+                                cmcp_json_t **out_result) {
+    (void)params; (void)userdata;
+    cmcp_json_t *content = cmcp_json_new_object();
+    cmcp_json_object_set(content, "confirm", cmcp_json_new_bool(1));
+    *out_result = cmcp_elicitation_result("accept", content);
+    return *out_result ? CMCP_OK : CMCP_ENOMEM;
+}
+
+/* Host-side handler that always declines (no content). */
+static int host_decline(const cmcp_json_t *params, void *userdata,
+                         cmcp_json_t **out_result) {
+    (void)params; (void)userdata;
+    *out_result = cmcp_elicitation_result("decline", NULL);
+    return *out_result ? CMCP_OK : CMCP_ENOMEM;
+}
+
+typedef struct {
+    cmcp_server_t    *s;
+    cmcp_transport_t *t;
+} server_run_arg_t;
+
+static void *server_run_thread(void *arg) {
+    server_run_arg_t *a = (server_run_arg_t *)arg;
+    cmcp_server_run(a->s, a->t);
+    return NULL;
+}
+
+static void test_emit_roundtrip_accept(void) {
+    transport_pair_t p = {0};
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    confirm_capture_t cap = { .confirm_seen = -1, .captured_msg = NULL };
+    pthread_mutex_init(&cap.mu, NULL);
+
+    cmcp_server_t *srv = cmcp_server_new("emit-srv", "0.1.0");
+    TEST_ASSERT(cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "confirm",
+        .description = "Elicit a confirmation from the user.",
+        .handler = confirm_tool,
+        .userdata = &cap,
+    }) == CMCP_OK);
+
+    server_run_arg_t sa = { srv, p.server_t };
+    pthread_t srv_th;
+    TEST_ASSERT(pthread_create(&srv_th, NULL, server_run_thread, &sa) == 0);
+
+    cmcp_client_t *cli = cmcp_client_new("host", "0.0.1");
+    cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+        .elicitation = 1,
+    });
+    cmcp_client_set_elicitation_handler(cli, host_accept_confirm, NULL);
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+    /* tools/call confirm — triggers the server-side elicit round-trip. */
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "name", cmcp_json_new_string("confirm"));
+    cmcp_json_object_set(params, "arguments", cmcp_json_new_object());
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    TEST_ASSERT(cmcp_client_request(cli, "tools/call", params, &resp) == CMCP_OK);
+    TEST_ASSERT(resp.error == NULL);
+    TEST_ASSERT(resp.result && resp.result->type == CMCP_JSON_OBJECT);
+
+    /* The tool packaged the host's reply into a text content item. */
+    if (resp.result) {
+        const cmcp_json_t *content = cmcp_json_object_get(resp.result, "content");
+        TEST_ASSERT(content && content->type == CMCP_JSON_ARRAY &&
+                    content->arr.len == 1);
+        if (content && content->arr.len > 0) {
+            const cmcp_json_t *item = content->arr.items[0];
+            const cmcp_json_t *txt  = cmcp_json_object_get(item, "text");
+            TEST_ASSERT(txt && txt->type == CMCP_JSON_STRING);
+            TEST_ASSERT(txt && strcmp(txt->str.s, "action=accept confirm=1") == 0);
+        }
+    }
+    cmcp_rpc_message_clear(&resp);
+
+    pthread_mutex_lock(&cap.mu);
+    TEST_ASSERT(cap.confirm_seen == 1);
+    TEST_ASSERT(cap.captured_msg && strcmp(cap.captured_msg, "accept") == 0);
+    pthread_mutex_unlock(&cap.mu);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(srv_th, NULL);
+    cmcp_transport_close(p.server_t);
+    cmcp_server_free(srv);
+    free(cap.captured_msg);
+    pthread_mutex_destroy(&cap.mu);
+}
+
+static void test_emit_decline(void) {
+    transport_pair_t p = {0};
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    confirm_capture_t cap = { .confirm_seen = -1, .captured_msg = NULL };
+    pthread_mutex_init(&cap.mu, NULL);
+
+    cmcp_server_t *srv = cmcp_server_new("emit-srv", "0.1.0");
+    cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "confirm",
+        .handler = confirm_tool,
+        .userdata = &cap,
+    });
+
+    server_run_arg_t sa = { srv, p.server_t };
+    pthread_t srv_th;
+    pthread_create(&srv_th, NULL, server_run_thread, &sa);
+
+    cmcp_client_t *cli = cmcp_client_new("host", "0.0.1");
+    cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+        .elicitation = 1,
+    });
+    cmcp_client_set_elicitation_handler(cli, host_decline, NULL);
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "name", cmcp_json_new_string("confirm"));
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    TEST_ASSERT(cmcp_client_request(cli, "tools/call", params, &resp) == CMCP_OK);
+    TEST_ASSERT(resp.error == NULL);
+
+    /* No content on decline → confirm=0 in the tool's echoed string. */
+    if (resp.result) {
+        const cmcp_json_t *content = cmcp_json_object_get(resp.result, "content");
+        if (content && content->arr.len > 0) {
+            const cmcp_json_t *txt = cmcp_json_object_get(
+                content->arr.items[0], "text");
+            TEST_ASSERT(txt && strcmp(txt->str.s, "action=decline confirm=0") == 0);
+        }
+    }
+    cmcp_rpc_message_clear(&resp);
+
+    pthread_mutex_lock(&cap.mu);
+    TEST_ASSERT(cap.confirm_seen == 0);
+    TEST_ASSERT(cap.captured_msg && strcmp(cap.captured_msg, "decline") == 0);
+    pthread_mutex_unlock(&cap.mu);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(srv_th, NULL);
+    cmcp_transport_close(p.server_t);
+    cmcp_server_free(srv);
+    free(cap.captured_msg);
+    pthread_mutex_destroy(&cap.mu);
+}
+
+static void test_emit_without_peer_cap(void) {
+    /* Server tool calls elicit but the host never advertised the cap.
+     * cmcp_handler_elicit must short-circuit with CMCP_EUNSUPPORTED;
+     * the tool surfaces that as isError. No round-trip happens — that's
+     * the point of the cap gate. */
+    transport_pair_t p = {0};
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    confirm_capture_t cap = { .confirm_seen = -1, .captured_msg = NULL };
+    pthread_mutex_init(&cap.mu, NULL);
+
+    cmcp_server_t *srv = cmcp_server_new("emit-srv", "0.1.0");
+    cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "confirm",
+        .handler = confirm_tool,
+        .userdata = &cap,
+    });
+
+    server_run_arg_t sa = { srv, p.server_t };
+    pthread_t srv_th;
+    pthread_create(&srv_th, NULL, server_run_thread, &sa);
+
+    cmcp_client_t *cli = cmcp_client_new("host", "0.0.1");
+    /* Deliberately no caps.elicitation and no handler. */
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "name", cmcp_json_new_string("confirm"));
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    TEST_ASSERT(cmcp_client_request(cli, "tools/call", params, &resp) == CMCP_OK);
+    TEST_ASSERT(resp.error == NULL);     /* tool-level isError, not RPC error */
+    if (resp.result) {
+        const cmcp_json_t *err = cmcp_json_object_get(resp.result, "isError");
+        TEST_ASSERT(err && err->type == CMCP_JSON_BOOL && err->b == 1);
+    }
+    cmcp_rpc_message_clear(&resp);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(srv_th, NULL);
+    cmcp_transport_close(p.server_t);
+    cmcp_server_free(srv);
+    free(cap.captured_msg);
+    pthread_mutex_destroy(&cap.mu);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_elicitation:\n");
@@ -418,6 +678,9 @@ int main(void) {
     TEST_RUN(test_no_handler_replies_method_not_found);
     TEST_RUN(test_handler_error_returns_internal);
     TEST_RUN(test_helper_action_validation);
+    TEST_RUN(test_emit_roundtrip_accept);
+    TEST_RUN(test_emit_decline);
+    TEST_RUN(test_emit_without_peer_cap);
 
     TEST_DONE();
 }
