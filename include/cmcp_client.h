@@ -143,6 +143,51 @@ cmcp_json_t *cmcp_sampling_text_result(const char *text,
                                         const char *stop_reason);
 
 /* ====================================================================== */
+/* Elicitation (server → host structured-input prompt)                      */
+/* ====================================================================== */
+
+/* Handler for `elicitation/create`. Servers invoke this mid-tool-call
+ * when they need additional structured input from the user — e.g. a
+ * confirmation, a missing argument, a credential.
+ *
+ *   `params`     `{message: string, requestedSchema: object}`.
+ *                `requestedSchema` is a restricted flat object of
+ *                primitive properties per the MCP spec (string / number
+ *                / boolean / enum — no nesting). Borrowed.
+ *   `userdata`   What was passed to set_elicitation_handler.
+ *   `out_result` OUT. Owned cmcp_json_t object built via
+ *                cmcp_elicitation_result(action, content). The library
+ *                takes ownership on success.
+ *
+ * Return CMCP_OK on success, non-zero for INTERNAL_ERROR (-32603).
+ *
+ * Trust note: same per-client model as sampling — register a handler
+ * only on clients whose servers are allowed to interrupt the user. */
+typedef int (*cmcp_elicitation_handler_fn)(const cmcp_json_t *params,
+                                             void *userdata,
+                                             cmcp_json_t **out_result);
+
+/* Register an elicitation handler. Pass fn=NULL to clear. Setting the
+ * handler does NOT automatically advertise the `elicitation` capability
+ * — call cmcp_client_set_capabilities to opt in to the wire signal
+ * (and do so BEFORE cmcp_client_handshake). */
+void cmcp_client_set_elicitation_handler(cmcp_client_t *c,
+                                           cmcp_elicitation_handler_fn fn,
+                                           void *userdata);
+
+/* Convenience: build an elicitation response envelope.
+ *
+ *   action   "accept", "decline", or "cancel" — required.
+ *   content  Required for "accept" — owned cmcp_json_t OBJECT shaped per
+ *            the request's `requestedSchema`. Ignored (freed) for
+ *            "decline"/"cancel" since the spec omits content there.
+ *
+ * Returns NULL on bad input; on failure, any passed-in content is
+ * freed so the caller never leaks. */
+cmcp_json_t *cmcp_elicitation_result(const char *action,
+                                       cmcp_json_t *content);
+
+/* ====================================================================== */
 /* Roots (host → server filesystem scoping)                                 */
 /* ====================================================================== */
 

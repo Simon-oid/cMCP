@@ -23,6 +23,7 @@ typedef struct {
 
 typedef struct {
     int sampling;                 /* sampling/createMessage */
+    int elicitation;              /* elicitation/create */
     int roots_list_changed;       /* roots/list_changed */
 } cmcp_client_capabilities_t;
 

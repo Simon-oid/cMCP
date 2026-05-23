@@ -140,6 +140,11 @@ struct cmcp_client {
     cmcp_sampling_handler_fn    sampling_fn;
     void                       *sampling_ud;
 
+    /* Elicitation (server-initiated `elicitation/create`). Same
+     * default-decline model as sampling: NULL fn → -32601. */
+    cmcp_elicitation_handler_fn elicitation_fn;
+    void                       *elicitation_ud;
+
     /* Roots: declarative list the reader replies with on
      * `roots/list`. roots_mu guards both the array pointer and its
      * contents; the reader takes a snapshot under the lock then
@@ -208,6 +213,9 @@ static cmcp_json_t *client_caps_to_json(const cmcp_client_t *cli) {
     if (!root) return NULL;
     if (c->sampling) {
         cmcp_json_object_set(root, "sampling", cmcp_json_new_object());
+    }
+    if (c->elicitation) {
+        cmcp_json_object_set(root, "elicitation", cmcp_json_new_object());
     }
     if (cli->roots_set || c->roots_list_changed) {
         cmcp_json_t *roots = cmcp_json_new_object();
@@ -353,6 +361,38 @@ static void handle_sampling_request(cmcp_client_t *c,
     cmcp_rpc_message_clear(&resp);
 }
 
+/* Dispatch `elicitation/create` to the host's handler. Same shape as
+ * sampling: no handler → -32601; handler error → -32603. The handler
+ * runs on the reader thread, so a slow / interactive prompt stalls
+ * inbound frames. v0.4 ships the receive surface; an emit half that
+ * makes interactive elicitation testable under Claude Code lands in
+ * its own segment. */
+static void handle_elicitation_request(cmcp_client_t *c,
+                                        const cmcp_rpc_message_t *req) {
+    if (!c->elicitation_fn) {
+        reply_method_not_found(c, &req->id);
+        return;
+    }
+    cmcp_json_t *result = NULL;
+    int rc = c->elicitation_fn(req->params, c->elicitation_ud, &result);
+
+    cmcp_rpc_message_t resp;
+    if (rc != CMCP_OK) {
+        cmcp_json_free(result);
+        if (cmcp_rpc_make_error(&resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                                 "elicitation handler failed", NULL) != CMCP_OK) {
+            return;
+        }
+    } else {
+        if (!result) result = cmcp_json_new_object();
+        if (cmcp_rpc_make_response(&resp, &req->id, result) != CMCP_OK) {
+            return;
+        }
+    }
+    send_message(c, &resp);
+    cmcp_rpc_message_clear(&resp);
+}
+
 /* Wake every still-pending waiter with cancelled=1. Idempotent: safe
  * to call multiple times — the per-completion `done` check stops a
  * second broadcast. Used by the reader on transport failure (so a
@@ -414,6 +454,9 @@ static void *reader_main(void *arg) {
                 } else if (m->method &&
                     strcmp(m->method, "sampling/createMessage") == 0) {
                     handle_sampling_request(c, m);
+                } else if (m->method &&
+                           strcmp(m->method, "elicitation/create") == 0) {
+                    handle_elicitation_request(c, m);
                 } else if (m->method &&
                            strcmp(m->method, "roots/list") == 0) {
                     handle_roots_list(c, m);
@@ -549,6 +592,14 @@ void cmcp_client_set_sampling_handler(cmcp_client_t *c,
     c->sampling_ud = userdata;
 }
 
+void cmcp_client_set_elicitation_handler(cmcp_client_t *c,
+                                          cmcp_elicitation_handler_fn fn,
+                                          void *userdata) {
+    if (!c) return;
+    c->elicitation_fn = fn;
+    c->elicitation_ud = userdata;
+}
+
 int cmcp_client_set_roots(cmcp_client_t *c,
                            const cmcp_root_t *roots, size_t n) {
     if (!c) return CMCP_EINVAL;
@@ -623,6 +674,33 @@ cmcp_json_t *cmcp_sampling_text_result(const char *text,
         cmcp_json_object_set(result, "stopReason",
                               cmcp_json_new_string(stop_reason));
     return result;
+}
+
+cmcp_json_t *cmcp_elicitation_result(const char *action,
+                                       cmcp_json_t *content) {
+    if (!action) { cmcp_json_free(content); return NULL; }
+    int is_accept  = strcmp(action, "accept")  == 0;
+    int is_decline = strcmp(action, "decline") == 0;
+    int is_cancel  = strcmp(action, "cancel")  == 0;
+    if (!is_accept && !is_decline && !is_cancel) {
+        cmcp_json_free(content);
+        return NULL;
+    }
+    if (is_accept) {
+        if (!content || content->type != CMCP_JSON_OBJECT) {
+            cmcp_json_free(content);
+            return NULL;
+        }
+    } else if (content) {
+        /* Spec: content present only on accept. Drop it. */
+        cmcp_json_free(content);
+        content = NULL;
+    }
+    cmcp_json_t *r = cmcp_json_new_object();
+    if (!r) { cmcp_json_free(content); return NULL; }
+    cmcp_json_object_set(r, "action", cmcp_json_new_string(action));
+    if (content) cmcp_json_object_set(r, "content", content);
+    return r;
 }
 
 const cmcp_server_capabilities_t *cmcp_client_server_caps(const cmcp_client_t *c) {

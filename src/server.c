@@ -447,7 +447,8 @@ static void client_caps_from_json(const cmcp_json_t *o,
                                    cmcp_client_capabilities_t *out) {
     memset(out, 0, sizeof *out);
     if (!o || o->type != CMCP_JSON_OBJECT) return;
-    if (cmcp_json_object_get(o, "sampling")) out->sampling = 1;
+    if (cmcp_json_object_get(o, "sampling"))    out->sampling    = 1;
+    if (cmcp_json_object_get(o, "elicitation")) out->elicitation = 1;
     const cmcp_json_t *roots = cmcp_json_object_get(o, "roots");
     if (roots && roots->type == CMCP_JSON_OBJECT) {
         const cmcp_json_t *lc = cmcp_json_object_get(roots, "listChanged");
