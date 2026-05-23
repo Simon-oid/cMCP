@@ -81,8 +81,15 @@ typedef struct pending_completion {
     pthread_mutex_t            mu;
     pthread_cond_t             cv;
     int                        done;       /* 0 → 1 once response is in */
-    int                        cancelled;  /* set on shutdown */
+    int                        cancelled;  /* set on shutdown or cancel */
     cmcp_rpc_message_t         response;   /* valid iff done && !cancelled */
+    /* Optional per-call progress subscription. has_progress_token=1
+     * means progress_token holds the int value the library handed the
+     * server in _meta.progressToken; the reader matches against it. */
+    int                        has_progress_token;
+    long long                  progress_token;
+    cmcp_progress_fn           progress_fn;
+    void                      *progress_ud;
     struct pending_completion *next, *prev;
 } pending_completion_t;
 
@@ -130,6 +137,12 @@ struct cmcp_client {
 
     pthread_mutex_t             list_mu;
     pending_completion_t       *active_head;       /* doubly-linked list */
+
+    /* Monotonic counter for per-call progress tokens (allocated by
+     * cmcp_client_call_async_progress). Guarded by list_mu — we always
+     * take list_mu when touching the active list anyway, so folding
+     * the token counter under it avoids a second mutex. */
+    long long                   next_progress_token;
 
     /* Notification routing. */
     cmcp_notification_fn        notif_fn;
@@ -393,6 +406,53 @@ static void handle_elicitation_request(cmcp_client_t *c,
     cmcp_rpc_message_clear(&resp);
 }
 
+/* Route a notifications/progress frame to a per-call progress callback
+ * if one is registered against the frame's progressToken. Returns 1
+ * on a match (so the caller skips the generic-handler fallthrough);
+ * 0 if the token is missing, malformed, or unmatched — let the caller
+ * deliver it through the generic notification handler instead. The
+ * callback runs while we hold list_mu briefly; it must not block or
+ * call back into the client. */
+static int dispatch_progress_notification(cmcp_client_t *c,
+                                           const cmcp_json_t *params) {
+    if (!params || params->type != CMCP_JSON_OBJECT) return 0;
+    const cmcp_json_t *tok = cmcp_json_object_get(params, "progressToken");
+    if (!tok || tok->type != CMCP_JSON_INT) return 0;
+    long long token = tok->i;
+
+    const cmcp_json_t *p_progress = cmcp_json_object_get(params, "progress");
+    const cmcp_json_t *p_total    = cmcp_json_object_get(params, "total");
+    const cmcp_json_t *p_message  = cmcp_json_object_get(params, "message");
+
+    double progress = 0;
+    if (p_progress && p_progress->type == CMCP_JSON_DOUBLE)
+        progress = p_progress->d;
+    else if (p_progress && p_progress->type == CMCP_JSON_INT)
+        progress = (double)p_progress->i;
+
+    double total = -1;
+    if (p_total && p_total->type == CMCP_JSON_DOUBLE) total = p_total->d;
+    else if (p_total && p_total->type == CMCP_JSON_INT)
+        total = (double)p_total->i;
+
+    const char *message = (p_message && p_message->type == CMCP_JSON_STRING)
+        ? p_message->str.s : NULL;
+
+    pthread_mutex_lock(&c->list_mu);
+    pending_completion_t *p = c->active_head;
+    while (p) {
+        if (p->has_progress_token && p->progress_token == token) break;
+        p = p->next;
+    }
+    cmcp_progress_fn fn = p ? p->progress_fn : NULL;
+    void           *ud = p ? p->progress_ud : NULL;
+    pthread_mutex_unlock(&c->list_mu);
+
+    if (!fn) return 0;
+    fn(progress, total, message, ud);
+    return 1;
+}
+
 /* Wake every still-pending waiter with cancelled=1. Idempotent: safe
  * to call multiple times — the per-completion `done` check stops a
  * second broadcast. Used by the reader on transport failure (so a
@@ -443,7 +503,12 @@ static void *reader_main(void *arg) {
                 deliver_response(c, m);
                 break;
             case CMCP_MSG_NOTIFICATION:
-                if (c->notif_fn && m->method) {
+                if (m->method &&
+                    strcmp(m->method, "notifications/progress") == 0 &&
+                    dispatch_progress_notification(c, m->params)) {
+                    /* Routed to a per-call callback; do not also deliver
+                     * to the generic handler. */
+                } else if (c->notif_fn && m->method) {
                     c->notif_fn(m->method, m->params, c->notif_ud);
                 }
                 cmcp_rpc_message_clear(m);
@@ -811,6 +876,114 @@ int cmcp_client_notify(cmcp_client_t *c, const char *method,
     rc = send_message(c, &n);
     cmcp_rpc_message_clear(&n);
     return rc;
+}
+
+int cmcp_client_cancel(cmcp_client_t *c, long long id, const char *reason) {
+    if (!c) return CMCP_EINVAL;
+
+    /* Take the entry out of the pending table FIRST. This wins the race
+     * against a response that's about to arrive: if we take it, the
+     * reader's deliver_response simply drops the (now-orphaned) frame;
+     * if the response wins, our pending_take here returns 0 and we
+     * report CMCP_EINVAL — caller's wait already saw the response. */
+    void *ud = NULL;
+    if (!cmcp_rpc_pending_take(c->pending, id, &ud) || !ud) {
+        return CMCP_EINVAL;
+    }
+    pending_completion_t *p = (pending_completion_t *)ud;
+
+    /* Signal the waiter. After we unlock p->mu the waiter may unlink
+     * and free p — do not touch p again. */
+    pthread_mutex_lock(&p->mu);
+    if (!p->done) {
+        p->cancelled = 1;
+        p->done = 1;
+        pthread_cond_broadcast(&p->cv);
+    }
+    pthread_mutex_unlock(&p->mu);
+
+    /* Wire notification. Build params even if reason is NULL — the
+     * spec requires requestId. */
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "requestId", cmcp_json_new_int(id));
+    if (reason)
+        cmcp_json_object_set(params, "reason", cmcp_json_new_string(reason));
+    return cmcp_client_notify(c, "notifications/cancelled", params);
+}
+
+int cmcp_client_call_async_progress(cmcp_client_t *c, const char *method,
+                                     cmcp_json_t *params,
+                                     cmcp_progress_fn fn, void *userdata,
+                                     long long *out_id) {
+    if (!c || !c->transport || !method || !out_id || !fn) {
+        cmcp_json_free(params);
+        return CMCP_EINVAL;
+    }
+    /* NULL params → upgrade to empty object so we have somewhere to
+     * attach _meta. The library owns the upgraded object. */
+    if (!params) {
+        params = cmcp_json_new_object();
+        if (!params) return CMCP_ENOMEM;
+    }
+    if (params->type != CMCP_JSON_OBJECT) {
+        cmcp_json_free(params);
+        return CMCP_EINVAL;
+    }
+
+    /* Allocate the token under list_mu (folded counter — same lock that
+     * guards the list the reader walks to dispatch progress). */
+    pthread_mutex_lock(&c->list_mu);
+    long long token = ++c->next_progress_token;
+    pthread_mutex_unlock(&c->list_mu);
+
+    /* Inject params._meta.progressToken = token, preserving any other
+     * _meta keys the caller put there. cmcp_json_object_get returns
+     * const but the underlying tree is mutable — same trick used in
+     * tests when we need to update a known-mutable node in place. */
+    cmcp_json_t *meta = (cmcp_json_t *)cmcp_json_object_get(params, "_meta");
+    if (!meta) {
+        meta = cmcp_json_new_object();
+        if (!meta) { cmcp_json_free(params); return CMCP_ENOMEM; }
+        cmcp_json_object_set(params, "_meta", meta);
+    }
+    cmcp_json_object_set(meta, "progressToken", cmcp_json_new_int(token));
+
+    pending_completion_t *p = pending_completion_new(0);
+    if (!p) { cmcp_json_free(params); return CMCP_ENOMEM; }
+    p->has_progress_token = 1;
+    p->progress_token     = token;
+    p->progress_fn        = fn;
+    p->progress_ud        = userdata;
+
+    long long id = cmcp_rpc_pending_register(c->pending, p);
+    if (id == 0) {
+        pending_completion_free(p);
+        cmcp_json_free(params);
+        return CMCP_ENOMEM;
+    }
+    p->id = id;
+    list_link(c, p);
+
+    cmcp_rpc_message_t req;
+    int rc = cmcp_rpc_make_request(&req, id, method, params);
+    if (rc != CMCP_OK) {
+        list_unlink(c, p);
+        cmcp_rpc_pending_take(c->pending, id, NULL);
+        pending_completion_free(p);
+        cmcp_json_free(params);
+        return rc;
+    }
+    rc = send_message(c, &req);
+    cmcp_rpc_message_clear(&req);
+    if (rc != CMCP_OK) {
+        list_unlink(c, p);
+        cmcp_rpc_pending_take(c->pending, id, NULL);
+        pending_completion_free(p);
+        return rc;
+    }
+    *out_id = id;
+    return CMCP_OK;
 }
 
 /* ====================================================================== */

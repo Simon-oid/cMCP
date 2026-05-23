@@ -96,6 +96,61 @@ int cmcp_client_request(cmcp_client_t *c, const char *method,
 int cmcp_client_notify(cmcp_client_t *c, const char *method,
                         cmcp_json_t *params);
 
+/* Cancel an in-flight call. Emits `notifications/cancelled`
+ * `{requestId, reason?}` on the wire AND unblocks any thread parked in
+ * cmcp_client_wait(id) — that wait then returns CMCP_ECANCELLED. The
+ * pending entry is dropped, so a server response arriving after the
+ * cancel is silently discarded.
+ *
+ * `reason` may be NULL (the field is then omitted from the wire). The
+ * server MAY honour the cancel cooperatively; a slow handler that
+ * doesn't poll cmcp_handler_cancelled will still run to completion,
+ * but its response is dropped per spec.
+ *
+ * Returns:
+ *   CMCP_OK         cancel signalled + wire frame sent (or attempted)
+ *   CMCP_EINVAL     id is unknown or already completed
+ *   CMCP_ENOMEM     allocation failure */
+int cmcp_client_cancel(cmcp_client_t *c, long long id, const char *reason);
+
+/* Per-call progress callback. Invoked on the client's reader thread for
+ * each `notifications/progress` frame whose `_meta.progressToken`
+ * matches the token attached by cmcp_client_call_async_progress.
+ *
+ *   progress    The amount of work done so far.
+ *   total       Expected total, or negative if the server didn't send
+ *               one (the spec marks `total` optional).
+ *   message     Optional human-readable status, NULL if absent.
+ *   userdata    The userdata pointer registered with the call.
+ *
+ * The handler MUST NOT call back into the same client (would deadlock)
+ * and should not block — slow handlers stall inbound frames. */
+typedef void (*cmcp_progress_fn)(double progress, double total,
+                                  const char *message, void *userdata);
+
+/* Async request with a per-call progress callback. The library generates
+ * a monotonically-unique integer progress token, attaches it to
+ * `_meta.progressToken` in `params` (replacing any caller-supplied
+ * value at that path), and routes matching `notifications/progress`
+ * frames to `fn` for the lifetime of the call.
+ *
+ * Otherwise identical to cmcp_client_call_async — pair with
+ * cmcp_client_wait. When the call completes (wait returns), the
+ * subscription is torn down with the completion record — no late
+ * progress notification will fire `fn` after wait returns.
+ *
+ * `params` is consumed (NULL is upgraded to an empty object so the
+ * library has somewhere to attach `_meta`). `fn` must not be NULL.
+ * Progress notifications carrying tokens that don't match any
+ * call-attached subscription still reach the generic notification
+ * handler (set via cmcp_client_set_notification_handler). */
+int cmcp_client_call_async_progress(cmcp_client_t *c,
+                                     const char *method,
+                                     cmcp_json_t *params,
+                                     cmcp_progress_fn fn,
+                                     void *userdata,
+                                     long long *out_id);
+
 /* ====================================================================== */
 /* Sampling (server → host LLM call)                                        */
 /* ====================================================================== */
