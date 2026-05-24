@@ -28,6 +28,42 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
+**v0.4 + agentic-readiness hardening (Tier 5 done, 2026-05-24).** The
+protocol surface stayed at v0.4 (full `2025-06-18` conformance); on
+top of it, the quality bar for letting an LLM agent drive cMCP without
+a human in the loop. What landed:
+
+- **Sanitisers in CI** — every push runs the suite under ASan/UBSan
+  and TSan in parallel (`make test-asan` / `make test-tsan`).
+- **Fuzzing** — four libFuzzer harnesses against the parser surface
+  (`json`, `rpc`, `schema`, `http`); ~32M execs/min total, zero
+  findings on the seed corpora (`make fuzz-smoke`).
+- **Hostile-peer test suite** — 9 cases / 70 assertions exercising
+  malicious-side behaviour against both client and server (unmatched
+  IDs, duplicate responses, malformed mid-session JSON, schema-
+  violating tool calls, etc.).
+- **Soak harness** — stdio driver with per-window p50/p99 latency
+  and /proc-sampled RSS/FD/thread drift criteria (`make soak`,
+  `make soak-churn`).
+- **Real-agent-in-the-loop playbooks** — three reference servers
+  (echo, filesystem, crag) driven from Claude Code with ~10 tasks
+  each, plus `tools/cmcp-tee/` for transparent wire-frame capture.
+  First pass discovered and fixed a **P0 sandbox escape in
+  `filesystem-mcp`** (pre-existing symlink leaf with non-existent
+  out-of-sandbox target → `fopen` followed it; fix: `O_NOFOLLOW` +
+  `lstat` guard, regression test in place).
+- **Wire-fixture replay gate** — `make replay` replays captured
+  transcripts under `conformance/fixtures/` and asserts every
+  recorded response frame matches, with per-fixture masks for
+  legitimately variable fields. New CI lane.
+- **Spec-version drift watch** — weekly job
+  (`scripts/check-spec-version.sh`) compares `CMCP_PROTOCOL_VERSION`
+  against the newest dated revision under
+  `modelcontextprotocol/modelcontextprotocol@main:schema/`.
+  Currently firing: upstream cut `2025-11-25`, pin is still
+  `2025-06-18`; bump is a deliberate decision —
+  see [`docs/spec-version-upgrade.md`](docs/spec-version-upgrade.md).
+
 **v0.4 — complete protocol surface for MCP `2025-06-18`.** All
 optional capabilities live and the three pre-existing spec violations
 closed (`ping`, client-side list pagination, HTTP
@@ -70,18 +106,27 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the release log and
 ## Build & test
 
 ```bash
-make            # libs (core/server/client) + cmcp-inspect + filesystem-mcp + examples
-make test       # build and run the test binaries — currently 2642 assertions across 21 binaries
+make            # libs (core/server/client) + cmcp-inspect + filesystem-mcp + cmcp-tee + examples
+make test       # build and run the test binaries — currently 2716 assertions across 22 binaries
 make valgrind   # same, under valgrind (leak-free)
+make test-asan  # full rebuild under -fsanitize=address,undefined; runs suite
+make test-tsan  # full rebuild under -fsanitize=thread; runs suite
+make replay     # wire-fixture regression gate (conformance/replay/)
+make fuzz-smoke # 60s per libFuzzer harness against the seed corpus (clang-only)
+make soak       # stdio soak driver (env knobs in tests/soak/run.sh)
 make crag-mcp   # build the cRAG reference server (needs sibling ../cRAG/)
 make conformance # cross-check vs the MCP TS reference impl (needs Node + network)
+make check-spec-drift # compare CMCP_PROTOCOL_VERSION vs upstream spec dirs
 make clean
 ```
 
-`make test` is hermetic and offline. `make conformance` is the opt-in
-exception — it `npm install`s Anthropic's pinned TypeScript reference
-SDK and runs cMCP against it in both directions; see
-[`conformance/README.md`](conformance/README.md).
+`make test`, `make test-asan`, `make test-tsan`, and `make replay` are
+hermetic and offline; CI runs all four on every push.
+`make conformance` is the heavyweight opt-in — it `npm install`s
+Anthropic's pinned TypeScript reference SDK and runs cMCP against it
+in both directions; see [`conformance/README.md`](conformance/README.md).
+`make soak`, `make fuzz-*`, and `make check-spec-drift` are also
+opt-in (long-running, clang-only, or network-touching respectively).
 
 System dependency: `libcurl` headers (`pkg-config --cflags libcurl`
 must work) — used by the Streamable HTTP client transport. Everything
@@ -159,8 +204,9 @@ make crag-mcp                           # needs ../cRAG built
 | `libcmcp_server.a`   | Tools / resources / prompts registries, worker-pool dispatch, handshake, lifecycle, server-initiated notifications, cooperative cancellation + progress, server→client requests (elicitation), structured tool output, structured logging |
 | `libcmcp_client.a`   | Async client with reader thread, `connect_stdio`, sampling + roots + elicitation host handlers, host-side cancel + per-call progress, multi-server `cmcp_session_t` with pagination |
 | `tools/cmcp-inspect/`     | CLI: spawn a server, dump tools / resources / prompts, call one |
-| `tools/filesystem-mcp/`   | Reference server: bounded-root filesystem reads/writes. No external deps; ships in `make`. |
+| `tools/filesystem-mcp/`   | Reference server: bounded-root filesystem reads/writes. No external deps; ships in `make`. `fs_write` hardened with `O_NOFOLLOW` + `lstat` after a Tier-5 playbook pass surfaced a symlink-leaf sandbox-escape P0. |
 | `tools/crag-mcp/`         | Reference server wrapping [cRAG](https://github.com/Simon-oid/cRAG) — two tools (`crag_search`, `crag_stats`) plus the `crag://stats` resource. Built behind a separate `make crag-mcp` target. |
+| `tools/cmcp-tee/`         | Transparent stdio MCP proxy. Tees every wire frame in both directions to a JSONL log; the capture format the replay gate consumes. Links no cMCP libs. |
 | `examples/echo-server.c`     | A two-tool server in <80 lines |
 | `examples/minimal-client.c`  | Spawn a server, list tools, call `echo` |
 
@@ -196,24 +242,32 @@ Tracking [MCP spec date `2025-06-18`](https://modelcontextprotocol.io/specificat
 ## Layout
 
 ```
-include/    public headers (cmcp.h, cmcp_json.h, cmcp_types.h,
-            cmcp_transport.h, cmcp_schema.h, cmcp_server.h,
-            cmcp_client.h, cmcp_session.h)
-src/        json, rpc, schema, types,
-            transport_stdio, transport_http (server), transport_http_client
-            → libcmcp_core.a
-            server.c, worker.c → libcmcp_server.a
-            client.c, session.c → libcmcp_client.a
-tools/      cmcp-inspect (CLI), filesystem-mcp + crag-mcp (reference servers)
-examples/   echo-server, minimal-client
-tests/      one binary per test_*.c (21 total), all use tests/test.h
-docs/       architecture, schema-subset, design notes
-conformance/ opt-in cross-check vs the MCP TypeScript reference SDK
+include/      public headers (cmcp.h, cmcp_json.h, cmcp_types.h,
+              cmcp_transport.h, cmcp_http_parser.h, cmcp_schema.h,
+              cmcp_server.h, cmcp_client.h, cmcp_session.h)
+src/          json, rpc, schema, types, http_parser,
+              transport_stdio, transport_http (server), transport_http_client
+              → libcmcp_core.a
+              server.c, worker.c → libcmcp_server.a
+              client.c, session.c → libcmcp_client.a
+tools/        cmcp-inspect (CLI), filesystem-mcp + crag-mcp (reference servers),
+              cmcp-tee (wire-capture proxy for replay-gate fixtures)
+examples/     echo-server, minimal-client
+tests/        one binary per test_*.c (22 total), all use tests/test.h
+tests/soak/   long-running stability harness (Tier 5.6)
+fuzz/         libFuzzer harnesses + seed corpora (Tier 5.4)
+conformance/  cross-check vs MCP TS SDK; replay-based regression gate
+              over captured wire transcripts; agent playbooks
+scripts/      tooling (spec-version drift watch)
+docs/         architecture, schema-subset, agentic-readiness plan,
+              spec-version-upgrade checklist
 ```
 
 Architecture, threading model, and ownership rules are in
 [`docs/architecture.md`](docs/architecture.md). The supported
 JSON Schema subset is in [`docs/schema-subset.md`](docs/schema-subset.md).
+The Tier-5 quality plan is in
+[`docs/agentic-readiness.md`](docs/agentic-readiness.md).
 
 ## License
 

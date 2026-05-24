@@ -4,6 +4,94 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## Unreleased — Tier 5 (agentic readiness, 2026-05-24)
+
+No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stays at
+`2025-06-18`. Tier 5 is the quality bar for letting an LLM agent
+drive cMCP without a human in the loop. Closed in roughly axis order:
+
+### Added — quality infrastructure
+
+- **5.1 Sanitisers.** `make test-asan` (`-fsanitize=address,undefined`,
+  `-fno-sanitize-recover=all`) and `make test-tsan`
+  (`-fsanitize=thread`) each do a full clean rebuild and run the
+  whole suite. Both wired into CI on every push (`fail-fast: false`
+  so an ASan finding doesn't hide a TSan finding on the same commit).
+- **5.2 Real agent in the loop.** New `tools/cmcp-tee/` transparent
+  stdio MCP proxy (pure pthreads, no cMCP libs linked) for capturing
+  wire transcripts byte-faithfully. `conformance/playbooks/` defines
+  ~10 tasks per reference server with expected behaviour + a "watch
+  for" line naming the fixable failure mode. First pass discovered
+  and fixed a **P0 sandbox-escape in `filesystem-mcp` `fs_write`**:
+  a pre-existing symlink leaf whose target lay outside the root *and*
+  did not exist slipped past `resolve_path`'s fallback branch, and
+  `fopen` followed it. Fix: `lstat` guard + `O_NOFOLLOW`-flagged
+  `open` + `fdopen` (TOCTOU-proof). Regression test
+  `test_write_symlink_leaf_escape_rejected`.
+- **5.3 Wire-fixture replay gate.** New `conformance/replay/`:
+  `replay.py` driver streams every recorded `dir:"in"` frame at the
+  configured server and asserts every `dir:"out"` frame matches under
+  JSON-equality, with per-fixture masks for legitimately variable
+  fields. Six fixtures wired in. New `make replay` target + CI lane.
+- **5.4 Fuzzing the parsers.** `fuzz/` with four libFuzzer harnesses
+  (`json`, `rpc`, `schema`, `http`) + curated seed corpora. Schema
+  harness uses a 2-byte length prefix to split fuzz input into
+  schema + value. The HTTP request parser was extracted from
+  `transport_http.c` into `src/http_parser.c` / `include/cmcp_http_parser.h`
+  so the harness can drive it without sockets — same refactor
+  pattern cRAG used for `embed_pool`. `make fuzz-build`
+  (clang-only); `make fuzz-smoke` runs each harness 60s against its
+  seed corpus.
+- **5.5 Hostile-peer test suite.** `tests/test_hostile_peer.c` — 9
+  cases / 70 assertions. Each case wires up one real cMCP side
+  against a raw pipe-fd peer the test drives by hand; pass criteria
+  everywhere: real side doesn't crash/leak/race, surfaces the spec-
+  mandated error, keeps serving subsequent legitimate traffic.
+- **5.6 Soak / long-running stability harness.** `tests/soak/soak_driver.c`
+  C workload + `run.sh` orchestrator. Spawns `echo-server`, hammers
+  `tools/call`, samples `VmRSS`/open-FD/`Threads` from `/proc` for
+  both parent and child, emits CSV, ring-buffered p50/p99 per
+  window. `awk` drift criteria (RSS ≤15% growth, FDs strictly
+  non-growing, Threads exactly equal, p99 ≤2× baseline). Opt-in via
+  `make soak` / `make soak-churn`.
+- **5.7 Spec-version drift watch.** `scripts/check-spec-version.sh`
+  + weekly `.github/workflows/spec-drift.yml`. Reports a non-zero
+  exit when `CMCP_PROTOCOL_VERSION` differs from the newest dated
+  revision under `modelcontextprotocol/modelcontextprotocol@main:schema/`.
+  Currently firing (pin is `2025-06-18`, upstream cut `2025-11-25`).
+  Upgrade workflow checklist in `docs/spec-version-upgrade.md`.
+
+### Added — tool descriptions tightened by playbook pass
+
+- `examples/echo-server.c`: both `echo` and `add` descriptions now
+  name the *output contract* (text content block with byte-identical
+  body for `echo`; decimal-string sum for `add`) — without that, a
+  model has to guess the return shape.
+- `tools/crag-mcp/main.c`: `crag_search` description now spells out
+  plain-English queries, the `[cos … bm25 … fusion …] <path>`
+  per-chunk header, and what `(no chunk cleared the relevance
+  threshold)` actually means; the `crag://stats` resource description
+  now points hosts at it as the preferred ambient-context path over
+  the `crag_stats` tool.
+
+### Fixed
+
+- `tools/filesystem-mcp/`: P0 symlink-leaf sandbox escape in
+  `fs_write_handler` (see 5.2 above).
+
+### Tests
+
+- 22 binaries, ~2716 assertions. Leak-free under `make valgrind`,
+  warning-clean under `-Wall -Wextra -Wpedantic`, green under
+  `make test-asan` and `make test-tsan`. Fuzz smoke ~32M execs/min
+  across the four harnesses with zero findings on the seed corpora.
+
+### Deferred (runtime budget, not engineering)
+
+- 24h fuzz baselines per harness.
+- 6h soak nightlies.
+- 5.6 HTTP-specific soak variant.
+
 ## [0.4.0] — 2026-05-24
 
 Closes Tier 4: all optional capabilities of MCP `2025-06-18`, plus

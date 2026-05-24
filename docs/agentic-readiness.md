@@ -30,40 +30,60 @@ The bar is therefore stricter than "passes tests":
    speaks `2026-XX-XX`, cMCP must either speak it too or fail
    cleanly enough that the agent moves on.
 
-## Current state (2026-05-24, v0.4.0)
+## Current state (2026-05-24, post-Tier-5)
 
-What we already have working in our favour:
+All seven axes of this plan are substantively closed. What's now in
+place:
 
 - **Conformance** against the MCP TypeScript reference SDK in both
-  wire roles (`make conformance`). 32 + 8 round-trip checks across
-  handshake, primitives, schema rejection, progress notifications.
-- **Memory hygiene.** 21 binaries, 2642 assertions, all green under
-  valgrind with `--errors-for-leak-kinds=definite --error-exitcode=1`.
-  Warning-clean under `-Wall -Wextra -Wpedantic`.
+  wire roles (`make conformance`).
+- **Memory hygiene.** 22 binaries, ~2716 assertions, all green under
+  `make valgrind`, `make test-asan` (`-fsanitize=address,undefined
+  -fno-sanitize-recover=all`), and `make test-tsan`
+  (`-fsanitize=thread`). Warning-clean under `-Wall -Wextra -Wpedantic`.
 - **Spec compliance.** All optional capabilities of MCP `2025-06-18`
   shipped: tools, resources, prompts, sampling, roots, elicitation,
   structured output + resource_link + title, logging, pagination,
   cancel + progress.
-- **Real reference servers.** `filesystem-mcp` (bundled, no
-  external deps), `crag-mcp` (separate build, real workload).
+- **Real reference servers.** `filesystem-mcp` (bundled, no external
+  deps; `fs_write` hardened against symlink-leaf sandbox escape after
+  a Tier-5 playbook P0), `crag-mcp` (separate build, real workload),
+  `echo-server`, plus `tools/cmcp-tee/` for transparent wire capture.
 - **Layered error model.** `cmcp_err_t` distinguishes transport,
   protocol, parse, schema, timeout, cancelled, unsupported, etc.
+- **Sanitisers in CI.** `make test-asan` + `make test-tsan` run on
+  every push (`fail-fast: false`).
+- **Fuzzing.** Four libFuzzer harnesses (`json`, `rpc`, `schema`,
+  `http`) with curated seed corpora; `make fuzz-smoke` runs each
+  60s, ~32M execs/min total, zero findings. The HTTP request parser
+  was extracted to `src/http_parser.c` for harness-level driving.
+- **Hostile-peer suite.** `tests/test_hostile_peer.c`: 9 cases / 70
+  assertions exercising malicious-side behaviour against both client
+  and server. Wired into the CI matrix automatically.
+- **Soak harness.** `tests/soak/soak_driver.c` + `run.sh` orchestrator
+  with /proc-sampled RSS/FD/Threads + ring-buffered p50/p99 latency
+  and awk drift criteria (RSS ≤15% growth, FDs non-growing, Threads
+  flat, p99 ≤2× baseline). Opt-in via `make soak` / `make soak-churn`.
+- **Real-agent-in-the-loop.** Three playbooks (`echo`, `filesystem`,
+  `crag`) driven from Claude Code, ~10 tasks each. First pass
+  surfaced one P0 (filesystem symlink-leaf escape — fixed, regression
+  test added, fixture archived) and four description tightenings;
+  zero protocol-level cMCP bugs.
+- **Wire-fixture replay gate.** `conformance/replay/replay.py` +
+  per-fixture registry. `make replay` is a new CI lane that fails on
+  any frame mismatch against the recorded `dir:"out"` frames, with
+  per-fixture masks for legitimately variable fields.
+- **Spec-drift watch.** `scripts/check-spec-version.sh` + weekly
+  `spec-drift.yml` workflow. Currently firing: upstream cut
+  `2025-11-25` since the `2025-06-18` pin landed. Upgrade workflow
+  documented in `docs/spec-version-upgrade.md`.
 
-What we don't have:
+What's *still* on the runtime/budget side, not engineering:
 
-- **Zero sanitizer coverage.** Only valgrind, which catches what we
-  exercise — and is dynamic, not symbolic.
-- **No fuzzing.** Parsers (`json.c`, `rpc.c`, `schema.c`,
-  `transport_http`'s request parser) have never seen mutation-based
-  inputs.
-- **No soak.** No long-running test verifies fd / RSS / latency
-  stability over hours.
-- **No agent-in-the-loop validation.** Nobody has watched a real
-  LLM agent drive cMCP-based servers and reported back on which
-  tool descriptions are confusing, which errors are opaque, which
-  schemas trip the model up.
-- **No CI.** Quality currently relies on remembering to run
-  `make valgrind` and `make conformance` before tagging.
+- 24h fuzz baselines per harness (pure CI time).
+- 6h soak nightlies (pure CI time).
+- HTTP-specific soak variant — one driver against
+  `cmcp_transport_http_connect`, same metrics + drift criteria.
 
 ## The five quality axes
 
