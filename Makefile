@@ -144,6 +144,15 @@ replay: all
 	@echo "=== replay: wire-fixture regression gate ==="
 	@python3 conformance/replay/replay.py
 
+# --- Spec-version drift watch (axis 5.7) -----------------------------------
+# Compares CMCP_PROTOCOL_VERSION against the newest dated revision
+# under modelcontextprotocol/modelcontextprotocol@main:schema/. Exit 1
+# if drift, 0 if in sync, 2 on infrastructure failure. Driven from CI
+# on a weekly schedule + workflow_dispatch; runnable locally to
+# preview. Does not auto-upgrade — see docs/spec-version-upgrade.md.
+check-spec-drift:
+	@./scripts/check-spec-version.sh
+
 # --- Soak / long-running stability harness --------------------------------
 # Opt-in: spawns the in-tree echo-server, runs a steady tools/call workload
 # for $SOAK_DURATION seconds (default 120, nightly target 21600 = 6h),
@@ -277,4 +286,4 @@ clean:
 	      tools/filesystem-mcp/*.o examples/*.o
 
 .PHONY: all test valgrind test-asan test-tsan fuzz-build fuzz-smoke \
-        soak soak-churn clean crag-mcp conformance replay
+        soak soak-churn clean crag-mcp conformance replay check-spec-drift

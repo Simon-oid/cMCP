@@ -1,0 +1,33 @@
+name: Spec-version drift watch
+
+# Different cadence from the push/PR pipeline:
+#   - schedule: weekly probe so an upstream spec cut surfaces within
+#     ~7 days without anyone having to remember.
+#   - workflow_dispatch: manual run-now button on the Actions tab.
+#
+# A failure here is informational, NOT a release blocker — the wire
+# stays spec-compliant against whatever is currently pinned. The
+# upgrade workflow is documented in docs/spec-version-upgrade.md.
+on:
+  schedule:
+    # Monday 09:00 UTC. Picked so a failure lands at the start of the
+    # week when triage attention is highest.
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+jobs:
+  spec-drift:
+    name: scripts/check-spec-version.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: check spec-version drift
+        env:
+          # gh CLI is preinstalled on ubuntu-latest. The implicit
+          # GITHUB_TOKEN is enough for the public-repo content read.
+          GH_TOKEN: ${{ github.token }}
+        run: make check-spec-drift
