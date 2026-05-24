@@ -1,5 +1,7 @@
 # cMCP
 
+[![CI](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml)
+
 A from-scratch implementation of the [Model Context Protocol](https://modelcontextprotocol.io/)
 in pure C11. Three static link targets — core, server, client — sharing
 one JSON-RPC 2.0 pipeline. stdio and Streamable HTTP transports. All

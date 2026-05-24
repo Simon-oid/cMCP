@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A push that lands while another run for the same ref is still going
+# (rebase-and-push, fixup, etc.) cancels the older run. Saves CI minutes
+# and keeps the latest commit's status authoritative.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: make ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Report every variant even if one fails — a TSan regression
+      # shouldn't hide an ASan regression on the same push.
+      fail-fast: false
+      matrix:
+        target: [test, test-asan, test-tsan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      # Recent Ubuntu kernels ship with vm.mmap_rnd_bits=32, which is
+      # past what TSan's shadow-memory mapping can handle on x86_64 —
+      # the result is a hard crash at startup ("FATAL: ThreadSanitizer:
+      # unexpected memory mapping"). Dropping to 28 is the upstream-
+      # documented fix and is harmless for the non-TSan jobs.
+      - name: Loosen ASLR for TSan
+        if: matrix.target == 'test-tsan'
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: make ${{ matrix.target }}
+        run: make ${{ matrix.target }}
