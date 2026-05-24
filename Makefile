@@ -46,6 +46,11 @@ INSPECT_SRC  := $(wildcard tools/cmcp-inspect/main.c)
 FS_MCP_BIN   := tools/filesystem-mcp/filesystem-mcp
 FS_MCP_SRC   := $(wildcard tools/filesystem-mcp/main.c)
 
+# cmcp-tee: thin stdio proxy that tees wire traffic to a JSONL log.
+# Pure plumbing — links neither libcurl nor cMCP libs, only pthreads.
+TEE_BIN      := tools/cmcp-tee/cmcp-tee
+TEE_SRC      := $(wildcard tools/cmcp-tee/cmcp-tee.c)
+
 # crag-mcp links cRAG statically. Override CRAG_DIR if cRAG isn't a sibling.
 CRAG_DIR     ?= ../cRAG
 CRAG_MCP_BIN := tools/crag-mcp/crag-mcp
@@ -63,6 +68,7 @@ TEST_BIN := $(TEST_SRC:tests/%.c=tests/%)
 all: $(BUILT_LIBS) \
      $(if $(INSPECT_SRC),$(INSPECT_BIN)) \
      $(if $(FS_MCP_SRC),$(FS_MCP_BIN)) \
+     $(if $(TEE_SRC),$(TEE_BIN)) \
      $(EXAMPLE_BINS)
 
 $(CORE_LIB): $(CORE_OBJ)
@@ -82,6 +88,11 @@ $(INSPECT_BIN): $(INSPECT_SRC) $(BUILT_LIBS)
 
 $(FS_MCP_BIN): $(FS_MCP_SRC) $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+# Tee links no cMCP libs — keep it independent so it can wrap servers
+# built against older revisions of the lib without ABI surprises.
+$(TEE_BIN): $(TEE_SRC)
+	$(CC) $(CFLAGS) -o $@ $< -lpthread
 
 examples/%: examples/%.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
@@ -246,7 +257,7 @@ fuzz-smoke: $(FUZZ_BINS)
 clean:
 	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
-	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) \
+	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
 	      $(FUZZ_BINS) $(SOAK_BIN) \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \

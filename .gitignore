@@ -7,6 +7,7 @@ build/
 tools/crag-mcp/crag-mcp
 tools/cmcp-inspect/cmcp-inspect
 tools/filesystem-mcp/filesystem-mcp
+tools/cmcp-tee/cmcp-tee
 
 # Example binaries
 examples/echo-server
