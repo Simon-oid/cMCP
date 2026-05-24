@@ -25,24 +25,48 @@ make crag-mcp                              # assumes ../cRAG exists
 make crag-mcp CRAG_DIR=/path/to/cRAG       # otherwise
 ```
 
-You also need a pre-built cRAG index — see cRAG's own README for the
-indexing flow. Once you have an index path (e.g.
-`/home/you/notes.crag`), register:
+If `make crag-mcp` fails with linker errors mentioning `__tsan_*`,
+cRAG has stale TSan-instrumented `.o` files from a prior thread-
+sanitiser build. Run `make clean && make` in the cRAG tree first.
+
+You also need a pre-built cRAG index. cRAG stores indexes in a sqlite
+DB (`*.db`) and embedding lives in there as well, so you need an
+embedder running while indexing AND while serving queries. Minimum
+setup that works at $0 budget:
+
+```sh
+# 1. Embedder (Ollama with mxbai-embed-large; 669 MB)
+ollama pull mxbai-embed-large
+# ollama serve is started automatically as a systemd unit on most distros
+
+# 2. Index a small corpus
+cd ../cRAG
+CRAG_EMBED_BACKEND=ollama CRAG_EMBED_MODEL=mxbai-embed-large \
+    ./crag index /path/to/docs --db /tmp/notes.db --workers 2
+```
+
+Once you have a `.db`, register (note: the wrapper takes `--db`, not
+`--index`, and you must propagate the embedder env vars or the server
+will fail to embed query strings at search time):
 
 ```sh
 claude mcp add --scope user cmcp-crag \
+    -e CRAG_EMBED_BACKEND=ollama \
+    -e CRAG_EMBED_MODEL=mxbai-embed-large \
     /absolute/path/to/cMCP/tools/crag-mcp/crag-mcp \
-    --index /home/you/notes.crag
+    --db /tmp/notes.db
 ```
 
 For captured-fixture sessions:
 
 ```sh
 claude mcp add --scope user cmcp-crag-tee \
+    -e CRAG_EMBED_BACKEND=ollama \
+    -e CRAG_EMBED_MODEL=mxbai-embed-large \
     /absolute/path/to/cMCP/tools/cmcp-tee/cmcp-tee \
     /tmp/cmcp-crag-wire.jsonl \
     /absolute/path/to/cMCP/tools/crag-mcp/crag-mcp \
-    --index /home/you/notes.crag
+    --db /tmp/notes.db
 ```
 
 ---
@@ -190,3 +214,33 @@ Two extra triage rules on top of the standard table:
   description or schema problem.
 
 Drop captured transcripts under `conformance/fixtures/crag-mcp/`.
+
+## Findings — first pass (4-chunk ollama corpus)
+
+All ten tasks passed on the wire. Schema bounds (`query.minLength=1`,
+`k.minimum=1`, `k.maximum=20`) enforced with structured `error.data`.
+UTF-8 round-trip byte-faithful (verified `café` and CJK/emoji
+characters reach cRAG verbatim and return inside JSON-escaped chunk
+text). Stats stable across calls. Chunks byte-identical to source
+files at the cited offset.
+
+Two tool/resource description gaps closed in this pass:
+
+- `crag_search` description now explicitly says queries are plain
+  English, names the `[cos … bm25 … fusion …] <path>` per-chunk header,
+  and explains what `(no chunk cleared the relevance threshold)` means
+  (gate filtered everything, not "empty index"). Without this, a model
+  cannot distinguish the two and tends to give up.
+- `crag://stats` resource description now points at it as the
+  preferred ambient-context path vs. the `crag_stats` tool.
+
+Captured canonical fixtures:
+- `conformance/fixtures/crag-mcp/crag_search_empty_query.jsonl` — T5
+- `conformance/fixtures/crag-mcp/crag_search_k_above_max.jsonl` — schema bound
+- `conformance/fixtures/crag-mcp/stats_resource_read.jsonl` — T2 (resource path; assert shape only — counts vary by corpus)
+
+Open item not fixed: `crag_stats` reports `dim:` but not the embedder
+*model name* (cRAG's store doesn't track it). T6 still works because
+the model can infer from the dim, but a model asked "which embedder?"
+will guess rather than know. Surfacing the model name requires a cRAG
+change, not a crag-mcp change.

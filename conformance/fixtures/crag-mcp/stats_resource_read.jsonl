@@ -1,0 +1,7 @@
+{"t":1779653981.596582,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
+{"t":1779653981.596611,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
+{"t":1779653981.596615,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"resources/list\"}"}
+{"t":1779653981.596618,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"resources/read\",\"params\":{\"uri\":\"crag://stats\"}}"}
+{"t":1779653981.600612,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"resources\":{},\"tools\":{}},\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"crag-mcp\",\"version\":\"0.1.0\"}}}"}
+{"t":1779653981.600624,"dir":"out","frame":"{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"resources\":[{\"description\":\"DB path, chunk count, file count, embedding dim. Same payload as the `crag_stats` tool — prefer reading this resource when you want the figures as ambient context rather than as an explicit tool-call turn.\",\"mimeType\":\"text/plain\",\"name\":\"cRAG diagnostics\",\"uri\":\"crag://stats\"}]}}"}
+{"t":1779653981.600703,"dir":"out","frame":"{\"id\":3,\"jsonrpc\":\"2.0\",\"result\":{\"contents\":[{\"mimeType\":\"text/plain\",\"text\":\"db:     /tmp/crag-test.db\\nchunks: 4\\nfiles:  4\\ndim:    1024\",\"uri\":\"crag://stats\"}]}}"}

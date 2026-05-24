@@ -346,8 +346,16 @@ int main(int argc, char **argv) {
 
     int rc = cmcp_server_add_tool(s, &(cmcp_tool_t){
         .name        = "crag_search",
-        .description = "Hybrid retrieval (BM25 + cosine) over the cRAG "
-                        "index. Returns up to k chunks ranked by relevance.",
+        .description = "Hybrid retrieval (BM25 + cosine, RRF-fused) over "
+                        "the cRAG index. `query` is plain English (no "
+                        "special syntax). Returns up to k chunks ranked by "
+                        "relevance, one text content item per chunk, each "
+                        "prefixed with `[cos … bm25 … fusion …] <path>` "
+                        "followed by the chunk body verbatim. Weak matches "
+                        "are filtered by an operator-tuned cosine gate, so "
+                        "a response of `(no chunk cleared the relevance "
+                        "threshold)` means the index has no strong match "
+                        "for this query — not that the index is empty.",
         .input_schema =
             "{"
               "\"type\":\"object\","
@@ -389,7 +397,11 @@ int main(int argc, char **argv) {
     rc = cmcp_server_add_resource(s, &(cmcp_resource_t){
         .uri         = "crag://stats",
         .name        = "cRAG diagnostics",
-        .description = "DB path, chunk count, file count, embedding dim.",
+        .description = "DB path, chunk count, file count, embedding dim. "
+                        "Same payload as the `crag_stats` tool — prefer "
+                        "reading this resource when you want the figures "
+                        "as ambient context rather than as an explicit "
+                        "tool-call turn.",
         .mime_type   = "text/plain",
         .read        = crag_stats_resource,
         .userdata    = &ctx,
