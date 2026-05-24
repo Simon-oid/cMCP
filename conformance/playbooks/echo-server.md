@@ -67,16 +67,39 @@ a raw newline through somewhere; result mangled → escape handling bug.
 
 ---
 
-## T5. Boundary-size string
+## T5. Boundary-size string  **— Mode: shell**
 
-> Use the echo tool to echo back exactly 8000 ASCII characters of the
-> letter "a".
+Do NOT run this in-band through a Claude Code session — 8000 repeated
+chars × 4 context passes is 30K+ tokens for zero added signal (there's
+no agent reasoning being tested, just server-side framing).
 
-**Expected:** call succeeds; result text length is exactly 8000.
+Run via the standard shell incantation from
+[`../claude_code_setup.md`](../claude_code_setup.md):
+
+```sh
+python3 -c 'print("a"*8000, end="")' > /tmp/big.txt
+( printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}\n'
+  printf '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+  printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"%s"}}}\n' "$(cat /tmp/big.txt)"
+  sleep 0.2
+) | ./examples/echo-server > /tmp/echo.out
+# Pull out the text field of the second response and check its length
+python3 -c '
+import json, sys
+for line in open("/tmp/echo.out"):
+    msg = json.loads(line)
+    if msg.get("id") == 2:
+        text = msg["result"]["content"][0]["text"]
+        print("len =", len(text))
+        print("all-a =", set(text) == {"a"})
+'
+```
+
+**Expected:** `len = 8000`, `all-a = True`.
 
 **Watch for:** read-buffer boundary in the stdio transport at 4 KB or
-8 KB chunks. If the response is truncated at a power-of-two boundary,
-the line accumulator has an off-by-one.
+8 KB chunks. If `len` < 8000, the line accumulator truncated. If
+`all-a = False`, something corrupted the payload mid-stream.
 
 ---
 
@@ -122,6 +145,20 @@ the user instead of retrying blindly.
 message doesn't say "must be integer", or the host doesn't relay
 structured error data to the model. Both are fixable. Note which.
 
+**Known host quirk (Claude Code):** Claude Code's MCP client both (a)
+pre-validates `tools/call` arguments against the advertised schema
+and short-circuits with a generic `-32602` *before sending*, and (b)
+when the server itself returns `-32602`, only surfaces `error.message`
+to the assistant — `error.data` is dropped. Net effect: running T9
+in-band tells you nothing about cMCP's error-data quality. To verify
+the *server*'s error shape, run via shell and inspect the wire
+transcript directly. Captured canonical shapes:
+
+- `conformance/fixtures/echo-server/add_schema_type_mismatch.jsonl`
+- `conformance/fixtures/echo-server/add_schema_missing_required.jsonl`
+
+Both show `data: {keyword, path, message}` populated correctly.
+
 ---
 
 ## T10. Tool discovery
@@ -129,12 +166,24 @@ structured error data to the model. Both are fixable. Note which.
 > Without calling any tool, list every tool exposed by cmcp-echo with
 > its description.
 
-**Expected:** model issues `tools/list` and returns both tools with the
-descriptions registered in `examples/echo-server.c`.
+**Expected:** model returns both tools (`echo`, `add`) with the
+descriptions registered in `examples/echo-server.c`, *including the
+output contract* (both descriptions name what the result block
+contains).
+
+**Host quirk (Claude Code):** the host issues `tools/list` itself at
+session start and exposes results as native function schemas — the
+assistant never sends `tools/list` from inside the loop. T10 is
+therefore an *introspection* test, not a `tools/list` wire test. To
+test the wire path, drive the server via shell.
 
 **Watch for:** model invents extra detail (e.g. "echo also lowercases
-the text" or "add only accepts positive numbers") → our descriptions
-are too sparse. Edit them.
+the text" or "add only accepts positive numbers") → descriptions are
+too sparse. In particular, descriptions that don't specify the
+*output shape* tempt the model to guess (e.g. assume `add` returns a
+number rather than a decimal string in a text content block). Both
+echo-server descriptions were tightened on the first pass through this
+playbook for exactly that reason.
 
 ---
 

@@ -102,9 +102,9 @@ Output:
 Connected: echo-server 0.1.0 (protocol 2025-06-18)
 
 Tools (2):
-  echo  -  Return the input text unchanged.
+  echo  -  Return the `text` argument unchanged. Result is a single text content block whose body is byte-identical to the input (no quoting, no formatting, no trimming).
       - text: string (required)
-  add  -  Add two integers.
+  add  -  Add two signed integers and return the sum. Result is a single text content block holding the sum formatted as a base-10 decimal string (e.g. `42`, `-7`).
       - a: integer (required)
       - b: integer (required)
 ```

@@ -96,6 +96,51 @@ One JSON object per line:
 This is the format the replay-based conformance gate (phase 5.3
 finalisation) will consume.
 
+## 3a. Running mode: in-band vs shell
+
+Not every playbook task is best executed *through* a Claude Code
+session. Tasks whose payload is small and where the question is "does
+the agent understand and use the tool right" belong in-band. Tasks
+whose payload is large or repetitive, or where the question is purely
+"does the server handle N bytes / this edge case correctly", should
+be run directly via shell pipe — Claude Code becomes a costly
+middleman otherwise.
+
+**Cost note:** every byte of a tool argument and every byte of the
+response goes through the model's context window four times (your
+prompt → tool call → server response → assistant context). Repetitive
+content tokenises poorly — 1024 identical ASCII characters can cost
+~700-1000 tokens per pass, ~3-4K per full round trip. A 8000-byte
+echo test is easily 30K+ tokens.
+
+**Rule of thumb:**
+
+| Test shape                                              | Mode    |
+|---------------------------------------------------------|---------|
+| Small string / typical-size args, agent-behaviour focus | in-band |
+| Schema-violating call, error-surface focus              | in-band |
+| Tool-choice / discovery / multi-step reasoning          | in-band |
+| Payload >~256 chars OR highly repetitive                | shell   |
+| Pure server-side correctness (no agent reasoning value) | shell   |
+
+Tasks that should run via shell are marked accordingly inside the
+per-server playbooks (look for "**Mode: shell**" next to the task
+title). The standard shell incantation for an echo-server boundary
+test is:
+
+```sh
+# Generate the payload offline, then drive the server directly
+python3 -c 'print("a"*8000, end="")' > /tmp/big.txt
+
+( printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}\n'
+  printf '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
+  printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"%s"}}}\n' "$(cat /tmp/big.txt)"
+  sleep 0.2
+) | ./examples/echo-server | tail -1 | tee /tmp/echo.out | wc -c
+```
+
+Zero tokens consumed, same server, faithful test.
+
 ## 4. Run the playbooks
 
 Each in-tree server has a playbook of ~10 tasks designed to exercise

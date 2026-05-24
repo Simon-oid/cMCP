@@ -51,7 +51,7 @@ int main(void) {
 
     int rc = cmcp_server_add_tool(s, &(cmcp_tool_t){
         .name        = "echo",
-        .description = "Return the input text unchanged.",
+        .description = "Return the `text` argument unchanged. Result is a single text content block whose body is byte-identical to the input (no quoting, no formatting, no trimming).",
         .input_schema = "{\"type\":\"object\","
                          "\"properties\":{\"text\":{\"type\":\"string\"}},"
                          "\"required\":[\"text\"]}",
@@ -61,7 +61,7 @@ int main(void) {
 
     rc = cmcp_server_add_tool(s, &(cmcp_tool_t){
         .name        = "add",
-        .description = "Add two integers.",
+        .description = "Add two signed integers and return the sum. Result is a single text content block holding the sum formatted as a base-10 decimal string (e.g. `42`, `-7`).",
         .input_schema = "{\"type\":\"object\","
                          "\"properties\":{"
                             "\"a\":{\"type\":\"integer\"},"
