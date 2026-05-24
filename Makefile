@@ -120,6 +120,23 @@ conformance: all $(CONF_C_BIN)
 $(CONF_C_BIN): $(CONF_DIR)/client_vs_ts.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
+# --- Soak / long-running stability harness --------------------------------
+# Opt-in: spawns the in-tree echo-server, runs a steady tools/call workload
+# for $SOAK_DURATION seconds (default 120, nightly target 21600 = 6h),
+# samples /proc metrics for both parent and child, and applies awk drift
+# criteria. Kept OUT of `make test`. See tests/soak/run.sh for env knobs.
+SOAK_DIR := tests/soak
+SOAK_BIN := $(SOAK_DIR)/soak_driver
+
+$(SOAK_BIN): $(SOAK_DIR)/soak_driver.c $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+soak: $(SOAK_BIN) examples/echo-server
+	@./$(SOAK_DIR)/run.sh
+
+soak-churn: $(SOAK_BIN) examples/echo-server
+	@SOAK_CHURN=1 ./$(SOAK_DIR)/run.sh
+
 # test_fs_server spawns the built filesystem-mcp binary as a child, so
 # it depends on that binary in addition to the libs. This specific rule
 # overrides the generic tests/% pattern below.
@@ -231,9 +248,9 @@ clean:
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
-	      $(FUZZ_BINS) \
+	      $(FUZZ_BINS) $(SOAK_BIN) \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o
 
 .PHONY: all test valgrind test-asan test-tsan fuzz-build fuzz-smoke \
-        clean crag-mcp conformance
+        soak soak-churn clean crag-mcp conformance
