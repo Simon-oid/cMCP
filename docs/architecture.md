@@ -11,18 +11,22 @@ Three static link targets, share-and-stack:
 
 ```
 libcmcp_core.a    json + rpc + schema + types + transport_stdio
-libcmcp_server.a  + server.c              (depends on core)
-libcmcp_client.a  + client.c + session.c  (depends on core)
+                  + transport_http (server) + transport_http_client
+libcmcp_server.a  + server.c + worker.c          (depends on core)
+libcmcp_client.a  + client.c + session.c         (depends on core)
 ```
 
 The server and client sides of an MCP conversation share most of the
 machinery — JSON-RPC framing, message parsing, schema validation,
-transport vtable, capability structs — so all of that lives in core.
-What's actually asymmetric is small:
+transport vtable, capability structs, log-level codec — so all of
+that lives in core. What's actually asymmetric is small:
 
-- **Server**: tool registry, request dispatch, run loop. One file.
+- **Server**: tool/resource/prompt registries, request dispatch, run
+  loop, worker pool, server→client request infrastructure. Two files
+  (`server.c` + the pool in `worker.c`).
 - **Client**: reader-thread demuxer, pending-request table integration,
-  child-process management, multi-server session aggregator. Two files.
+  per-call progress subscriptions, child-process management,
+  multi-server session aggregator. Two files.
 
 Link order matters: consumers (server, client) before provider (core),
 so the linker resolves core symbols pulled in by server.o / client.o
@@ -42,8 +46,9 @@ on the second pass. The Makefile does this for you.
 ├──────────────────────────────────────────────────────────────────┤
 │   rpc.c — JSON-RPC 2.0 framing, in-flight ID table                │
 ├──────────────────────────────────────────────────────────────────┤
-│   transport_stdio.c (newline-delimited JSON over fd pair)         │
-│   transport_http.c   (Streamable HTTP — Phase 2.1, not yet)       │
+│   transport_stdio.c       (newline-delimited JSON over fd pair)   │
+│   transport_http.c        (Streamable HTTP — server side)         │
+│   transport_http_client.c (Streamable HTTP — client side, libcurl)│
 ├──────────────────────────────────────────────────────────────────┤
 │   json.c — typed value tree, parser, emitter                      │
 └──────────────────────────────────────────────────────────────────┘
@@ -86,9 +91,14 @@ JSON Schema subset — exactly the keywords listed in
 [`schema-subset.md`](schema-subset.md). The server validates inbound
 `tools/call.arguments` against the registered tool's `inputSchema`
 *before* the handler runs; failures surface as `-32602` with structured
-`{path, keyword, message}` error data. No `$ref`, no `oneOf`/`anyOf`,
-no `format`, no `pattern` — those would multiply the validator's
-complexity for use cases MCP tools don't actually need today.
+`{path, keyword, message}` error data. The same validator is also
+used on the *outbound* side when a tool sets `outputSchema` and the
+handler attaches `structuredContent` via
+`cmcp_handler_set_structured` — a mismatch there surfaces as `-32603`
+per spec ("server MUST provide structuredContent that matches"). No
+`$ref`, no `oneOf`/`anyOf`, no `format`, no `pattern` — those would
+multiply the validator's complexity for use cases MCP tools don't
+actually need today.
 
 ### transport_stdio.c
 
@@ -123,8 +133,9 @@ shutdown). Close is graceful: shut down the listening socket so
 unwind.
 
 **Bridging onto the cmcp_transport_t vtable.** server.c is strictly
-read → dispatch → write, and there's only ever one logical session per
-HTTP transport in v0.2, so we use a single-slot mailbox rather than a
+read → dispatch → write, and there's only ever one logical session
+per HTTP transport (concurrent multi-tenant deployments instantiate
+multiple transports), so we use a single-slot mailbox rather than a
 queue:
 
 ```
@@ -158,14 +169,24 @@ stamps it onto the response in an `Mcp-Session-Id` header. All
 subsequent POSTs and GETs must carry a matching `Mcp-Session-Id` —
 missing → 400, mismatched → 404. The session id is minted in
 `write_fn` (not `read_fn`) so a malformed initialize never gets a
-session id back. v0.2 supports exactly one session per transport;
-hosting multiple concurrent sessions means multiple transports.
+session id back. Exactly one session per transport; hosting multiple
+concurrent sessions means multiple transports.
 
-**SSE stub.** `GET /mcp` with `Accept: text/event-stream` validates
+**SSE upgrade.** `GET /mcp` with `Accept: text/event-stream` validates
 the session, sends `200 + Content-Type: text/event-stream + no
 Content-Length`, and parks the connection on a holder thread that
-polls for client disconnect every 250ms. There are no events to emit
-yet — server-side notification emit is Phase 2.4.
+polls for client disconnect every 250ms. Server-initiated frames
+(notifications, plus the request half of `cmcp_server_send_request`
+used by elicitation) are routed to every held-open holder by the
+`write_fn` classifier — see *Server-initiated notifications →
+Wire routing* below.
+
+**MCP-Protocol-Version header.** Per spec `2025-06-18`, every
+post-handshake HTTP request MUST carry an `MCP-Protocol-Version:
+<version>` header; the server validates inbound (415 on mismatch) and
+the client emits outbound. The header is checked at the HTTP layer
+before the JSON-RPC body even parses — saves a parse for the bad-peer
+case.
 
 ### transport_http_client.c (client side)
 
@@ -230,10 +251,17 @@ Tool / resource / prompt registries → dispatch → run loop. The
 handshake (`initialize`, `notifications/initialized`) plus the full
 primitive surface is built in:
 
+- `ping` — answered with `{}` per spec, before the readiness gate so
+  it works pre-handshake too. The MUST-respond half of the spec is
+  load-bearing; cMCP failing this on both sides was the first
+  conformance violation closed in Tier 4.
 - `tools/list`, `tools/call`
 - `resources/list`, `resources/read`,
   `resources/subscribe`, `resources/unsubscribe`
 - `prompts/list`, `prompts/get`
+- `logging/setLevel` — cap-gated on `caps.logging`; stores the new
+  floor under `log_mu` so concurrent `cmcp_server_log` calls from
+  any worker observe a consistent threshold.
 
 Other request methods get `-32601`. Operate-class methods sent before
 initialize get `-32600`. Tool input schemas are validated between
@@ -245,28 +273,77 @@ job.
 
 Capabilities (`tools`, `resources`, `prompts`) are auto-advertised in
 the `initialize` result whenever ≥1 of the corresponding kind is
-registered. Sub-capabilities (`subscribe`, `listChanged`) stay
-opt-in via `cmcp_server_set_capabilities`.
+registered. Sub-capabilities (`subscribe`, `listChanged`, `logging`)
+stay opt-in via `cmcp_server_set_capabilities`.
 
 `resources/subscribe` records the URI in a per-server set;
-`resources/unsubscribe` removes it. Notification *emit* against that
-set lands in Phase 2.4 — the storage is here so subscribe/unsubscribe
-are real round-trips today.
+`resources/unsubscribe` removes it.
+`cmcp_server_notify_resource_updated` checks against this set and
+silently no-ops for URIs no peer subscribed to, so the wire stays
+quiet for resources nobody cares about.
+
+**Descriptors carry UI metadata.** Tools, resources and prompts each
+gained an optional `title` field (echoed in their list descriptors)
+that hosts can render as a human-readable label distinct from the
+programmatic `name`. Tools additionally accept `output_schema`
+(advertised as `outputSchema` in `tools/list`) — the schema a typed
+`structuredContent` value will be validated against if the handler
+sets one via `cmcp_handler_set_structured`. Both fields are deep-
+copied at registration time; the `output_schema` string is parsed
+eagerly so malformed JSON fails fast (`CMCP_EPARSE`).
+
+**Server → client requests.** `cmcp_handler_elicit` (Phase 4.4 emit)
+and any future server-initiated request goes through
+`cmcp_server_send_request`. The server maintains its own outgoing
+pending list (separate from the client-side one in `rpc.c` — they
+have opposite ID spaces) and the run-loop thread routes inbound
+`CMCP_MSG_RESPONSE` frames back to the parked worker by id. See
+*Threading model → Server side → Server → client requests* for the
+machinery.
 
 ### client.c + session.c
 
 Async client with one reader thread per `cmcp_client_t`. The reader
 demultiplexes responses by ID against per-call completion records
-(condvars on a doubly-linked list), routes server-to-client
-notifications to a user callback, and replies `-32601` to unsolicited
-server requests (we don't support sampling/roots host-side yet).
+(condvars on a doubly-linked list) and routes server-initiated
+frames by kind:
+
+- **Responses** → `deliver_response`: look up the pending entry by
+  id, move the parsed message into the completion record, broadcast.
+- **`notifications/progress`** → `dispatch_progress_notification`:
+  if the frame's `progressToken` matches a per-call subscription
+  registered via `cmcp_client_call_async_progress`, fire that call's
+  `cmcp_progress_fn`. Unmatched tokens fall through to the generic
+  notification callback so per-call subscribers and global observers
+  coexist.
+- **Other notifications** → user-supplied `cmcp_notification_fn`
+  (includes `notifications/message` from a logging server).
+- **`ping`** → reply with an empty result `{}` per spec.
+- **`sampling/createMessage`** → host handler if registered, default
+  `-32601` decline if not.
+- **`elicitation/create`** → host handler if registered, default
+  `-32601` decline if not.
+- **`roots/list`** → reply with the declarative roots list set via
+  `cmcp_client_set_roots`, or `-32601` if the host never opted in.
+- **Other server-initiated requests** → `-32601`.
+
+**Cancel.** `cmcp_client_cancel(c, id, reason)` wins the race against
+a late response: it removes the pending entry FIRST (atomic), then
+signals the waiter (which returns `CMCP_ECANCELLED`), then emits
+`notifications/cancelled` on the wire. A response arriving after the
+take is silently dropped by `deliver_response` since the entry is
+gone — no use-after-free.
 
 `session.c` is the aggregator a multi-server host uses: add N clients
 under host-supplied names, then per primitive:
 
 - **tools** — `cmcp_session_tools_list` fans out async + fans in;
   `cmcp_session_tool_call` parses `<server>:<tool>` qualified names
-  and routes.
+  and routes. Per-client pagination is followed automatically: if a
+  server returns `nextCursor`, the aggregator issues follow-up
+  `tools/list` calls until the cursor is empty (same for
+  `resources/list` and `prompts/list` — a server that paginates is
+  no longer silently truncated to page one).
 - **resources** — `cmcp_session_resources_list` aggregates;
   `cmcp_session_resource_read` takes an explicit `(server, uri)`
   pair. We do *not* fold the server into the URI: URIs already
@@ -324,22 +401,48 @@ sweeps the table every 200ms and flags any request past its deadline —
 the loop flags every in-flight request before draining the pool, so
 handlers stuck on a dead transport unwind instead of writing into it.
 
+**Server → client requests.** A worker can call
+`cmcp_server_send_request` (used internally by `cmcp_handler_elicit`
+to issue `elicitation/create`) from inside a handler. The function
+allocates a fresh monotonic id from `outgoing_id_counter`, links a
+new `outgoing_pending_t` onto `outgoing_head` under `outgoing_mu`,
+writes the request through the same transport mutex everyone else
+uses, then parks on the entry's own cv. The run-loop thread, seeing
+an inbound `CMCP_MSG_RESPONSE`, walks the outgoing list and broadcasts
+the matching entry. The parked worker wakes, moves the response out,
+unlinks, frees, returns to the handler. Calling from the run-loop
+thread itself would deadlock (the loop is the one that delivers the
+response) — handlers run on workers, so in practice this is fine; the
+header documents the constraint. The wait loop polls
+`cmcp_handler_cancelled` on a 50ms tick so a cancelled handler can
+unwind without stranding the worker on a peer that's no longer
+answering. At shutdown the loop walks the outgoing list and marks
+every entry cancelled, so parked workers return `CMCP_EIO` instead of
+waiting forever on a dead transport.
+
 ### Client side
 
 ```
 caller thread(s)                   │  reader thread
                                    │
-cmcp_client_call_async             │  for (;;) {
+cmcp_client_call_async[_progress]  │  for (;;) {
   - register pending ID            │      transport_read()
   - alloc completion record        │      cmcp_rpc_parse()
-  - link onto active list          │      switch (kind):
-  - send_message()                 │        RESPONSE → deliver_response()
-  - return id                      │          → look up completion by ID
-                                   │          → broadcast cv
-cmcp_client_wait(id):              │        NOTIFICATION → notif_fn()
-  - find completion on list        │        REQUEST     → reply -32601
-  - cond_wait until done           │  }
-  - move response out, free        │
+  - (optional) attach progress_fn  │      switch (kind):
+  - link onto active list          │        RESPONSE → deliver_response()
+  - send_message()                 │          → look up completion by ID
+  - return id                      │          → broadcast cv
+                                   │        NOTIFICATION →
+cmcp_client_wait(id):              │          match progressToken vs
+  - find completion on list        │          per-call subscriptions; else
+  - cond_wait until done           │          fall through to notif_fn()
+  - move response out, free        │        REQUEST → handle_ping /
+                                   │          sampling / elicitation /
+cmcp_client_cancel(id, reason):    │          roots / else -32601
+  - pending_take (atomic, wins     │  }
+    race with a late response)     │
+  - signal waiter cancelled        │
+  - emit notifications/cancelled   │
 ```
 
 One reader, many waiters. Per-completion mutex + condvar gives every
@@ -347,6 +450,19 @@ waiter a localized wakeup — no thundering herd, no broadcasting on a
 shared cv. Multiple async calls can be in flight; `wait` can be
 called in any order. `cmcp_client_request` is just `call_async + wait`
 in one call.
+
+**Per-call progress subscriptions.** Each completion record optionally
+carries `(has_progress_token, progress_token, progress_fn,
+progress_ud)`. `cmcp_client_call_async_progress` generates a
+monotonic token under `list_mu` (folded with the same lock that
+guards the active list — saves a second mutex), writes it into
+`params._meta.progressToken` so the server's
+`cmcp_handler_progress` echoes it back, and parks the per-call
+callback on the record. The reader walks the active list on every
+`notifications/progress`, fires the matching `fn` (briefly under
+`list_mu`), and returns 1 so the caller skips the generic handler
+fallthrough. When the call completes, the subscription tears down
+with the record — no late callback after `wait` returns.
 
 ### Reader-thread shutdown
 
@@ -538,9 +654,9 @@ side* for the full machinery.
 
 A server can request that the host's LLM produce a completion via
 `sampling/createMessage` — useful for tools that want to feed raw
-output back through the model before surfacing it. This is the only
-*request* direction that goes server-to-client in the current spec
-surface.
+output back through the model before surfacing it. Together with
+*elicitation* (below) and `roots/list`, these are the three
+server-to-client request directions in the current spec surface.
 
 API:
 
@@ -553,11 +669,12 @@ API:
 
 The handler runs on the reader thread, which is single-threaded. A
 slow LLM call therefore stalls inbound frames until it returns.
-Acceptable for v0.2: real LLM calls take seconds, but in-flight
+Acceptable for now: real LLM calls take seconds, but in-flight
 client→server requests still complete (the server keeps writing
 responses; they queue at the transport and get processed once the
-handler returns). Moving sampling to a worker pool is a Tier 3 item
-and is only worth doing if a real workload demands it.
+handler returns). Moving sampling onto a dedicated worker is
+deferred until a real workload demands it. The same caveat applies
+to the elicitation handler below.
 
 ### Authorisation
 
@@ -604,10 +721,11 @@ API:
   `notifications/roots/list_changed`. Cap-gated:
   `caps.roots_list_changed = 1` required.
 
-Symmetric to sampling, this is one of two server-initiated *requests*
-the client knows how to answer (`sampling/createMessage` is the
-other). The reader thread catches `roots/list` and replies with the
-stored list — no host callback runs, the data is the data.
+Symmetric to sampling, this is one of three server-initiated
+*requests* the client knows how to answer (`sampling/createMessage`
+and `elicitation/create` are the others). The reader thread catches
+`roots/list` and replies with the stored list — no host callback
+runs, the data is the data.
 
 ### Capability auto-advertise
 
@@ -632,7 +750,144 @@ the lock when building the `roots/list` response. Replacing the
 array atomically swaps the pointer and frees the old contents while
 the lock is held.
 
-## What's deliberately *not* in v0.2
+## Elicitation (server → host structured prompt)
+
+Mid-tool-call, a server can ask the user for additional structured
+input — a confirmation, a missing argument, a credential — via
+`elicitation/create`. The two halves live on opposite sides:
+
+- **Host side** (`client.c`). `cmcp_client_set_elicitation_handler`
+  registers a callback that the reader thread invokes on each
+  inbound `elicitation/create`. The handler returns a result built
+  via `cmcp_elicitation_result(action, content)` where `action` is
+  `"accept"` (with a `content` object shaped per the request's
+  `requestedSchema`), `"decline"`, or `"cancel"`. Default-decline if
+  no handler is registered (`-32601`), with the same trust model as
+  sampling: a handler is the host's per-server opt-in to letting that
+  server interrupt the user.
+- **Server side** (`server.c`). `cmcp_handler_elicit(hctx, message,
+  requested_schema, &out_result)` is the convenience wrapper a tool
+  handler calls from a worker thread. It is cap-gated on
+  `s->peer_caps.elicitation` (the cap the client advertised at
+  handshake) — if the peer didn't opt in, it short-circuits with
+  `CMCP_EUNSUPPORTED` without ever touching the wire. Otherwise it
+  builds the spec-shaped params (`message`, `requestedSchema` —
+  defaulting to `{"type":"object"}` when the caller passes NULL)
+  and delegates to `cmcp_server_send_request`, which handles the
+  outgoing pending table and the response routing described under
+  *Threading model → Server side → Server → client requests*.
+
+The cap symmetry is what keeps this honest: a server that finds
+`elicitation = 0` in `peer_caps` knows the request would just be
+declined, so the library skips the round-trip entirely. The host
+trust gate (`set_elicitation_handler`) and the wire signal
+(`caps.elicitation = 1`) are deliberately separate, same model as
+sampling — wire-signalled-but-no-handler ends in `-32601`, which is
+default-deny in both directions.
+
+## Host-side cancel + per-call progress
+
+Phase 4.5 closed the symmetry gap on the host side. Handlers had
+been able to observe cancellation (`cmcp_handler_cancelled`) and
+emit progress (`cmcp_handler_progress`) since Tier 3, but the host
+had no clean way to *initiate* either.
+
+- **`cmcp_client_cancel(c, id, reason)`** does three things in
+  order: removes the pending entry (atomic — wins the race against
+  a response in flight), signals the waiter so `cmcp_client_wait`
+  returns `CMCP_ECANCELLED`, then emits
+  `notifications/cancelled {requestId, reason?}` on the wire. The
+  ordering matters: if a response arrives between steps 1 and 3,
+  `deliver_response` finds no pending entry and drops the frame
+  silently — no use-after-free, no spurious double-completion. A
+  slow handler that ignores `cmcp_handler_cancelled` still runs to
+  completion server-side, but its response is dropped per spec.
+- **`cmcp_client_call_async_progress(c, method, params, fn, ud,
+  &id)`** attaches a per-call progress callback to a request. The
+  library allocates a unique token under `list_mu` (folded counter),
+  writes it into `params._meta.progressToken` (replacing any
+  caller-supplied value at that path), stashes
+  `(progress_fn, progress_ud, progress_token)` on the completion
+  record, and sends the request. The reader's
+  `dispatch_progress_notification` matches inbound
+  `notifications/progress` against active subscriptions by token; on
+  a match it fires the callback and skips the generic notification
+  handler. Unmatched tokens (typed responses to other tools, or
+  late frames after `wait` returned) fall through to the generic
+  handler so observability isn't lost.
+
+The subscription is tied to the completion record's lifetime — when
+the caller returns from `wait`, the record is unlinked and freed
+together with the subscription. No late callback fires after `wait`
+returns, by construction.
+
+## Structured tool output, resource_link, title
+
+Phase 4.6 widened the `tools/call` response surface without
+breaking the Tier 3 handler signature. Three additions:
+
+- **`structuredContent`.** A tool that registered an `output_schema`
+  can attach a typed result via
+  `cmcp_handler_set_structured(hctx, value)` — additively, on the
+  per-call handler context, not via the `out_*` return path. The
+  dispatcher validates the value against the schema before send; a
+  mismatch surfaces as `-32603` per spec. When the handler sets a
+  structured value but doesn't fill `out_content`, the library
+  synthesises a `[{type:"text", text:"<emit>"}]` fallback so
+  legacy clients still see something rendered.
+- **`resource_link` content items.**
+  `cmcp_tool_resource_link_content(uri, name, description?,
+  mime_type?)` builds a `{type:"resource_link", ...}` entry — a tool
+  that wants to point at a resource instead of inlining its content
+  (e.g. "the file you asked about is at `file:///…`"). Mix-and-match
+  freely with `text` items in the same array.
+- **`title`.** Tool, resource, and prompt descriptors gained an
+  optional `title` field for UI display, distinct from the
+  programmatic `name`. Echoed in `tools/list`, `resources/list`,
+  `prompts/list` when set.
+
+Why on the ctx for `structuredContent`? Because Phase 3.4's tool
+handler signature is the public bar — adopters don't want to re-fan
+it out per protocol revision. Putting the new knob on the ctx
+preserves the bar; tools that don't care simply never call the new
+function. The ctx also carries an `is_tool_call` flag so calling
+`cmcp_handler_set_structured` from a resource or prompt handler is
+a documented no-op (with auto-free), not a crash.
+
+## Logging
+
+Phase 4.7. A server can ship structured log events to the host via
+`notifications/message {level, logger?, data}`, and the host can
+dial the floor up or down with `logging/setLevel`. Both halves are
+cap-gated on `caps.logging`.
+
+- **Levels.** The eight RFC 5424 syslog levels — `debug`, `info`,
+  `notice`, `warning`, `error`, `critical`, `alert`, `emergency` —
+  are exposed as `cmcp_log_level_t` in the public types header.
+  `cmcp_log_level_from_name` / `_to_name` round-trip between the
+  enum and the wire strings.
+- **Server emit.** `cmcp_server_log(s, level, logger, data)` checks
+  the cap, compares `level` against the per-server floor (`log_mu`
+  guards the read; the floor defaults to `debug` so nothing is
+  silently dropped pre-`setLevel`), then builds and emits the
+  notification through the same `cmcp_server_notify` path that
+  carries `*/list_changed`. Filtering returns `CMCP_OK` — a
+  too-verbose trace is not an error.
+- **Client setLevel.** `cmcp_client_set_log_level(c, level)` is a
+  synchronous request sender; it surfaces a peer-side `-32601` as
+  `CMCP_EPROTOCOL`, so a host that hits an unprepared server
+  notices.
+- **Reception is free.** `notifications/message` reaches the host
+  through the existing `cmcp_notification_fn` set via
+  `cmcp_client_set_notification_handler` (Phase 1.9). A typed log
+  callback was deemed sugar that the agent can do itself.
+
+The cap signal is the route gate: the server only attaches the
+`logging/setLevel` handler when `caps.logging = 1`, so an unprepared
+peer answers `-32601` honestly instead of silently accepting a
+setLevel it cannot honour.
+
+## What's deliberately *not* in v0.4
 
 - TLS. Deploy behind nginx/caddy. Hand-rolling TLS in C is a project
   unto itself and adds nothing protocol-shaped.
@@ -644,12 +899,23 @@ the lock is held.
 - Concurrent HTTP sessions on a single transport. One session per
   `cmcp_transport_t`; concurrent multi-tenant deployments instantiate
   multiple transports.
-- OAuth 2.1 on the HTTP transport. Tier 3 — deferred until there's a
-  remote cMCP server worth publishing.
-- A conformance harness running cMCP against Anthropic's reference
-  client/server implementations. Tier 3.
+- OAuth 2.1 on the HTTP transport. Deferred — no remote authed cMCP
+  server in sight for the consumer (butlerbot).
+- `completion/complete` (argument autocomplete for prompts and
+  resources). Low value for an autonomous agent — butlerbot's LLM
+  picks arguments, it does not drive a completion menu. Implement
+  if an interactive host ever consumes cMCP.
+- `resources/templates/list` (RFC 6570 URI-templated resources).
+  Needs a URI-template engine cMCP does not have; deferred until a
+  templated server is real.
 - Connection pooling at the session layer. One client per server is
   the current shape; butlerbot's actual usage hasn't yet shown a need
   for more.
+- Sampling / elicitation handlers running on a worker pool — they
+  currently run on the client's reader thread, which means a slow
+  interactive prompt or LLM call stalls inbound frames until it
+  returns. Acceptable for current workloads; revisit if real
+  throughput demands it.
 
-The full phase plan is in [`TODO.md`](../TODO.md).
+The full phase plan is in [`TODO.md`](../TODO.md); the release log
+is in [`CHANGELOG.md`](../CHANGELOG.md).
