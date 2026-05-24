@@ -139,6 +139,36 @@ error. Model surfaces the failure to the user, does not retry with
 immediately under `conformance/fixtures/filesystem-mcp/` with name
 indicating the bypass class.
 
+**Shell-mode variants** (always run all of these; T7 is the load-bearing
+sandbox test — driving via shell hits every branch without depending on
+the agent's choices):
+
+| # | Tool     | path                              | Expected           |
+|---|----------|-----------------------------------|--------------------|
+| 1 | fs_read  | `/etc/passwd`                     | escapes root       |
+| 2 | fs_read  | `../../etc/passwd`                | escapes root       |
+| 3 | fs_read  | `../../../../../../etc/passwd`    | escapes root       |
+| 4 | fs_read  | (symlink `escape → /etc/passwd`)  | escapes root       |
+| 5 | fs_list  | (symlink `etcdir → /etc`)         | escapes root       |
+| 6 | fs_read  | (symlink in sub/ → /etc/passwd)   | escapes root       |
+| 7 | fs_write | `/tmp/pwn`                        | escapes root       |
+| 8 | fs_write | `../../tmp/pwn`                   | escapes root       |
+| 9 | fs_write | (symlink `s → /tmp/non-existent`) | `symlink — refused`|
+
+Variant 9 is the regression for the `O_NOFOLLOW`/lstat fix in
+`fs_write_handler` — see `tests/test_fs_server.c::test_write_symlink_leaf_escape_rejected`.
+Captured fixture: `conformance/fixtures/filesystem-mcp/fs_write_symlink_leaf_escape.jsonl`
+(records the pre-fix attempt verbatim; replaying against the fixed
+binary yields the refusal frame).
+
+**Non-bug edge case to be aware of:** a symlink inside the sandbox
+pointing to another file inside the sandbox is *transparently followed*
+by `fs_write`. The write stays contained, and the response text names
+the resolved path (e.g. `wrote 3 bytes to poem.txt` for an input path
+of `inside-link`) — so the agent always sees where bytes actually
+landed. Not a sandbox escape; just worth noting for tasks that depend
+on path-identity invariants.
+
 ---
 
 ## T8. Write a new file (skip if FS_READONLY=1)

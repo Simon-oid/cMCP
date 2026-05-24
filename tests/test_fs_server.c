@@ -340,6 +340,45 @@ static void test_write_traversal_rejected(void) {
     TEST_ASSERT(access("/tmp/fsmcp-PWNED.txt", F_OK) != 0);
 }
 
+/* Regression: pre-existing symlink in the sandbox whose target lies
+ * outside it AND does not exist. realpath() in resolve_path can't
+ * canonicalise the target (ENOENT), so resolve_path falls through to
+ * its "leaf may not exist" branch and re-attaches the literal basename
+ * to the sandboxed parent. Containment check passes — then fopen()
+ * follows the symlink and writes outside the sandbox. Caught by
+ * lstat+O_NOFOLLOW in fs_write_handler. */
+static void test_write_symlink_leaf_escape_rejected(void) {
+    /* Build a fresh symlink (the shared "escape" fixture points to an
+     * existing target, which exercises a different rejection path). */
+    char link[512];
+    snprintf(link, sizeof link, "%s/symwrite", g_root);
+    if (symlink("/tmp/fsmcp-symwrite-pwned", link) != 0) {
+        perror("symlink");
+        TEST_ASSERT(0);
+        return;
+    }
+    /* Belt-and-braces: make sure the target doesn't exist beforehand. */
+    unlink("/tmp/fsmcp-symwrite-pwned");
+
+    char *text = NULL;
+    int is_err = 0;
+    cmcp_json_t *w = cmcp_json_new_object();
+    cmcp_json_object_set(w, "path", cmcp_json_new_string("symwrite"));
+    cmcp_json_object_set(w, "content", cmcp_json_new_string("pwned"));
+    int rc = call_tool(g_cli, "fs_write", w, &text, &is_err);
+    TEST_ASSERT(rc == 0);
+    TEST_ASSERT(is_err == 1);
+    TEST_ASSERT(text && strstr(text, "symlink"));
+    free(text);
+
+    /* The whole point: nothing landed at the symlink target. */
+    TEST_ASSERT(access("/tmp/fsmcp-symwrite-pwned", F_OK) != 0);
+
+    unlink(link);
+    /* Defensive cleanup in case a future regression reopens the hole. */
+    unlink("/tmp/fsmcp-symwrite-pwned");
+}
+
 /* ====================================================================== */
 /* Tests — operation errors                                                */
 /* ====================================================================== */
@@ -449,6 +488,7 @@ int main(void) {
     TEST_RUN(test_symlink_rejected);
     TEST_RUN(test_absolute_rejected);
     TEST_RUN(test_write_traversal_rejected);
+    TEST_RUN(test_write_symlink_leaf_escape_rejected);
     TEST_RUN(test_read_directory);
     TEST_RUN(test_read_binary);
     TEST_RUN(test_read_missing);
