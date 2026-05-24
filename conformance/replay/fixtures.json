@@ -1,0 +1,106 @@
+{
+  "_note": [
+    "Replay registry consumed by replay.py. Each entry pins one wire",
+    "fixture under conformance/fixtures/ to the exact way its server",
+    "should be spawned. The driver streams every dir:'in' frame and",
+    "asserts every dir:'out' frame matches under JSON equality (with",
+    "output_masks normalising any field that is environmentally",
+    "variable).",
+    "",
+    "Mask kinds:",
+    "  - {kind:'set',   path:'/json/pointer', value:'<masked>'}",
+    "      replace the value at this path with a sentinel.",
+    "  - {kind:'regex', path:'/json/pointer', pattern:'…', replacement:'…'}",
+    "      treat the leaf as a string and run re.sub on it.",
+    "",
+    "Prerequisite kinds:",
+    "  - {kind:'cmd',  name:'ollama'}        skip if command missing",
+    "  - {kind:'env',  name:'CRAG_TEST_DB'}  skip if env var unset",
+    "  - {kind:'file', path:'tools/x/y'}     skip if file absent"
+  ],
+  "fixtures": [
+    {
+      "name": "echo-server/add_schema_type_mismatch",
+      "fixture": "conformance/fixtures/echo-server/add_schema_type_mismatch.jsonl",
+      "server": "examples/echo-server",
+      "prerequisites": [
+        {"kind": "file", "path": "examples/echo-server"}
+      ]
+    },
+    {
+      "name": "echo-server/add_schema_missing_required",
+      "fixture": "conformance/fixtures/echo-server/add_schema_missing_required.jsonl",
+      "server": "examples/echo-server",
+      "prerequisites": [
+        {"kind": "file", "path": "examples/echo-server"}
+      ]
+    },
+    {
+      "name": "filesystem-mcp/fs_write_symlink_leaf_escape",
+      "fixture": "conformance/fixtures/filesystem-mcp/fs_write_symlink_leaf_escape.jsonl",
+      "server": "tools/filesystem-mcp/filesystem-mcp",
+      "args": ["--root", "/tmp/cmcp-replay-fs-sandbox"],
+      "setup": [
+        "rm -rf /tmp/cmcp-replay-fs-sandbox",
+        "mkdir -p /tmp/cmcp-replay-fs-sandbox",
+        "ln -sf /tmp/cmcp-replay-symlink-target /tmp/cmcp-replay-fs-sandbox/symwrite"
+      ],
+      "teardown": [
+        "rm -rf /tmp/cmcp-replay-fs-sandbox /tmp/cmcp-replay-symlink-target"
+      ],
+      "prerequisites": [
+        {"kind": "file", "path": "tools/filesystem-mcp/filesystem-mcp"}
+      ]
+    },
+    {
+      "name": "crag-mcp/crag_search_empty_query",
+      "fixture": "conformance/fixtures/crag-mcp/crag_search_empty_query.jsonl",
+      "server": "tools/crag-mcp/crag-mcp",
+      "args": ["--db", "/tmp/cmcp-replay-crag-empty.db"],
+      "setup": ["rm -f /tmp/cmcp-replay-crag-empty.db"],
+      "teardown": ["rm -f /tmp/cmcp-replay-crag-empty.db"],
+      "prerequisites": [
+        {"kind": "file", "path": "tools/crag-mcp/crag-mcp"}
+      ]
+    },
+    {
+      "name": "crag-mcp/crag_search_k_above_max",
+      "fixture": "conformance/fixtures/crag-mcp/crag_search_k_above_max.jsonl",
+      "server": "tools/crag-mcp/crag-mcp",
+      "args": ["--db", "/tmp/cmcp-replay-crag-empty.db"],
+      "setup": ["rm -f /tmp/cmcp-replay-crag-empty.db"],
+      "teardown": ["rm -f /tmp/cmcp-replay-crag-empty.db"],
+      "prerequisites": [
+        {"kind": "file", "path": "tools/crag-mcp/crag-mcp"}
+      ]
+    },
+    {
+      "name": "crag-mcp/stats_resource_read",
+      "fixture": "conformance/fixtures/crag-mcp/stats_resource_read.jsonl",
+      "server": "tools/crag-mcp/crag-mcp",
+      "args": ["--db", "$CRAG_TEST_DB"],
+      "output_masks": [
+        {"kind": "regex", "path": "/result/content/0/text",
+         "pattern": "db:\\s+\\S+",   "replacement": "db:     <masked>"},
+        {"kind": "regex", "path": "/result/content/0/text",
+         "pattern": "chunks:\\s+\\d+", "replacement": "chunks: <masked>"},
+        {"kind": "regex", "path": "/result/content/0/text",
+         "pattern": "files:\\s+\\d+",  "replacement": "files:  <masked>"},
+        {"kind": "regex", "path": "/result/content/0/text",
+         "pattern": "dim:\\s+\\d+",    "replacement": "dim:    <masked>"},
+        {"kind": "regex", "path": "/result/contents/0/text",
+         "pattern": "db:\\s+\\S+",   "replacement": "db:     <masked>"},
+        {"kind": "regex", "path": "/result/contents/0/text",
+         "pattern": "chunks:\\s+\\d+", "replacement": "chunks: <masked>"},
+        {"kind": "regex", "path": "/result/contents/0/text",
+         "pattern": "files:\\s+\\d+",  "replacement": "files:  <masked>"},
+        {"kind": "regex", "path": "/result/contents/0/text",
+         "pattern": "dim:\\s+\\d+",    "replacement": "dim:    <masked>"}
+      ],
+      "prerequisites": [
+        {"kind": "file", "path": "tools/crag-mcp/crag-mcp"},
+        {"kind": "env",  "name": "CRAG_TEST_DB"}
+      ]
+    }
+  ]
+}

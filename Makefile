@@ -131,6 +131,19 @@ conformance: all $(CONF_C_BIN)
 $(CONF_C_BIN): $(CONF_DIR)/client_vs_ts.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
+# --- Replay-based conformance gate (axis 5.3) -----------------------------
+# Replays every wire transcript under conformance/fixtures/ at a freshly
+# spawned server and asserts the recorded responses still match (modulo
+# environmentally-variable fields, normalised via per-fixture masks in
+# conformance/replay/fixtures.json). Hermetic: no network, no SDK install.
+# Built and run as part of CI. Fixtures whose prerequisites are missing
+# (e.g. crag-mcp not built, or no $CRAG_TEST_DB pointing at an indexed
+# corpus) skip cleanly — non-fatal.
+replay: all
+	@command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
+	@echo "=== replay: wire-fixture regression gate ==="
+	@python3 conformance/replay/replay.py
+
 # --- Soak / long-running stability harness --------------------------------
 # Opt-in: spawns the in-tree echo-server, runs a steady tools/call workload
 # for $SOAK_DURATION seconds (default 120, nightly target 21600 = 6h),
@@ -264,4 +277,4 @@ clean:
 	      tools/filesystem-mcp/*.o examples/*.o
 
 .PHONY: all test valgrind test-asan test-tsan fuzz-build fuzz-smoke \
-        soak soak-churn clean crag-mcp conformance
+        soak soak-churn clean crag-mcp conformance replay

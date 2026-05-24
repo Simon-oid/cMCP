@@ -43,3 +43,19 @@ jobs:
 
       - name: make ${{ matrix.target }}
         run: make ${{ matrix.target }}
+
+  replay:
+    name: make replay (wire-fixture gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      # python3 is preinstalled on ubuntu-latest; the driver is stdlib-only.
+      - name: make replay
+        run: make replay

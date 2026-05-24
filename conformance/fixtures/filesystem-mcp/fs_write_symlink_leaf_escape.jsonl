@@ -1,5 +1,5 @@
-{"t":1779653092.799961,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
-{"t":1779653092.799986,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
-{"t":1779653092.799989,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_write\",\"arguments\":{\"path\":\"symwrite\",\"content\":\"x\"}}}"}
-{"t":1779653092.802866,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"tools\":{}},\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"filesystem-mcp\",\"version\":\"0.1.0\"}}}"}
-{"t":1779653092.802919,"dir":"out","frame":"{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"wrote 1 bytes to symwrite\",\"type\":\"text\"}],\"isError\":false}}"}
+{"t":1779654276.030909,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
+{"t":1779654276.030936,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
+{"t":1779654276.030939,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"fs_write\",\"arguments\":{\"path\":\"symwrite\",\"content\":\"x\"}}}"}
+{"t":1779654276.033612,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"tools\":{}},\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"filesystem-mcp\",\"version\":\"0.1.0\"}}}"}
+{"t":1779654276.033662,"dir":"out","frame":"{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"path is a symlink — refusing to follow (sandbox would otherwise be bypassable)\",\"type\":\"text\"}],\"isError\":true}}"}
