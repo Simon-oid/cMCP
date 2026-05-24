@@ -1,7 +1,7 @@
 #ifndef CMCP_H
 #define CMCP_H
 
-#define CMCP_VERSION       "0.3.0"
+#define CMCP_VERSION       "0.4.0"
 #define CMCP_PROTOCOL_VERSION "2025-06-18"
 
 typedef enum {
