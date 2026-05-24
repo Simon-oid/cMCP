@@ -45,6 +45,7 @@ typedef struct {
 static void *server_thread_main(void *arg) {
     server_arg_t *a = (server_arg_t *)arg;
     a->rc = cmcp_server_run(a->s, a->t);
+    free(a);
     return NULL;
 }
 

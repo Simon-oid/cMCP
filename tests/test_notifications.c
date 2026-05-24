@@ -603,10 +603,9 @@ static void test_http_sse_notification(void) {
         .name = "trig", .handler = trig_tools_changed, .userdata = &tctx,
     });
 
-    server_arg_t *sa = (server_arg_t *)calloc(1, sizeof *sa);
-    sa->s = srv; sa->t = server_t;
+    server_arg_t sa = { srv, server_t, 0 };
     pthread_t th;
-    TEST_ASSERT(pthread_create(&th, NULL, server_thread, sa) == 0);
+    TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
 
     /* Brief wait for acceptor to reach poll(). */
     struct timespec ts = { 0, 20 * 1000 * 1000 };
