@@ -27,6 +27,32 @@ typedef struct {
     int roots_list_changed;       /* roots/list_changed */
 } cmcp_client_capabilities_t;
 
+/* ------------------------------------------------------------------ */
+/* MCP log severity levels (RFC 5424 syslog, per spec)                 */
+/* ------------------------------------------------------------------ */
+/* Numerically ordered: a message with level >= the server-side floor
+ * is emitted; below it is dropped. `debug` is the most verbose,
+ * `emergency` the most severe. Wire names are the lowercase strings
+ * below; cmcp_log_level_from_name / _to_name convert. */
+typedef enum {
+    CMCP_LOG_LEVEL_DEBUG     = 0,
+    CMCP_LOG_LEVEL_INFO      = 1,
+    CMCP_LOG_LEVEL_NOTICE    = 2,
+    CMCP_LOG_LEVEL_WARNING   = 3,
+    CMCP_LOG_LEVEL_ERROR     = 4,
+    CMCP_LOG_LEVEL_CRITICAL  = 5,
+    CMCP_LOG_LEVEL_ALERT     = 6,
+    CMCP_LOG_LEVEL_EMERGENCY = 7,
+} cmcp_log_level_t;
+
+/* Returns the wire string ("debug", "info", ...) for `lvl`, or NULL
+ * if `lvl` is out of range. Pointer is to static storage. */
+const char *cmcp_log_level_to_name(cmcp_log_level_t lvl);
+
+/* Parses `name` into a level. Returns 0 on success and writes
+ * *out_level; returns -1 on unknown/NULL name. */
+int cmcp_log_level_from_name(const char *name, cmcp_log_level_t *out_level);
+
 /* JSON-RPC 2.0 standard error codes. */
 #define CMCP_RPC_PARSE_ERROR       -32700
 #define CMCP_RPC_INVALID_REQUEST   -32600

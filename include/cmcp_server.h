@@ -318,6 +318,30 @@ int cmcp_server_notify_prompts_changed(cmcp_server_t *s);
 int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri);
 
 /* ====================================================================== */
+/* Structured logging                                                      */
+/* ====================================================================== */
+
+/* Emit a `notifications/message` carrying `{level, logger?, data}`.
+ *
+ * Cap-gated: requires `caps.logging = 1` (CMCP_EPROTOCOL otherwise).
+ * Filter-gated: messages below the floor most recently set by the
+ * client's `logging/setLevel` request are silently dropped (returns
+ * CMCP_OK). Pre-setLevel the floor is CMCP_LOG_LEVEL_DEBUG, so
+ * everything passes — the host is expected to dial it down.
+ *
+ * `logger` may be NULL (the field is then omitted from the wire).
+ * `data` may be NULL → empty object on the wire; otherwise it is
+ * consumed (ownership transferred). Forwards the underlying
+ * cmcp_server_notify rc (CMCP_EINVAL pre-run, CMCP_OK if dropped, etc.).
+ *
+ * Thread-safe: may be called from any tool/resource/prompt handler
+ * (on a worker) or from the run-loop thread. */
+int cmcp_server_log(cmcp_server_t *s,
+                     cmcp_log_level_t level,
+                     const char *logger,
+                     cmcp_json_t *data);
+
+/* ====================================================================== */
 /* Server → client requests                                                */
 /* ====================================================================== */
 

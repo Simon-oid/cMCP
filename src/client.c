@@ -719,6 +719,27 @@ int cmcp_client_notify_roots_changed(cmcp_client_t *c) {
     return cmcp_client_notify(c, "notifications/roots/list_changed", NULL);
 }
 
+int cmcp_client_set_log_level(cmcp_client_t *c, cmcp_log_level_t level) {
+    if (!c) return CMCP_EINVAL;
+    const char *lname = cmcp_log_level_to_name(level);
+    if (!lname) return CMCP_EINVAL;
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "level", cmcp_json_new_string(lname));
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "logging/setLevel", params, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    cmcp_rpc_message_clear(&resp);
+    return CMCP_OK;
+}
+
 cmcp_json_t *cmcp_sampling_text_result(const char *text,
                                         const char *model,
                                         const char *stop_reason) {

@@ -280,6 +280,23 @@ int cmcp_client_set_roots(cmcp_client_t *c,
 int cmcp_client_notify_roots_changed(cmcp_client_t *c);
 
 /* ====================================================================== */
+/* Logging                                                                 */
+/* ====================================================================== */
+
+/* Ask the server to raise/lower its `notifications/message` floor.
+ * Sends a `logging/setLevel` request with `{level: "<name>"}` and
+ * blocks until the response arrives. Levels below the floor will be
+ * dropped server-side after this returns.
+ *
+ * Requires the server to have advertised the `logging` capability;
+ * otherwise the peer answers -32601 and this returns CMCP_EPROTOCOL.
+ *
+ * Returns CMCP_OK on success, CMCP_EPROTOCOL on a peer-side error or
+ * if the server doesn't speak logging, or the standard transport
+ * errors from cmcp_client_request. */
+int cmcp_client_set_log_level(cmcp_client_t *c, cmcp_log_level_t level);
+
+/* ====================================================================== */
 /* Server identity (post-handshake)                                        */
 /* ====================================================================== */
 

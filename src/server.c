@@ -140,6 +140,15 @@ struct cmcp_server {
     int                          outgoing_mu_init;
     long long                    outgoing_id_counter;
     outgoing_pending_t          *outgoing_head;
+
+    /* `notifications/message` floor. Set by the client via
+     * logging/setLevel; messages below this level are dropped by
+     * cmcp_server_log. Default is CMCP_LOG_LEVEL_DEBUG (no filter) —
+     * the host is expected to dial it down. log_mu serialises level
+     * reads against setLevel writes from the loop thread. */
+    pthread_mutex_t              log_mu;
+    int                          log_mu_init;
+    cmcp_log_level_t             log_min_level;
 };
 
 /* ====================================================================== */
@@ -185,6 +194,15 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
     }
     s->outgoing_mu_init = 1;
     s->outgoing_id_counter = 0;
+    if (pthread_mutex_init(&s->log_mu, NULL) != 0) {
+        pthread_mutex_destroy(&s->notify_mu);
+        pthread_mutex_destroy(&s->inflight_mu);
+        pthread_mutex_destroy(&s->outgoing_mu);
+        free(s->name); free(s->version); free(s);
+        return NULL;
+    }
+    s->log_mu_init    = 1;
+    s->log_min_level  = CMCP_LOG_LEVEL_DEBUG;
     return s;
 }
 
@@ -233,6 +251,7 @@ void cmcp_server_free(cmcp_server_t *s) {
     if (s->notify_mu_init) pthread_mutex_destroy(&s->notify_mu);
     if (s->inflight_mu_init) pthread_mutex_destroy(&s->inflight_mu);
     if (s->outgoing_mu_init) pthread_mutex_destroy(&s->outgoing_mu);
+    if (s->log_mu_init) pthread_mutex_destroy(&s->log_mu);
     free(s);
 }
 
@@ -1418,6 +1437,41 @@ static void handle_prompts_get(cmcp_server_t *s,
 }
 
 /* ====================================================================== */
+/* logging/setLevel                                                        */
+/* ====================================================================== */
+
+/* Cap-gated: if caps.logging wasn't opted in, fall through to the
+ * outer -32601 path so an unprepared server isn't pretending to honour
+ * the request. Otherwise stash the new floor under log_mu. */
+static void handle_logging_set_level(cmcp_server_t *s,
+                                      const cmcp_rpc_message_t *req,
+                                      cmcp_rpc_message_t *resp) {
+    if (!req->params || req->params->type != CMCP_JSON_OBJECT) {
+        reply_invalid_params(resp, &req->id,
+                              "logging/setLevel requires params object", NULL);
+        return;
+    }
+    const cmcp_json_t *lv = cmcp_json_object_get(req->params, "level");
+    if (!lv || lv->type != CMCP_JSON_STRING) {
+        reply_invalid_params(resp, &req->id,
+                              "logging/setLevel requires `level` string", NULL);
+        return;
+    }
+    cmcp_log_level_t parsed;
+    if (cmcp_log_level_from_name(lv->str.s, &parsed) != 0) {
+        cmcp_json_t *data = cmcp_json_new_object();
+        cmcp_json_object_set(data, "level",
+                              cmcp_json_new_string(lv->str.s));
+        reply_invalid_params(resp, &req->id, "unknown log level", data);
+        return;
+    }
+    pthread_mutex_lock(&s->log_mu);
+    s->log_min_level = parsed;
+    pthread_mutex_unlock(&s->log_mu);
+    cmcp_rpc_make_response(resp, &req->id, cmcp_json_new_object());
+}
+
+/* ====================================================================== */
 /* Per-frame handler                                                       */
 /* ====================================================================== */
 
@@ -1506,6 +1560,10 @@ static void server_handle_message(cmcp_server_t *s,
     }
     if (strcmp(msg->method, "prompts/get") == 0) {
         handle_prompts_get(s, msg, resp, hctx);
+        return;
+    }
+    if (strcmp(msg->method, "logging/setLevel") == 0 && s->caps.logging) {
+        handle_logging_set_level(s, msg, resp);
         return;
     }
 
@@ -1958,4 +2016,35 @@ int cmcp_handler_elicit(cmcp_handler_ctx_t *hctx,
     resp.result = NULL;
     cmcp_rpc_message_clear(&resp);
     return CMCP_OK;
+}
+
+/* ====================================================================== */
+/* Structured logging                                                       */
+/* ====================================================================== */
+
+int cmcp_server_log(cmcp_server_t *s,
+                     cmcp_log_level_t level,
+                     const char *logger,
+                     cmcp_json_t *data) {
+    if (!s) { cmcp_json_free(data); return CMCP_EINVAL; }
+    if (!s->caps.logging) { cmcp_json_free(data); return CMCP_EPROTOCOL; }
+    const char *lname = cmcp_log_level_to_name(level);
+    if (!lname) { cmcp_json_free(data); return CMCP_EINVAL; }
+
+    /* Filter against the current floor. Dropping is success — callers
+     * don't want a non-zero return to mean "your trace was just too
+     * verbose for this peer". */
+    pthread_mutex_lock(&s->log_mu);
+    cmcp_log_level_t floor = s->log_min_level;
+    pthread_mutex_unlock(&s->log_mu);
+    if ((int)level < (int)floor) { cmcp_json_free(data); return CMCP_OK; }
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) { cmcp_json_free(data); return CMCP_ENOMEM; }
+    cmcp_json_object_set(params, "level", cmcp_json_new_string(lname));
+    if (logger)
+        cmcp_json_object_set(params, "logger", cmcp_json_new_string(logger));
+    cmcp_json_object_set(params, "data",
+                          data ? data : cmcp_json_new_object());
+    return cmcp_server_notify(s, "notifications/message", params);
 }
