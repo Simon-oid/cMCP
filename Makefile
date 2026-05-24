@@ -139,6 +139,33 @@ valgrind: $(TEST_BIN)
 	             --error-exitcode=1 --quiet ./$$t || exit 1; \
 	done
 
+# --- Sanitizer runs (Tier-5 quality gate) ---------------------------------
+# Sanitizers can't combine — ASan and TSan own shadow memory differently —
+# so we provide two separate targets. Each does a full clean rebuild so
+# every .o is instrumented, then runs the existing suite. -O1 + frame
+# pointers give readable stacks; -fno-sanitize-recover=all turns every UBSan
+# finding into a hard abort so make notices.
+SAN_BASE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O1 -g \
+                   -fno-omit-frame-pointer -Iinclude $(CURL_CFLAGS)
+ASAN_CFLAGS := $(SAN_BASE_CFLAGS) -fno-sanitize-recover=all \
+               -fsanitize=address,undefined
+TSAN_CFLAGS := $(SAN_BASE_CFLAGS) -fsanitize=thread
+
+# Surface every UBSan finding with a stack trace; tell ASan to abort hard.
+ASAN_OPTS := halt_on_error=1:abort_on_error=1:print_stacktrace=1
+UBSAN_OPTS := halt_on_error=1:print_stacktrace=1
+TSAN_OPTS := halt_on_error=1:second_deadlock_stack=1
+
+test-asan:
+	$(MAKE) --no-print-directory clean
+	$(MAKE) --no-print-directory test CFLAGS="$(ASAN_CFLAGS)" \
+	    ASAN_OPTIONS="$(ASAN_OPTS)" UBSAN_OPTIONS="$(UBSAN_OPTS)"
+
+test-tsan:
+	$(MAKE) --no-print-directory clean
+	$(MAKE) --no-print-directory test CFLAGS="$(TSAN_CFLAGS)" \
+	    TSAN_OPTIONS="$(TSAN_OPTS)"
+
 clean:
 	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
@@ -147,4 +174,4 @@ clean:
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o
 
-.PHONY: all test valgrind clean crag-mcp conformance
+.PHONY: all test valgrind test-asan test-tsan clean crag-mcp conformance

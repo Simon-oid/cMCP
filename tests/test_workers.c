@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -198,15 +199,18 @@ static int barrier_tool(const cmcp_json_t *args, void *ud,
 
 /* Cooperative tool: spins checking the cancel flag, ~3s ceiling so a
  * never-delivered cancel fails the test instead of hanging. Records
- * observed cancellation into the int that `userdata` points at. */
+ * observed cancellation into the atomic that `userdata` points at.
+ * Atomic because the test thread reads it concurrently — TSan can't see
+ * happens-before through the pipe transport. */
 static int coop_tool(const cmcp_json_t *args, void *ud,
                      cmcp_handler_ctx_t *hctx,
                      cmcp_json_t **out, int *is_err) {
     (void)args; (void)is_err;
-    int *observed = (int *)ud;
+    atomic_int *observed = (atomic_int *)ud;
     for (int i = 0; i < 600; i++) {
         if (cmcp_handler_cancelled(hctx)) {
-            if (observed) *observed = 1;
+            if (observed)
+                atomic_store_explicit(observed, 1, memory_order_relaxed);
             break;
         }
         struct timespec ts = { 0, 5 * 1000 * 1000 };   /* 5ms */
@@ -285,7 +289,7 @@ static void test_concurrent_out_of_order(void) {
 /* ====================================================================== */
 
 static void test_cooperative_cancellation(void) {
-    int observed = 0;
+    atomic_int observed = 0;
 
     harness_t h;
     TEST_ASSERT(harness_init(&h) == 0);
@@ -304,7 +308,7 @@ static void test_cooperative_cancellation(void) {
     char *f = recv_frame(h.from_server, 1500);
     TEST_ASSERT(f == NULL);
     free(f);
-    TEST_ASSERT(observed == 1);
+    TEST_ASSERT(atomic_load_explicit(&observed, memory_order_relaxed) == 1);
 
     /* The server is still healthy: a fresh call still completes. */
     send_call(h.to_server, 43, "ping", "{}", NULL);
@@ -366,7 +370,7 @@ static void test_progress_notifications(void) {
 /* ====================================================================== */
 
 static void test_transport_close_mid_handler(void) {
-    int observed = 0;
+    atomic_int observed = 0;
 
     harness_t h;
     TEST_ASSERT(harness_init(&h) == 0);
@@ -384,7 +388,7 @@ static void test_transport_close_mid_handler(void) {
     harness_stop(&h);
 
     /* Shutdown flagged the in-flight handler as cancelled. */
-    TEST_ASSERT(observed == 1);
+    TEST_ASSERT(atomic_load_explicit(&observed, memory_order_relaxed) == 1);
 }
 
 /* ====================================================================== */

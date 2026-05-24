@@ -645,8 +645,12 @@ static void test_http_sse_notification(void) {
 
     cmcp_client_free(cli);
     cmcp_transport_close(client_t);
-    cmcp_transport_close(server_t);
+    /* HTTP server transport needs wake → join → close ordering: close
+     * destroys the slot mutex, so the server thread must already have
+     * unwound through cond_wait before we get there. */
+    cmcp_transport_wake(server_t);
     pthread_join(th, NULL);
+    cmcp_transport_close(server_t);
     cmcp_server_free(srv);
     capture_clear(&cap);
 }

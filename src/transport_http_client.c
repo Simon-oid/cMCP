@@ -34,6 +34,7 @@
 
 #include <curl/curl.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,7 +65,12 @@ typedef struct {
     pthread_t        sse_thread;
     int              sse_started;
 
-    volatile int     shutting_down;
+    /* Atomic flag — read from sse_progress_cb under libcurl's thread
+     * without our mutex (line 341 below), so it needs real cross-
+     * thread visibility, not just the volatile compiler hint. The
+     * mutex-guarded read sites below use atomic_load too for
+     * consistency; the mutex still provides the cv ordering. */
+    atomic_int       shutting_down;
 } http_client_impl_t;
 
 /* Push one frame onto the queue. Copies data. Signals one waiter. */
@@ -91,7 +97,9 @@ static int queue_push(http_client_impl_t *impl,
 static int queue_pop(http_client_impl_t *impl,
                       char **out_buf, size_t *out_len) {
     pthread_mutex_lock(&impl->q_mu);
-    while (!impl->q_head && !impl->shutting_down) {
+    while (!impl->q_head &&
+           !atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) {
         pthread_cond_wait(&impl->q_cv, &impl->q_mu);
     }
     if (!impl->q_head) {
@@ -338,7 +346,8 @@ static int sse_progress_cb(void *ud, curl_off_t dlt, curl_off_t dln,
                              curl_off_t ult, curl_off_t uln) {
     (void)dlt; (void)dln; (void)ult; (void)uln;
     http_client_impl_t *impl = (http_client_impl_t *)ud;
-    return impl->shutting_down ? 1 : 0;
+    return atomic_load_explicit(&impl->shutting_down,
+                                 memory_order_relaxed) ? 1 : 0;
 }
 
 static void *sse_thread_main(void *arg) {
@@ -346,10 +355,13 @@ static void *sse_thread_main(void *arg) {
 
     /* Park until the first POST has latched a session id. */
     pthread_mutex_lock(&impl->session_mu);
-    while (!impl->session_set && !impl->shutting_down) {
+    while (!impl->session_set &&
+           !atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) {
         pthread_cond_wait(&impl->session_cv, &impl->session_mu);
     }
-    int shut = impl->shutting_down;
+    int shut = atomic_load_explicit(&impl->shutting_down,
+                                     memory_order_relaxed);
     char sid_header[96];
     snprintf(sid_header, sizeof sid_header,
               "Mcp-Session-Id: %s", impl->session_id);
@@ -409,7 +421,7 @@ static void http_client_wake(cmcp_transport_t *t) {
     if (!t) return;
     http_client_impl_t *impl = (http_client_impl_t *)t->impl;
     if (!impl) return;
-    impl->shutting_down = 1;
+    atomic_store_explicit(&impl->shutting_down, 1, memory_order_relaxed);
     pthread_mutex_lock(&impl->session_mu);
     pthread_cond_broadcast(&impl->session_cv);
     pthread_mutex_unlock(&impl->session_mu);

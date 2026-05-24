@@ -166,8 +166,14 @@ static int fixture_up(fixture_t *f) {
 static void fixture_down(fixture_t *f) {
     if (f->cli) cmcp_client_free(f->cli);
     if (f->client_t) cmcp_transport_close(f->client_t);
-    if (f->server_t) cmcp_transport_close(f->server_t);
+    /* For the HTTP server transport, wake_fn is the signal that breaks
+     * the server thread out of its slot_mu cond_wait — closing the
+     * client transport doesn't propagate to the server like stdio does.
+     * Join BEFORE close so close_fn doesn't destroy the mutex while
+     * the server thread is still unwinding through cond_wait. */
+    if (f->server_t) cmcp_transport_wake(f->server_t);
     pthread_join(f->server_th, NULL);
+    if (f->server_t) cmcp_transport_close(f->server_t);
     if (f->srv) cmcp_server_free(f->srv);
 }
 

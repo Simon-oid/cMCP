@@ -287,8 +287,9 @@ static void test_initialize_round_trip(void) {
     cmcp_json_free(j);
     free(resp);
 
-    cmcp_transport_close(t);
+    cmcp_transport_wake(t);
     pthread_join(th, NULL);
+    cmcp_transport_close(t);
     cmcp_server_free(s);
 }
 
@@ -355,8 +356,9 @@ static void test_session_id_required_after_init(void) {
     cmcp_json_free(j);
     free(resp);
 
-    cmcp_transport_close(t);
+    cmcp_transport_wake(t);
     pthread_join(th, NULL);
+    cmcp_transport_close(t);
     cmcp_server_free(s);
 }
 
@@ -403,8 +405,9 @@ static void test_malformed_request(void) {
     TEST_ASSERT(strncmp(resp, "HTTP/1.1 404", 12) == 0);
     free(resp);
 
-    cmcp_transport_close(t);
+    cmcp_transport_wake(t);
     pthread_join(th, NULL);
+    cmcp_transport_close(t);
     cmcp_server_free(s);
 }
 
@@ -463,8 +466,9 @@ static void test_get_sse_handshake(void) {
     /* Close client side; the holder thread should notice and exit. */
     close(fd);
 
-    cmcp_transport_close(t);
+    cmcp_transport_wake(t);
     pthread_join(th, NULL);
+    cmcp_transport_close(t);
     cmcp_server_free(s);
 }
 
@@ -522,8 +526,9 @@ static void test_protocol_version_header(void) {
     TEST_ASSERT(strncmp(resp, "HTTP/1.1 200 OK\r\n", 17) == 0);
     free(resp);
 
-    cmcp_transport_close(t);
+    cmcp_transport_wake(t);
     pthread_join(th, NULL);
+    cmcp_transport_close(t);
     cmcp_server_free(s);
 }
 
@@ -543,12 +548,13 @@ static void test_close_unblocks_reader(void) {
     struct timespec ts = { 0, 50 * 1000 * 1000 };
     nanosleep(&ts, NULL);
 
-    cmcp_transport_close(t);
-    /* If the close failed to wake the reader, this hangs. The test
+    cmcp_transport_wake(t);
+    /* If wake failed to broadcast the slot cvs, this hangs. The test
      * harness's parent process timeouts will catch that. */
     TEST_ASSERT(pthread_join(th, NULL) == 0);
     TEST_ASSERT(sa.rc == CMCP_OK);     /* clean shutdown */
 
+    cmcp_transport_close(t);
     cmcp_server_free(s);
 }
 

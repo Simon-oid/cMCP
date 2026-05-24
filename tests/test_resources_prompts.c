@@ -21,6 +21,7 @@
 #include "cmcp_types.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -65,14 +66,17 @@ static void *server_thread(void *arg) {
 /* Sample resource + prompt handlers                                       */
 /* ====================================================================== */
 
-typedef struct { int reads; } stats_ctx_t;
+/* Atomic counter — handler runs on the worker pool, test thread reads
+ * mid-flight. TSan can't see the happens-before through the pipe/socket
+ * transport, so we make the counter itself atomic. */
+typedef struct { atomic_int reads; } stats_ctx_t;
 
 static int stats_read(const char *uri, void *userdata,
                        cmcp_handler_ctx_t *hctx,
                        cmcp_json_t **out_contents, int *out_is_error) {
     (void)hctx;
     stats_ctx_t *ctx = (stats_ctx_t *)userdata;
-    if (ctx) ctx->reads++;
+    if (ctx) atomic_fetch_add_explicit(&ctx->reads, 1, memory_order_relaxed);
     *out_is_error = 0;
     *out_contents = cmcp_resource_text_contents(uri, "text/plain",
                                                  "chunks=12 files=3");
@@ -272,7 +276,7 @@ static void test_resources_read_success(void) {
     TEST_ASSERT(cmcp_client_request(cli, "resources/read", params, &resp)
                 == CMCP_OK);
     TEST_ASSERT(resp.error == NULL);
-    TEST_ASSERT(ctx.reads == 1);
+    TEST_ASSERT(atomic_load_explicit(&ctx.reads, memory_order_relaxed) == 1);
 
     const cmcp_json_t *contents = cmcp_json_object_get(resp.result, "contents");
     TEST_ASSERT(contents && contents->type == CMCP_JSON_ARRAY);

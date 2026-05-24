@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,10 +131,15 @@ struct cmcp_client {
     char                       *server_protocol;   /* advertised protocol version */
     cmcp_server_capabilities_t  server_caps;
 
-    /* Reader thread + active completions. */
+    /* Reader thread + active completions. shutting_down is an atomic
+     * hint — the reader polls it on its loop edges to bail early on
+     * teardown. Real wake-up uses transport_wake + SIGUSR2; the flag
+     * just keeps the reader from racing back into a read after we've
+     * already decided to die. memory_order_relaxed is enough because
+     * no other memory is being published through this flag. */
     pthread_t                   reader;
     int                         reader_started;
-    int                         shutting_down;
+    atomic_int                  shutting_down;
 
     pthread_mutex_t             list_mu;
     pending_completion_t       *active_head;       /* doubly-linked list */
@@ -477,7 +483,8 @@ static void cancel_all_waiters(cmcp_client_t *c) {
 static void *reader_main(void *arg) {
     cmcp_client_t *c = (cmcp_client_t *)arg;
     for (;;) {
-        if (c->shutting_down) return NULL;
+        if (atomic_load_explicit(&c->shutting_down, memory_order_relaxed))
+            return NULL;
         char *frame = NULL; size_t flen = 0;
         int rc = cmcp_transport_read(c->transport, &frame, &flen);
         if (rc != CMCP_OK) {
@@ -485,10 +492,15 @@ static void *reader_main(void *arg) {
             /* Transport is dead. If we're not already shutting down
              * (peer crashed, EOF, etc.) wake every pending waiter
              * before exiting so they don't block forever. */
-            if (!c->shutting_down) cancel_all_waiters(c);
+            if (!atomic_load_explicit(&c->shutting_down,
+                                       memory_order_relaxed))
+                cancel_all_waiters(c);
             return NULL;     /* EIO / EOF / signal-interrupted shutdown */
         }
-        if (c->shutting_down) { free(frame); return NULL; }
+        if (atomic_load_explicit(&c->shutting_down, memory_order_relaxed)) {
+            free(frame);
+            return NULL;
+        }
         cmcp_rpc_message_t *msgs = NULL; size_t n = 0;
         int prc = cmcp_rpc_parse(frame, flen, &msgs, &n);
         free(frame);
@@ -568,7 +580,7 @@ cmcp_client_t *cmcp_client_new(const char *name, const char *version) {
 void cmcp_client_free(cmcp_client_t *c) {
     if (!c) return;
 
-    c->shutting_down = 1;
+    atomic_store_explicit(&c->shutting_down, 1, memory_order_relaxed);
 
     /* Wake the reader and join. Two complementary mechanisms:
      *

@@ -50,6 +50,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -424,7 +425,11 @@ typedef struct http_impl {
 
     pthread_t          acceptor;
     int                acceptor_started;
-    volatile int       shutting_down;
+    /* Atomic flag — read from the per-SSE-connection holder threads
+     * without our mutex (line 487 below), so it needs real cross-
+     * thread visibility, not just the volatile compiler hint. The
+     * mutex-guarded read sites use atomic_load too for consistency. */
+    atomic_int         shutting_down;
 
     /* Single-session state. session_id is empty until the first
      * `initialize` POST mints it. After that, all requests must
@@ -476,14 +481,18 @@ static void wake_init(void) {
 
 static void *sse_holder_main(void *arg) {
     sse_conn_t *c = (sse_conn_t *)arg;
+    /* Self-detach: the acceptor used to detach us via pthread_detach
+     * after pthread_create returned, but that races with a short-lived
+     * holder that exits + frees `c` before the acceptor's detach call
+     * runs (TSan-correctly flagged the UAF on c->thread). Self-detach
+     * eliminates the race — we own the lifetime decision. */
+    pthread_detach(pthread_self());
     /* Hold the connection open until either:
      *   - the client disconnects (recv returns 0/error)
-     *   - the transport shuts down (close fd or signal)
-     *
-     * Phase 2.4 will replace the loop body with "drain notification
-     * queue; SSE-emit each frame." For 2.1 we just block on poll. */
+     *   - the transport shuts down (close fd or signal) */
     for (;;) {
-        if (c->owner->shutting_down) break;
+        if (atomic_load_explicit(&c->owner->shutting_down,
+                                  memory_order_relaxed)) break;
         struct pollfd p = { c->fd, POLLIN, 0 };
         int rv = poll(&p, 1, HTTP_ACCEPT_POLL_MS);
         if (rv < 0) {
@@ -596,10 +605,11 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
      * Wait for both to be clear before pushing a new request. */
     pthread_mutex_lock(&impl->slot_mu);
     while ((impl->req_present || impl->resp_present) &&
-            !impl->shutting_down) {
+            !atomic_load_explicit(&impl->shutting_down,
+                                   memory_order_relaxed)) {
         pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
     }
-    if (impl->shutting_down) {
+    if (atomic_load_explicit(&impl->shutting_down, memory_order_relaxed)) {
         pthread_mutex_unlock(&impl->slot_mu);
         reply_error(fd, 503, "Service Unavailable", "shutting down\n");
         return;
@@ -622,7 +632,9 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
      * Wait until server.c consumes the request (so we don't race the
      * close+free path) and then return 202. */
     if (kind.is_notif || !kind.is_request) {
-        while (impl->req_present && !impl->shutting_down) {
+        while (impl->req_present &&
+               !atomic_load_explicit(&impl->shutting_down,
+                                      memory_order_relaxed)) {
             pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
         }
         pthread_mutex_unlock(&impl->slot_mu);
@@ -632,7 +644,9 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     }
 
     /* Wait for the response. */
-    while (!impl->resp_present && !impl->shutting_down) {
+    while (!impl->resp_present &&
+           !atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) {
         pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
     }
     if (!impl->resp_present) {
@@ -699,9 +713,10 @@ static void handle_get_sse(http_impl_t *impl, int fd, http_request_t *req) {
         pthread_mutex_unlock(&impl->sse_mu);
         close(c->fd);
         free(c);
-    } else {
-        pthread_detach(c->thread);
     }
+    /* On success: holder thread detaches itself in sse_holder_main —
+     * detaching here would race with a short-lived holder that has
+     * already exited and freed c. */
 }
 
 /* Validate the MCP-Protocol-Version header (2025-06-18 transports
@@ -771,7 +786,8 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
 
 static void *acceptor_main(void *arg) {
     http_impl_t *impl = (http_impl_t *)arg;
-    while (!impl->shutting_down) {
+    while (!atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) {
         struct pollfd p = { impl->listen_fd, POLLIN, 0 };
         int rv = poll(&p, 1, HTTP_ACCEPT_POLL_MS);
         if (rv < 0) {
@@ -807,10 +823,14 @@ static void release_pending_failure(http_impl_t *impl) {
 static int http_read_fn(cmcp_transport_t *t, char **out_buf, size_t *out_len) {
     http_impl_t *impl = (http_impl_t *)t->impl;
     pthread_mutex_lock(&impl->slot_mu);
-    while (!impl->req_present && !impl->shutting_down) {
+    while (!impl->req_present &&
+           !atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) {
         pthread_cond_wait(&impl->read_cv, &impl->slot_mu);
     }
-    if (impl->shutting_down && !impl->req_present) {
+    if (atomic_load_explicit(&impl->shutting_down,
+                              memory_order_relaxed) &&
+        !impl->req_present) {
         pthread_mutex_unlock(&impl->slot_mu);
         return CMCP_EIO;
     }
@@ -923,22 +943,48 @@ static int http_write_fn(cmcp_transport_t *t, const char *buf, size_t len) {
     return CMCP_OK;
 }
 
+/* Wake without freeing: signals shutting_down + broadcasts every cv a
+ * server thread (or POST handler) might be parked on. After this returns
+ * the host MUST pthread_join its server thread before calling close_fn —
+ * otherwise close_fn destroys the slot mutex while the server is still
+ * unwinding through cond_wait. The vtable convention is the same as the
+ * HTTP client transport: wake_fn is the signal, close_fn is the
+ * destructor; closing without a prior wake works (acceptor's release
+ * fires the cvs as it dies) but only if the host has already joined. */
+static void http_wake_fn(cmcp_transport_t *t) {
+    if (!t) return;
+    http_impl_t *impl = (http_impl_t *)t->impl;
+    if (!impl) return;
+    atomic_store_explicit(&impl->shutting_down, 1, memory_order_relaxed);
+    pthread_mutex_lock(&impl->slot_mu);
+    pthread_cond_broadcast(&impl->read_cv);
+    pthread_cond_broadcast(&impl->write_cv);
+    pthread_mutex_unlock(&impl->slot_mu);
+}
+
 static void http_close_fn(cmcp_transport_t *t) {
     if (!t) return;
     http_impl_t *impl = (http_impl_t *)t->impl;
     if (impl) {
-        impl->shutting_down = 1;
+        atomic_store_explicit(&impl->shutting_down, 1,
+                               memory_order_relaxed);
 
-        /* Unblock the acceptor thread; closing the listen fd makes
-         * accept/poll return immediately. */
+        /* Unblock the acceptor's poll() via SHUT_RDWR on the listen
+         * socket, then JOIN before clearing listen_fd — otherwise the
+         * acceptor and the close race on the same int (TSan-correctly
+         * flagged the write-vs-read on listen_fd). The fd itself stays
+         * open until after the join so the acceptor sees a stable
+         * value in its last loop iteration. */
         if (impl->listen_fd >= 0) {
             shutdown(impl->listen_fd, SHUT_RDWR);
-            close(impl->listen_fd);
-            impl->listen_fd = -1;
         }
         if (impl->acceptor_started) {
             pthread_join(impl->acceptor, NULL);
             impl->acceptor_started = 0;
+        }
+        if (impl->listen_fd >= 0) {
+            close(impl->listen_fd);
+            impl->listen_fd = -1;
         }
         /* Tell SSE holders to exit; close their sockets so poll wakes. */
         pthread_mutex_lock(&impl->sse_mu);
@@ -1022,6 +1068,7 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
     t->read_fn  = http_read_fn;
     t->write_fn = http_write_fn;
     t->close_fn = http_close_fn;
+    t->wake_fn  = http_wake_fn;
 
     if (pthread_create(&impl->acceptor, NULL, acceptor_main, impl) != 0) {
         pthread_mutex_destroy(&impl->slot_mu);
