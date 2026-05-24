@@ -1,0 +1,5 @@
+POST /mcp HTTP/1.1
+Host: localhost
+Content-Type: application/json
+Content-Length: 0
+

@@ -1,0 +1,5 @@
+POST /mcp HTTP/1.1
+Mcp-Session-Id: abc-123
+Content-Length: 4
+
+body

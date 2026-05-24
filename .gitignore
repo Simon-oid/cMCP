@@ -23,6 +23,21 @@ conformance/client_vs_ts
 conformance/node_modules/
 conformance/package-lock.json
 
+# Fuzz harnesses: the *.c sources and the hand-written seed_* corpus
+# entries ARE tracked. Binaries, crash artifacts, and the random
+# coverage-driven entries libFuzzer appends to corpus_* during a run
+# are not — only the curated seeds belong in git.
+fuzz/fuzz_json
+fuzz/fuzz_rpc
+fuzz/fuzz_schema
+fuzz/fuzz_http
+fuzz/artifacts_*/
+fuzz/crash-*
+fuzz/timeout-*
+fuzz/leak-*
+fuzz/corpus_*/*
+!fuzz/corpus_*/seed_*
+
 # Editor / tool state
 .claude/
 

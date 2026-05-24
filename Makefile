@@ -12,6 +12,7 @@ LDLIBS  ?= $(CURL_LIBS) -lpthread
 # --- Source partitioning into three link targets ---------------------------
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.
 CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c \
+                     src/http_parser.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
 SERVER_CANDIDATES := src/server.c src/worker.c
@@ -166,12 +167,73 @@ test-tsan:
 	$(MAKE) --no-print-directory test CFLAGS="$(TSAN_CFLAGS)" \
 	    TSAN_OPTIONS="$(TSAN_OPTS)"
 
+# --- libFuzzer harnesses (Tier-5 axis 5.4) --------------------------------
+# Each harness in fuzz/fuzz_*.c is a tiny LLVMFuzzerTestOneInput wrapper
+# around one parser entry point. libFuzzer is clang-only (gcc has no
+# -fsanitize=fuzzer), so these targets pin CC to clang. The build is
+# self-contained — we don't link against the static libs to keep the
+# instrumentation uniform across every translation unit the harness
+# touches, and to avoid sanitizer ABI mismatches.
+#
+# Run a single 60-second smoke (catches most low-hanging bugs):
+#   make fuzz-json && ./fuzz/fuzz_json fuzz/corpus_json -max_total_time=60
+# Run a 24-hour baseline (the cadence the agentic-readiness plan calls for):
+#   ./fuzz/fuzz_json fuzz/corpus_json -max_total_time=86400 \
+#       -print_final_stats=1 -artifact_prefix=fuzz/artifacts_json/
+# Reproduce a crash:
+#   ./fuzz/fuzz_json fuzz/artifacts_json/crash-<hash>
+FUZZ_CC      := clang
+FUZZ_CFLAGS  := -std=c11 -Wall -Wextra -O1 -g -Iinclude \
+                -fno-omit-frame-pointer \
+                -fsanitize=address,undefined,fuzzer \
+                -fno-sanitize-recover=all
+
+FUZZ_BINS    := fuzz/fuzz_json fuzz/fuzz_rpc fuzz/fuzz_schema fuzz/fuzz_http
+
+# Each harness compiles the matching parser source directly + any
+# dependencies. Keeping the dep lists explicit beats wildcarding the
+# whole src/ tree — the harness is meant to fuzz one parser at a time,
+# not the whole transport stack.
+FUZZ_JSON_SRC   := src/json.c
+FUZZ_RPC_SRC    := src/json.c src/rpc.c src/types.c
+FUZZ_SCHEMA_SRC := src/json.c src/schema.c
+FUZZ_HTTP_SRC   := src/http_parser.c
+
+fuzz/fuzz_json: fuzz/fuzz_json.c $(FUZZ_JSON_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_rpc: fuzz/fuzz_rpc.c $(FUZZ_RPC_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_schema: fuzz/fuzz_schema.c $(FUZZ_SCHEMA_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_http: fuzz/fuzz_http.c $(FUZZ_HTTP_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz-build: $(FUZZ_BINS)
+
+# Quick smoke: 60s per harness with the checked-in seed corpus. Meant
+# for "did I just regress the parser?", not for finding new bugs.
+fuzz-smoke: $(FUZZ_BINS)
+	@for h in $(FUZZ_BINS); do \
+	    corpus=fuzz/corpus_$${h##*/fuzz_}; \
+	    echo "=== fuzz-smoke $$h (60s) ==="; \
+	    ./$$h $$corpus -max_total_time=60 -print_final_stats=0 || exit 1; \
+	done
+
 clean:
 	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
+	      $(FUZZ_BINS) \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o
 
-.PHONY: all test valgrind test-asan test-tsan clean crag-mcp conformance
+.PHONY: all test valgrind test-asan test-tsan fuzz-build fuzz-smoke \
+        clean crag-mcp conformance
