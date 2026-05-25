@@ -419,6 +419,80 @@ static void test_description_field_roundtrip(void) {
     }
 }
 
+/* Sub-capability flags introduced by MCP 2025-11-25 (SEP-1036 elicitation
+ * form/url; SEP-1577 sampling.tools). Client emits the new sub-objects;
+ * server parser captures them. Backward-compat: a peer that advertises
+ * just `elicitation: {}` keeps producing the flat boolean, no sub-flags. */
+static void test_subcap_wire_roundtrip(void) {
+    /* (a) Client opts into all sub-caps → server sees each sub-flag. */
+    {
+        transport_pair_t p;
+        TEST_ASSERT(make_pair(&p) == 0);
+        cmcp_server_t *srv = cmcp_server_new("subcap-srv", "0.1.0");
+        server_arg_t sa = { srv, p.server_t, 0 };
+        pthread_t th;
+        TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
+
+        cmcp_client_t *cli = cmcp_client_new("subcap-cli", "0.0.1");
+        cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+            .sampling         = 1,
+            .sampling_tools   = 1,
+            .elicitation      = 1,
+            .elicitation_form = 1,
+            .elicitation_url  = 1,
+        });
+        TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+        cmcp_client_free(cli);
+        cmcp_transport_close(p.client_t);
+        pthread_join(th, NULL);
+
+        const cmcp_client_capabilities_t *seen = cmcp_server_client_caps(srv);
+        TEST_ASSERT(seen != NULL);
+        TEST_ASSERT(seen->sampling         == 1);
+        TEST_ASSERT(seen->sampling_tools   == 1);
+        TEST_ASSERT(seen->elicitation      == 1);
+        TEST_ASSERT(seen->elicitation_form == 1);
+        TEST_ASSERT(seen->elicitation_url  == 1);
+
+        cmcp_server_free(srv);
+        cmcp_transport_close(p.server_t);
+    }
+
+    /* (b) Client sets only the flat caps → server sees the parent flags
+     * but no sub-flags (backward-compat with hosts speaking the legacy
+     * "elicitation: {}" / "sampling: {}" shape). */
+    {
+        transport_pair_t p;
+        TEST_ASSERT(make_pair(&p) == 0);
+        cmcp_server_t *srv = cmcp_server_new("plain-srv", "0.1.0");
+        server_arg_t sa = { srv, p.server_t, 0 };
+        pthread_t th;
+        TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
+
+        cmcp_client_t *cli = cmcp_client_new("plain-cli", "0.0.1");
+        cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+            .sampling    = 1,
+            .elicitation = 1,
+        });
+        TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+        cmcp_client_free(cli);
+        cmcp_transport_close(p.client_t);
+        pthread_join(th, NULL);
+
+        const cmcp_client_capabilities_t *seen = cmcp_server_client_caps(srv);
+        TEST_ASSERT(seen->sampling         == 1);
+        TEST_ASSERT(seen->sampling_tools   == 0);
+        TEST_ASSERT(seen->elicitation      == 1);
+        TEST_ASSERT(seen->elicitation_form == 0);
+        TEST_ASSERT(seen->elicitation_url  == 0);
+
+        cmcp_server_free(srv);
+        cmcp_transport_close(p.server_t);
+    }
+}
+
 /* ====================================================================== */
 
 int main(void) {
@@ -432,6 +506,7 @@ int main(void) {
     TEST_RUN(test_unknown_method_after_init);
     TEST_RUN(test_notification_dropped_silently);
     TEST_RUN(test_description_field_roundtrip);
+    TEST_RUN(test_subcap_wire_roundtrip);
 
     TEST_DONE();
 }

@@ -86,6 +86,47 @@ an out-of-window id (999) yields headers only, no events. Existing
 HTTP-SSE notification test still passes — the new id-bearing wire
 shape is backward-compatible with consumers that ignore `id:`.
 
+### 6.1.3 optional 2025-11-25 capabilities — icons, URL elicitation, cap sub-flags
+
+Three orthogonal extension surfaces from the new spec revision, all
+opt-in and all backward-compatible.
+
+**Icons on tools / resources / prompts (SEP-973).** Optional `icons`
+field on `cmcp_tool_t`, `cmcp_resource_t`, `cmcp_prompt_t` —
+caller-owned JSON-text array of `{src, mimeType?, sizes?}` objects per
+spec. Parsed eagerly at registration (`cmcp_server_add_*`) and
+emitted verbatim in the corresponding `*/list` descriptor. Bad JSON
+or non-array shape → CMCP_EPARSE at registration; absent → field
+omitted on the wire (no `"icons": null`).
+
+**URL-mode elicitation (SEP-1036).** New
+`cmcp_handler_elicit_url(hctx, message, url, &out)` sends an
+`elicitation/create` with `{message, mode: "url", url}` shape
+instead of `requestedSchema`. The existing `cmcp_handler_elicit`
+(form mode) is unchanged. URL helper is cap-gated by the new
+`elicitation.url` sub-flag — a peer that advertises only the legacy
+flat `elicitation: {}` is treated as form-only for safety, since a
+URL redirect is a meaningfully different trust ask than a schema
+form.
+
+**Sub-capability flags (SEP-1036 + SEP-1577).**
+`cmcp_client_capabilities_t` grows three boolean fields:
+`sampling_tools`, `elicitation_form`, `elicitation_url`. When set,
+the client emits the corresponding sub-objects
+(`sampling: {tools: {}}`, `elicitation: {form: {}, url: {}}`). When
+unset, the legacy flat `{}` shape is preserved — existing hosts that
+just toggle `.elicitation = 1` keep advertising what they used to.
+The server parser reads the sub-flags into `cmcp_server_client_caps(s)`
+so `cmcp_handler_elicit_url` can cap-gate against them.
+
+Three follow-ups deliberately deferred (no consumer in sight; see
+TODO 6.1.3 for the per-item reasoning): EnumSchema single/multi-select
+(Major 5) and elicitation primitive default-values (Minor 9) fold into
+the 6.7 schema audit; sampling `tools`/`toolChoice` request fields
+(Major 7) need a server-side tool-descriptor declaration hook out of
+scope for this sub-axis (the cap flag is wired so a future axis can
+light it up without re-handshaking).
+
 ### Tests
 
 - `test_schema` integration assertions over the wire: schema
@@ -98,6 +139,17 @@ shape is backward-compatible with consumers that ignore `id:`.
   of `cmcp_*_set_description`.
 - Test literals advance `2025-06-18` → `2025-11-25` in
   `test_json.c`, `test_rpc.c`, fixtures.
+- `test_subcap_wire_roundtrip` (test_lifecycle): both-on +
+  flat-only sub-cap round-trips.
+- `test_emit_url_roundtrip` + `test_emit_url_without_url_subcap`
+  (test_elicitation): server tool calls
+  `cmcp_handler_elicit_url`; host sees `mode: "url"` + `url`
+  fields and responds; gating returns CMCP_EUNSUPPORTED when the
+  peer didn't opt into the `elicitation.url` sub-cap.
+- `test_icons_emitted_on_tools_list` +
+  `test_icons_register_rejects_bad_shape` (test_tools):
+  registered `icons` JSON survives round-trip through
+  `tools/list`; malformed JSON / non-array shape rejected.
 
 ### Fixtures
 

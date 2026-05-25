@@ -235,10 +235,21 @@ static cmcp_json_t *client_caps_to_json(const cmcp_client_t *cli) {
     cmcp_json_t *root = cmcp_json_new_object();
     if (!root) return NULL;
     if (c->sampling) {
-        cmcp_json_object_set(root, "sampling", cmcp_json_new_object());
+        cmcp_json_t *s = cmcp_json_new_object();
+        if (c->sampling_tools) {
+            cmcp_json_object_set(s, "tools", cmcp_json_new_object());
+        }
+        cmcp_json_object_set(root, "sampling", s);
     }
     if (c->elicitation) {
-        cmcp_json_object_set(root, "elicitation", cmcp_json_new_object());
+        cmcp_json_t *e = cmcp_json_new_object();
+        if (c->elicitation_form) {
+            cmcp_json_object_set(e, "form", cmcp_json_new_object());
+        }
+        if (c->elicitation_url) {
+            cmcp_json_object_set(e, "url", cmcp_json_new_object());
+        }
+        cmcp_json_object_set(root, "elicitation", e);
     }
     if (cli->roots_set || c->roots_list_changed) {
         cmcp_json_t *roots = cmcp_json_new_object();

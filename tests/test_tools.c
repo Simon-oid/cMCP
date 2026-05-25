@@ -491,6 +491,74 @@ static void test_many_tools_registered(void) {
     cmcp_transport_close(p.server_t);
 }
 
+/* Icons (MCP 2025-11-25 SEP-973). Optional `icons` JSON-text array on
+ * the registration struct passes through tools/list verbatim. Malformed
+ * JSON (or non-array shape) is rejected at registration time. */
+static void test_icons_emitted_on_tools_list(void) {
+    cmcp_server_t *srv = cmcp_server_new("icon-srv", "0.1.0");
+    const char *iconsjson =
+        "[{\"src\":\"data:image/png;base64,iVBORw0KG\",\"mimeType\":\"image/png\"}]";
+    TEST_ASSERT(cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "iconed", .handler = echo_handler, .icons = iconsjson,
+    }) == CMCP_OK);
+    /* A tool without icons must not emit the field at all. */
+    TEST_ASSERT(cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "plain",  .handler = echo_handler,
+    }) == CMCP_OK);
+
+    transport_pair_t p;
+    TEST_ASSERT(make_pair(&p) == 0);
+    server_arg_t sa = { srv, p.server_t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sa);
+
+    cmcp_client_t *cli = cmcp_client_new("c", "0");
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+    cmcp_rpc_message_t resp;
+    TEST_ASSERT(cmcp_client_request(cli, "tools/list", NULL, &resp) == CMCP_OK);
+    const cmcp_json_t *arr = cmcp_json_object_get(resp.result, "tools");
+    TEST_ASSERT(cmcp_json_array_len(arr) == 2);
+
+    int saw_iconed = 0, saw_plain = 0;
+    for (size_t i = 0; i < arr->arr.len; i++) {
+        const cmcp_json_t *t = arr->arr.items[i];
+        const cmcp_json_t *n = cmcp_json_object_get(t, "name");
+        if (!n || strcmp(n->str.s, "iconed") == 0) {
+            saw_iconed = 1;
+            const cmcp_json_t *ic = cmcp_json_object_get(t, "icons");
+            TEST_ASSERT(ic && ic->type == CMCP_JSON_ARRAY);
+            TEST_ASSERT(ic->arr.len == 1);
+            const cmcp_json_t *mt = cmcp_json_object_get(ic->arr.items[0], "mimeType");
+            TEST_ASSERT(mt && mt->type == CMCP_JSON_STRING &&
+                        strcmp(mt->str.s, "image/png") == 0);
+        } else if (strcmp(n->str.s, "plain") == 0) {
+            saw_plain = 1;
+            TEST_ASSERT(cmcp_json_object_get(t, "icons") == NULL);
+        }
+    }
+    TEST_ASSERT(saw_iconed && saw_plain);
+    cmcp_rpc_message_clear(&resp);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(th, NULL);
+    cmcp_server_free(srv);
+    cmcp_transport_close(p.server_t);
+}
+
+static void test_icons_register_rejects_bad_shape(void) {
+    cmcp_server_t *srv = cmcp_server_new("bad-icons", "0.1.0");
+    /* Not JSON. */
+    TEST_ASSERT(cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "t1", .handler = echo_handler, .icons = "not json",
+    }) == CMCP_EPARSE);
+    /* Valid JSON but not an array. */
+    TEST_ASSERT(cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "t2", .handler = echo_handler, .icons = "{\"src\":\"x\"}",
+    }) == CMCP_EPARSE);
+    cmcp_server_free(srv);
+}
+
 /* ====================================================================== */
 
 int main(void) {
@@ -505,6 +573,8 @@ int main(void) {
     TEST_RUN(test_tools_call_handler_internal_error);
     TEST_RUN(test_no_tools_empty_list);
     TEST_RUN(test_many_tools_registered);
+    TEST_RUN(test_icons_emitted_on_tools_list);
+    TEST_RUN(test_icons_register_rejects_bad_shape);
 
     TEST_DONE();
 }

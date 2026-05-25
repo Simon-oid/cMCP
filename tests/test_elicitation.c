@@ -670,6 +670,187 @@ static void test_emit_without_peer_cap(void) {
 }
 
 /* ====================================================================== */
+/* URL-mode elicitation (MCP 2025-11-25 SEP-1036)                          */
+/* ====================================================================== */
+
+/* A tool whose handler asks the host to send the user to a URL. Mirrors
+ * confirm_tool's shape but uses cmcp_handler_elicit_url. */
+static int url_tool(const cmcp_json_t *arguments, void *userdata,
+                     cmcp_handler_ctx_t *hctx,
+                     cmcp_json_t **out_content, int *out_is_error) {
+    (void)arguments; (void)userdata;
+    cmcp_json_t *result = NULL;
+    int rc = cmcp_handler_elicit_url(hctx, "Please authorize",
+                                      "https://example.com/consent",
+                                      &result);
+    if (rc != CMCP_OK) {
+        *out_is_error = 1;
+        *out_content  = cmcp_tool_text_content(
+            rc == CMCP_EUNSUPPORTED ? "url-cap missing" : "url-elicit failed");
+        return CMCP_OK;
+    }
+    const cmcp_json_t *act = cmcp_json_object_get(result, "action");
+    const char *action_s = (act && act->type == CMCP_JSON_STRING)
+                            ? act->str.s : "?";
+    char buf[64];
+    snprintf(buf, sizeof buf, "url-action=%s", action_s);
+    *out_content  = cmcp_tool_text_content(buf);
+    *out_is_error = 0;
+    cmcp_json_free(result);
+    return CMCP_OK;
+}
+
+/* Host-side URL elicitation handler. Captures whether the params carried
+ * the URL-mode shape (mode=="url" + url field present). */
+typedef struct {
+    int             saw_mode_url;
+    int             saw_url;
+    pthread_mutex_t mu;
+} url_capture_t;
+
+static int host_url_accept(const cmcp_json_t *params, void *userdata,
+                            cmcp_json_t **out_result) {
+    url_capture_t *cap = (url_capture_t *)userdata;
+    pthread_mutex_lock(&cap->mu);
+    if (params && params->type == CMCP_JSON_OBJECT) {
+        const cmcp_json_t *m = cmcp_json_object_get(params, "mode");
+        const cmcp_json_t *u = cmcp_json_object_get(params, "url");
+        cap->saw_mode_url = (m && m->type == CMCP_JSON_STRING &&
+                             strcmp(m->str.s, "url") == 0);
+        cap->saw_url      = (u && u->type == CMCP_JSON_STRING &&
+                             strcmp(u->str.s, "https://example.com/consent") == 0);
+    }
+    pthread_mutex_unlock(&cap->mu);
+    /* No content payload on a URL-mode accept — the redirect *is* the
+     * payload; the spec leaves "what the user did at the URL" to the
+     * server's followup. */
+    *out_result = cmcp_elicitation_result("accept", NULL);
+    if (!*out_result) {
+        /* Fallback: helper rejects "accept" without content — wrap an
+         * empty object so the helper accepts the tuple. */
+        *out_result = cmcp_elicitation_result("accept", cmcp_json_new_object());
+    }
+    return *out_result ? CMCP_OK : CMCP_ENOMEM;
+}
+
+static void test_emit_url_roundtrip(void) {
+    transport_pair_t p = {0};
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    url_capture_t cap = { .saw_mode_url = 0, .saw_url = 0 };
+    pthread_mutex_init(&cap.mu, NULL);
+
+    cmcp_server_t *srv = cmcp_server_new("url-srv", "0.1.0");
+    cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "authorize",
+        .description = "URL-mode elicitation demo.",
+        .handler = url_tool,
+    });
+
+    server_run_arg_t sa = { srv, p.server_t };
+    pthread_t srv_th;
+    pthread_create(&srv_th, NULL, server_run_thread, &sa);
+
+    cmcp_client_t *cli = cmcp_client_new("host", "0.0.1");
+    cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+        .elicitation     = 1,
+        .elicitation_url = 1,
+    });
+    cmcp_client_set_elicitation_handler(cli, host_url_accept, &cap);
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "name", cmcp_json_new_string("authorize"));
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    TEST_ASSERT(cmcp_client_request(cli, "tools/call", params, &resp) == CMCP_OK);
+    TEST_ASSERT(resp.error == NULL);
+    if (resp.result) {
+        const cmcp_json_t *content = cmcp_json_object_get(resp.result, "content");
+        TEST_ASSERT(content && content->arr.len > 0);
+        if (content && content->arr.len > 0) {
+            const cmcp_json_t *txt = cmcp_json_object_get(
+                content->arr.items[0], "text");
+            TEST_ASSERT(txt && strcmp(txt->str.s, "url-action=accept") == 0);
+        }
+    }
+    cmcp_rpc_message_clear(&resp);
+
+    pthread_mutex_lock(&cap.mu);
+    TEST_ASSERT(cap.saw_mode_url == 1);
+    TEST_ASSERT(cap.saw_url      == 1);
+    pthread_mutex_unlock(&cap.mu);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(srv_th, NULL);
+    cmcp_transport_close(p.server_t);
+    cmcp_server_free(srv);
+    pthread_mutex_destroy(&cap.mu);
+}
+
+static void test_emit_url_without_url_subcap(void) {
+    /* Host advertises elicitation (form-only — no url sub-cap). Server's
+     * URL helper short-circuits with CMCP_EUNSUPPORTED; tool reports
+     * "url-cap missing" via isError. The host's elicitation handler is
+     * never invoked. */
+    transport_pair_t p = {0};
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    url_capture_t cap = { .saw_mode_url = 0, .saw_url = 0 };
+    pthread_mutex_init(&cap.mu, NULL);
+
+    cmcp_server_t *srv = cmcp_server_new("url-srv", "0.1.0");
+    cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "authorize",
+        .handler = url_tool,
+    });
+
+    server_run_arg_t sa = { srv, p.server_t };
+    pthread_t srv_th;
+    pthread_create(&srv_th, NULL, server_run_thread, &sa);
+
+    cmcp_client_t *cli = cmcp_client_new("host", "0.0.1");
+    /* form-only opt-in — no elicitation_url */
+    cmcp_client_set_capabilities(cli, &(cmcp_client_capabilities_t){
+        .elicitation      = 1,
+        .elicitation_form = 1,
+    });
+    cmcp_client_set_elicitation_handler(cli, host_url_accept, &cap);
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    cmcp_json_object_set(params, "name", cmcp_json_new_string("authorize"));
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    TEST_ASSERT(cmcp_client_request(cli, "tools/call", params, &resp) == CMCP_OK);
+    TEST_ASSERT(resp.error == NULL);
+    if (resp.result) {
+        const cmcp_json_t *err = cmcp_json_object_get(resp.result, "isError");
+        TEST_ASSERT(err && err->type == CMCP_JSON_BOOL && err->b == 1);
+        const cmcp_json_t *content = cmcp_json_object_get(resp.result, "content");
+        if (content && content->arr.len > 0) {
+            const cmcp_json_t *txt = cmcp_json_object_get(
+                content->arr.items[0], "text");
+            TEST_ASSERT(txt && strcmp(txt->str.s, "url-cap missing") == 0);
+        }
+    }
+    cmcp_rpc_message_clear(&resp);
+
+    pthread_mutex_lock(&cap.mu);
+    TEST_ASSERT(cap.saw_mode_url == 0);
+    TEST_ASSERT(cap.saw_url      == 0);
+    pthread_mutex_unlock(&cap.mu);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(srv_th, NULL);
+    cmcp_transport_close(p.server_t);
+    cmcp_server_free(srv);
+    pthread_mutex_destroy(&cap.mu);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_elicitation:\n");
@@ -681,6 +862,8 @@ int main(void) {
     TEST_RUN(test_emit_roundtrip_accept);
     TEST_RUN(test_emit_decline);
     TEST_RUN(test_emit_without_peer_cap);
+    TEST_RUN(test_emit_url_roundtrip);
+    TEST_RUN(test_emit_url_without_url_subcap);
 
     TEST_DONE();
 }

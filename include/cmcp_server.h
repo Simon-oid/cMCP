@@ -118,6 +118,11 @@ typedef struct {
      * error per spec ("server MUST provide structuredContent that
      * matches"). Independent of `input_schema`. */
     const char            *output_schema;
+    /* Optional icons (MCP 2025-11-25 SEP-973). JSON-text array of icon
+     * descriptors `[{src: string, mimeType?: string, sizes?: [string]}]`.
+     * Parsed eagerly at registration; echoed verbatim in tools/list.
+     * NULL → field omitted from the wire (backward-compat). */
+    const char            *icons;
     cmcp_tool_handler_fn   handler;         /* required */
     void                  *userdata;        /* opaque, kept verbatim */
 } cmcp_tool_t;
@@ -193,6 +198,9 @@ typedef struct {
                                           * use; `title` is what UIs show */
     const char            *description;  /* optional */
     const char            *mime_type;    /* optional, e.g. "text/plain" */
+    /* Optional icons (MCP 2025-11-25 SEP-973). Same shape as on tools —
+     * JSON-text array, parsed eagerly, echoed in resources/list. */
+    const char            *icons;
     cmcp_resource_read_fn  read;         /* required */
     void                  *userdata;
 } cmcp_resource_t;
@@ -242,6 +250,9 @@ typedef struct {
      * present at prompts/get time; full schema validation is the
      * handler's responsibility. */
     const char             *arguments;
+    /* Optional icons (MCP 2025-11-25 SEP-973). Same shape as on tools —
+     * JSON-text array, parsed eagerly, echoed in prompts/list. */
+    const char             *icons;
     cmcp_prompt_handler_fn  handler;      /* required */
     void                   *userdata;
 } cmcp_prompt_t;
@@ -416,5 +427,26 @@ int cmcp_handler_elicit(cmcp_handler_ctx_t *hctx,
                          const char *message,
                          cmcp_json_t *requested_schema,
                          cmcp_json_t **out_result);
+
+/* URL-mode elicitation (MCP 2025-11-25 SEP-1036). Instead of a JSON
+ * Schema, the server asks the host to send the user to `url` (e.g.
+ * an OAuth consent screen). The host's reply still has shape
+ * {"action": "accept"|"decline"|"cancel", "content"?: ...}.
+ *
+ *   `message`   Human-readable prompt explaining why the user should
+ *               open the URL (required).
+ *   `url`       Absolute URL the host should surface (required).
+ *   `out_result` OUT. Owned cmcp_json_t object. Caller frees via
+ *               cmcp_json_free.
+ *
+ * Cap-gated: returns CMCP_EUNSUPPORTED if the peer didn't advertise
+ * `elicitation.url` (MCP 2025-11-25 added the form/url sub-cap
+ * split — a peer that advertises plain `elicitation` without sub-caps
+ * is treated as form-only for safety, since URL-redirect elicitations
+ * are a meaningfully different trust ask). */
+int cmcp_handler_elicit_url(cmcp_handler_ctx_t *hctx,
+                             const char *message,
+                             const char *url,
+                             cmcp_json_t **out_result);
 
 #endif

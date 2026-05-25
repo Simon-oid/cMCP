@@ -315,9 +315,18 @@ sets one via `cmcp_handler_set_structured`. Both fields are deep-
 copied at registration time; the `output_schema` string is parsed
 eagerly so malformed JSON fails fast (`CMCP_EPARSE`).
 
-**Server → client requests.** `cmcp_handler_elicit` (Phase 4.4 emit)
-and any future server-initiated request goes through
-`cmcp_server_send_request`. The server maintains its own outgoing
+All three registration kinds also accept an optional `icons` field
+(MCP 2025-11-25 SEP-973) — a caller-owned JSON-text array of
+`{src, mimeType?, sizes?}` objects, eagerly parsed at registration
+time (malformed JSON or non-array shape → `CMCP_EPARSE`) and emitted
+verbatim in the corresponding `*/list` descriptor.
+
+**Server → client requests.** `cmcp_handler_elicit` (Phase 4.4 emit),
+`cmcp_handler_elicit_url` (Phase 6.1.3 — URL-mode elicitation per
+MCP 2025-11-25 SEP-1036), and any future server-initiated request go
+through `cmcp_server_send_request`. URL-mode elicitation is gated by
+the `elicitation.url` sub-cap; a peer that advertises only the
+legacy flat `elicitation: {}` is treated as form-only. The server maintains its own outgoing
 pending list (separate from the client-side one in `rpc.c` — they
 have opposite ID spaces) and the run-loop thread routes inbound
 `CMCP_MSG_RESPONSE` frames back to the parked worker by id. See

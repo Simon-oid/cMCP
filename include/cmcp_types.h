@@ -23,7 +23,15 @@ typedef struct {
 
 typedef struct {
     int sampling;                 /* sampling/createMessage */
+    int sampling_tools;           /* sampling.tools sub-cap (MCP 2025-11-25
+                                   * SEP-1577): host's model can invoke tools
+                                   * the server hands it during sampling */
     int elicitation;              /* elicitation/create */
+    int elicitation_form;         /* elicitation.form sub-cap (MCP 2025-11-25
+                                   * SEP-1036): host accepts schema-driven
+                                   * form elicitations (the legacy default) */
+    int elicitation_url;          /* elicitation.url sub-cap (SEP-1036): host
+                                   * accepts URL-redirect elicitations */
     int roots_list_changed;       /* roots/list_changed */
 } cmcp_client_capabilities_t;
 

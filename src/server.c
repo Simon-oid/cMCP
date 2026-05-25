@@ -38,6 +38,7 @@ typedef struct {
     char                 *description;
     cmcp_json_t          *input_schema;     /* may be NULL */
     cmcp_json_t          *output_schema;    /* may be NULL */
+    cmcp_json_t          *icons;            /* JSON array, may be NULL */
     cmcp_tool_handler_fn  handler;
     void                 *userdata;
 } server_tool_t;
@@ -48,6 +49,7 @@ typedef struct {
     char                  *title;            /* may be NULL */
     char                  *description;
     char                  *mime_type;
+    cmcp_json_t           *icons;            /* JSON array, may be NULL */
     cmcp_resource_read_fn  read;
     void                  *userdata;
 } server_resource_t;
@@ -57,6 +59,7 @@ typedef struct {
     char                   *title;          /* may be NULL */
     char                   *description;
     cmcp_json_t            *arguments;     /* JSON array, may be NULL */
+    cmcp_json_t            *icons;         /* JSON array, may be NULL */
     cmcp_prompt_handler_fn  handler;
     void                   *userdata;
 } server_prompt_t;
@@ -215,6 +218,7 @@ static void tool_clear(server_tool_t *t) {
     free(t->description);
     cmcp_json_free(t->input_schema);
     cmcp_json_free(t->output_schema);
+    cmcp_json_free(t->icons);
 }
 
 static void resource_clear(server_resource_t *r) {
@@ -223,6 +227,7 @@ static void resource_clear(server_resource_t *r) {
     free(r->title);
     free(r->description);
     free(r->mime_type);
+    cmcp_json_free(r->icons);
 }
 
 static void prompt_clear(server_prompt_t *p) {
@@ -230,6 +235,7 @@ static void prompt_clear(server_prompt_t *p) {
     free(p->title);
     free(p->description);
     cmcp_json_free(p->arguments);
+    cmcp_json_free(p->icons);
 }
 
 void cmcp_server_free(cmcp_server_t *s) {
@@ -328,6 +334,16 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
             return CMCP_EPARSE;
         }
     }
+    cmcp_json_t *icons = NULL;
+    if (tool->icons) {
+        icons = cmcp_json_parse(tool->icons, strlen(tool->icons));
+        if (!icons || icons->type != CMCP_JSON_ARRAY) {
+            cmcp_json_free(in_schema);
+            cmcp_json_free(out_schema);
+            cmcp_json_free(icons);
+            return CMCP_EPARSE;
+        }
+    }
 
     /* Grow the array if needed. */
     if (s->n_tools == s->cap_tools) {
@@ -336,6 +352,7 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
             s->tools, newcap * sizeof *nt);
         if (!nt) {
             cmcp_json_free(in_schema); cmcp_json_free(out_schema);
+            cmcp_json_free(icons);
             return CMCP_ENOMEM;
         }
         s->tools = nt;
@@ -349,6 +366,7 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
     t->description   = tool->description ? xstrdup(tool->description) : NULL;
     t->input_schema  = in_schema;
     t->output_schema = out_schema;
+    t->icons         = icons;
     t->handler       = tool->handler;
     t->userdata      = tool->userdata;
     if (!t->name ||
@@ -411,11 +429,20 @@ int cmcp_server_add_resource(cmcp_server_t *s, const cmcp_resource_t *r) {
     if (!s || !r || !r->uri || !r->name || !r->read) return CMCP_EINVAL;
     if (resource_find(s, r->uri)) return CMCP_EPROTOCOL;
 
+    cmcp_json_t *icons = NULL;
+    if (r->icons) {
+        icons = cmcp_json_parse(r->icons, strlen(r->icons));
+        if (!icons || icons->type != CMCP_JSON_ARRAY) {
+            cmcp_json_free(icons);
+            return CMCP_EPARSE;
+        }
+    }
+
     if (s->n_resources == s->cap_resources) {
         size_t newcap = s->cap_resources ? s->cap_resources * 2 : 4;
         server_resource_t *nr = (server_resource_t *)realloc(
             s->resources, newcap * sizeof *nr);
-        if (!nr) return CMCP_ENOMEM;
+        if (!nr) { cmcp_json_free(icons); return CMCP_ENOMEM; }
         s->resources = nr;
         s->cap_resources = newcap;
     }
@@ -427,6 +454,7 @@ int cmcp_server_add_resource(cmcp_server_t *s, const cmcp_resource_t *r) {
     e->title       = r->title       ? xstrdup(r->title)       : NULL;
     e->description = r->description ? xstrdup(r->description) : NULL;
     e->mime_type   = r->mime_type   ? xstrdup(r->mime_type)   : NULL;
+    e->icons       = icons;
     e->read        = r->read;
     e->userdata    = r->userdata;
     if (!e->uri || !e->name ||
@@ -482,12 +510,24 @@ int cmcp_server_add_prompt(cmcp_server_t *s, const cmcp_prompt_t *p) {
             return CMCP_EPARSE;
         }
     }
+    cmcp_json_t *icons = NULL;
+    if (p->icons) {
+        icons = cmcp_json_parse(p->icons, strlen(p->icons));
+        if (!icons || icons->type != CMCP_JSON_ARRAY) {
+            cmcp_json_free(args);
+            cmcp_json_free(icons);
+            return CMCP_EPARSE;
+        }
+    }
 
     if (s->n_prompts == s->cap_prompts) {
         size_t newcap = s->cap_prompts ? s->cap_prompts * 2 : 4;
         server_prompt_t *np = (server_prompt_t *)realloc(
             s->prompts, newcap * sizeof *np);
-        if (!np) { cmcp_json_free(args); return CMCP_ENOMEM; }
+        if (!np) {
+            cmcp_json_free(args); cmcp_json_free(icons);
+            return CMCP_ENOMEM;
+        }
         s->prompts = np;
         s->cap_prompts = newcap;
     }
@@ -498,6 +538,7 @@ int cmcp_server_add_prompt(cmcp_server_t *s, const cmcp_prompt_t *p) {
     e->title       = p->title       ? xstrdup(p->title)       : NULL;
     e->description = p->description ? xstrdup(p->description) : NULL;
     e->arguments   = args;
+    e->icons       = icons;
     e->handler     = p->handler;
     e->userdata    = p->userdata;
     if (!e->name ||
@@ -571,8 +612,24 @@ static void client_caps_from_json(const cmcp_json_t *o,
                                    cmcp_client_capabilities_t *out) {
     memset(out, 0, sizeof *out);
     if (!o || o->type != CMCP_JSON_OBJECT) return;
-    if (cmcp_json_object_get(o, "sampling"))    out->sampling    = 1;
-    if (cmcp_json_object_get(o, "elicitation")) out->elicitation = 1;
+    const cmcp_json_t *sampling = cmcp_json_object_get(o, "sampling");
+    if (sampling) {
+        out->sampling = 1;
+        if (sampling->type == CMCP_JSON_OBJECT) {
+            if (cmcp_json_object_get(sampling, "tools"))
+                out->sampling_tools = 1;
+        }
+    }
+    const cmcp_json_t *elicit = cmcp_json_object_get(o, "elicitation");
+    if (elicit) {
+        out->elicitation = 1;
+        if (elicit->type == CMCP_JSON_OBJECT) {
+            if (cmcp_json_object_get(elicit, "form"))
+                out->elicitation_form = 1;
+            if (cmcp_json_object_get(elicit, "url"))
+                out->elicitation_url = 1;
+        }
+    }
     const cmcp_json_t *roots = cmcp_json_object_get(o, "roots");
     if (roots && roots->type == CMCP_JSON_OBJECT) {
         const cmcp_json_t *lc = cmcp_json_object_get(roots, "listChanged");
@@ -687,6 +744,8 @@ static cmcp_json_t *tool_to_descriptor(const server_tool_t *t) {
     if (t->output_schema)
         cmcp_json_object_set(o, "outputSchema",
                               cmcp_json_clone(t->output_schema));
+    if (t->icons)
+        cmcp_json_object_set(o, "icons", cmcp_json_clone(t->icons));
     return o;
 }
 
@@ -1219,6 +1278,8 @@ static cmcp_json_t *resource_to_descriptor(const server_resource_t *r) {
     if (r->mime_type)
         cmcp_json_object_set(o, "mimeType",
                               cmcp_json_new_string(r->mime_type));
+    if (r->icons)
+        cmcp_json_object_set(o, "icons", cmcp_json_clone(r->icons));
     return o;
 }
 
@@ -1371,6 +1432,8 @@ static cmcp_json_t *prompt_to_descriptor(const server_prompt_t *p) {
                               cmcp_json_new_string(p->description));
     if (p->arguments)
         cmcp_json_object_set(o, "arguments", cmcp_json_clone(p->arguments));
+    if (p->icons)
+        cmcp_json_object_set(o, "icons", cmcp_json_clone(p->icons));
     return o;
 }
 
@@ -2055,6 +2118,40 @@ int cmcp_handler_elicit(cmcp_handler_ctx_t *hctx,
         return CMCP_EPROTOCOL;
     }
     /* Move the result out of the response shell. */
+    *out_result = resp.result;
+    resp.result = NULL;
+    cmcp_rpc_message_clear(&resp);
+    return CMCP_OK;
+}
+
+int cmcp_handler_elicit_url(cmcp_handler_ctx_t *hctx,
+                             const char *message,
+                             const char *url,
+                             cmcp_json_t **out_result) {
+    if (!hctx || !hctx->server || !message || !url || !out_result) {
+        return CMCP_EINVAL;
+    }
+    *out_result = NULL;
+
+    cmcp_server_t *s = hctx->server;
+    if (!s->peer_caps.elicitation_url) return CMCP_EUNSUPPORTED;
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "message", cmcp_json_new_string(message));
+    cmcp_json_object_set(params, "mode",    cmcp_json_new_string("url"));
+    cmcp_json_object_set(params, "url",     cmcp_json_new_string(url));
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_server_send_request(s, hctx, "elicitation/create",
+                                       params, &resp);
+    if (rc != CMCP_OK) return rc;
+
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
     *out_result = resp.result;
     resp.result = NULL;
     cmcp_rpc_message_clear(&resp);
