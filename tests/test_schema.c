@@ -532,8 +532,10 @@ static cmcp_json_t *call_args_object(const char *name, cmcp_json_t *arguments) {
 /* Integration: tools/call rejects bad args at the wire                    */
 /* ====================================================================== */
 
-/* Bad args (wrong type for `text`) → -32602 with structured data
- * carrying path/keyword/message. */
+/* Bad args (wrong type for `text`) → MCP 2025-11-25 returns
+ * `{isError: true, content: [text]}` (tool-execution error, not
+ * JSON-RPC error). The text content names the offending path and
+ * keyword so the model can self-correct. */
 static void test_tools_call_schema_violation(void) {
     transport_pair_t p;
     TEST_ASSERT(make_pair(&p) == 0);
@@ -562,13 +564,17 @@ static void test_tools_call_schema_violation(void) {
     TEST_ASSERT(cmcp_client_request(cli, "tools/call",
                                      call_args_object("echo", args),
                                      &resp) == CMCP_OK);
-    TEST_ASSERT(resp.error != NULL);
-    TEST_ASSERT(resp.error->code == CMCP_RPC_INVALID_PARAMS);
-    TEST_ASSERT(resp.error->data && resp.error->data->type == CMCP_JSON_OBJECT);
-    const cmcp_json_t *kw = cmcp_json_object_get(resp.error->data, "keyword");
-    const cmcp_json_t *pa = cmcp_json_object_get(resp.error->data, "path");
-    TEST_ASSERT(kw && strcmp(kw->str.s, "type") == 0);
-    TEST_ASSERT(pa && strcmp(pa->str.s, "/text") == 0);
+    TEST_ASSERT(resp.error == NULL);
+    TEST_ASSERT(resp.result != NULL && resp.result->type == CMCP_JSON_OBJECT);
+    const cmcp_json_t *is_err = cmcp_json_object_get(resp.result, "isError");
+    TEST_ASSERT(is_err && is_err->type == CMCP_JSON_BOOL && is_err->b == 1);
+    const cmcp_json_t *content = cmcp_json_object_get(resp.result, "content");
+    TEST_ASSERT(content && content->type == CMCP_JSON_ARRAY && content->arr.len == 1);
+    const cmcp_json_t *txt = cmcp_json_object_get(content->arr.items[0], "text");
+    TEST_ASSERT(txt && txt->type == CMCP_JSON_STRING);
+    /* The rendered message names the path + keyword so the model can fix it. */
+    TEST_ASSERT(strstr(txt->str.s, "/text")   != NULL);
+    TEST_ASSERT(strstr(txt->str.s, "type")    != NULL);
     cmcp_rpc_message_clear(&resp);
 
     cmcp_client_free(cli);
@@ -578,7 +584,9 @@ static void test_tools_call_schema_violation(void) {
     cmcp_transport_close(p.server_t);
 }
 
-/* No `arguments` at all when schema has required → -32602. */
+/* No `arguments` at all when schema has required → isError result
+ * (same wire shape as a type-violation; the model is expected to
+ * notice and supply the missing arg on retry). */
 static void test_tools_call_missing_arguments(void) {
     transport_pair_t p;
     TEST_ASSERT(make_pair(&p) == 0);
@@ -603,8 +611,9 @@ static void test_tools_call_missing_arguments(void) {
     TEST_ASSERT(cmcp_client_request(cli, "tools/call",
                                      call_args_object("echo", NULL),
                                      &resp) == CMCP_OK);
-    TEST_ASSERT(resp.error != NULL);
-    TEST_ASSERT(resp.error->code == CMCP_RPC_INVALID_PARAMS);
+    TEST_ASSERT(resp.error == NULL);
+    const cmcp_json_t *is_err = cmcp_json_object_get(resp.result, "isError");
+    TEST_ASSERT(is_err && is_err->type == CMCP_JSON_BOOL && is_err->b == 1);
     cmcp_rpc_message_clear(&resp);
 
     cmcp_client_free(cli);

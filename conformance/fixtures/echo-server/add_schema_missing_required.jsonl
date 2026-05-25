@@ -1,5 +1,5 @@
 {"t":1779652490.248816,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
 {"t":1779652490.248842,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
 {"t":1779652490.248846,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"add\",\"arguments\":{}}}"}
-{"t":1779652490.251729,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"tools\":{}},\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"echo-server\",\"version\":\"0.1.0\"}}}"}
-{"t":1779652490.251736,"dir":"out","frame":"{\"error\":{\"code\":-32602,\"data\":{\"keyword\":\"required\",\"message\":\"missing required property\",\"path\":\"/a\"},\"message\":\"arguments failed schema validation\"},\"id\":2,\"jsonrpc\":\"2.0\"}"}
+{"t":1779652490.249846,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"tools\":{}},\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"echo-server\",\"version\":\"0.1.0\"}}}"}
+{"t":1779652490.2508461,"dir":"out","frame":"{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"Invalid arguments for tool 'add': missing required property (path: /a, keyword: required)\",\"type\":\"text\"}],\"isError\":true}}"}

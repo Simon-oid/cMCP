@@ -342,6 +342,83 @@ static void test_notification_dropped_silently(void) {
     cmcp_transport_close(p.server_t);
 }
 
+/* Optional `description` on Implementation (MCP 2025-11-25 Minor 2).
+ * Both sides set a description before handshake; each side reads back
+ * the other's via the new getter. A second handshake with no
+ * description set proves the field is omitted (NULL on the read side)
+ * rather than echoed as an empty string. */
+static void test_description_field_roundtrip(void) {
+    /* (a) Both sides set descriptions → both sides see them. */
+    {
+        transport_pair_t p;
+        TEST_ASSERT(make_pair(&p) == 0);
+
+        cmcp_server_t *srv = cmcp_server_new("test-server", "0.1.0");
+        TEST_ASSERT(cmcp_server_set_description(srv,
+                        "MCP test server (cMCP unit test)") == CMCP_OK);
+
+        server_arg_t sa = { srv, p.server_t, 0 };
+        pthread_t th;
+        TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
+
+        cmcp_client_t *cli = cmcp_client_new("test-client", "0.0.1");
+        TEST_ASSERT(cmcp_client_set_description(cli,
+                        "cMCP unit test driver") == CMCP_OK);
+        TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+        const char *seen_srv = cmcp_client_server_description(cli);
+        TEST_ASSERT(seen_srv != NULL);
+        TEST_ASSERT(strcmp(seen_srv, "MCP test server (cMCP unit test)") == 0);
+
+        cmcp_client_free(cli);
+        cmcp_transport_close(p.client_t);
+        pthread_join(th, NULL);
+
+        const char *seen_cli = cmcp_server_client_description(srv);
+        TEST_ASSERT(seen_cli != NULL);
+        TEST_ASSERT(strcmp(seen_cli, "cMCP unit test driver") == 0);
+
+        cmcp_server_free(srv);
+        cmcp_transport_close(p.server_t);
+    }
+
+    /* (b) Neither side sets a description → both getters return NULL
+     * (the field was omitted on the wire, not echoed as ""). */
+    {
+        transport_pair_t p;
+        TEST_ASSERT(make_pair(&p) == 0);
+
+        cmcp_server_t *srv = cmcp_server_new("plain-server", "0.1.0");
+        server_arg_t sa = { srv, p.server_t, 0 };
+        pthread_t th;
+        TEST_ASSERT(pthread_create(&th, NULL, server_thread, &sa) == 0);
+
+        cmcp_client_t *cli = cmcp_client_new("plain-client", "0.0.1");
+        TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+        TEST_ASSERT(cmcp_client_server_description(cli) == NULL);
+
+        cmcp_client_free(cli);
+        cmcp_transport_close(p.client_t);
+        pthread_join(th, NULL);
+        TEST_ASSERT(cmcp_server_client_description(srv) == NULL);
+        cmcp_server_free(srv);
+        cmcp_transport_close(p.server_t);
+    }
+
+    /* (c) Setting to NULL clears a previously-set description. */
+    {
+        cmcp_server_t *srv = cmcp_server_new("clearable", "0.1.0");
+        TEST_ASSERT(cmcp_server_set_description(srv, "first") == CMCP_OK);
+        TEST_ASSERT(cmcp_server_set_description(srv, NULL) == CMCP_OK);
+        cmcp_server_free(srv);
+
+        cmcp_client_t *cli = cmcp_client_new("clearable-cli", "0.0.1");
+        TEST_ASSERT(cmcp_client_set_description(cli, "first") == CMCP_OK);
+        TEST_ASSERT(cmcp_client_set_description(cli, NULL) == CMCP_OK);
+        cmcp_client_free(cli);
+    }
+}
+
 /* ====================================================================== */
 
 int main(void) {
@@ -354,6 +431,7 @@ int main(void) {
     TEST_RUN(test_operate_before_initialized);
     TEST_RUN(test_unknown_method_after_init);
     TEST_RUN(test_notification_dropped_silently);
+    TEST_RUN(test_description_field_roundtrip);
 
     TEST_DONE();
 }

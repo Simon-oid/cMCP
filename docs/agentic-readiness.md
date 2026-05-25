@@ -44,7 +44,7 @@ place:
 - **Spec compliance.** All optional capabilities of MCP `2025-06-18`
   shipped: tools, resources, prompts, sampling, roots, elicitation,
   structured output + resource_link + title, logging, pagination,
-  cancel + progress.
+  cancel + progress. Pin advanced to `2025-11-25` in Tier 6.1.
 - **Real reference servers.** `filesystem-mcp` (bundled, no external
   deps; `fs_write` hardened against symlink-leaf sandbox escape after
   a Tier-5 playbook P0), `crag-mcp` (separate build, real workload),
@@ -74,9 +74,9 @@ place:
   any frame mismatch against the recorded `dir:"out"` frames, with
   per-fixture masks for legitimately variable fields.
 - **Spec-drift watch.** `scripts/check-spec-version.sh` + weekly
-  `spec-drift.yml` workflow. Currently firing: upstream cut
-  `2025-11-25` since the `2025-06-18` pin landed. Upgrade workflow
-  documented in `docs/spec-version-upgrade.md`.
+  `spec-drift.yml` workflow. Was firing against the `2025-11-25`
+  cut while the `2025-06-18` pin held; resolved by Tier 6.1.
+  Upgrade workflow documented in `docs/spec-version-upgrade.md`.
 
 What's *still* on the runtime/budget side, not engineering:
 
@@ -95,7 +95,7 @@ actions, and an acceptance criterion that defines "done."
 **Current state.** `make conformance` cross-checks against the
 pinned TS SDK at one moment in time. The protocol version is
 hardcoded in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION
-"2025-06-18"`).
+"2025-11-25"`, advanced in Tier 6.1 from `2025-06-18`).
 
 **Gap.** Conformance is one-shot — nothing alerts us when the MCP
 spec releases a new revision or when our local interpretation

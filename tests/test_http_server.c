@@ -472,7 +472,7 @@ static void test_get_sse_handshake(void) {
     cmcp_server_free(s);
 }
 
-/* The MCP-Protocol-Version header (2025-06-18): a post-handshake POST
+/* The MCP-Protocol-Version header (since 2025-06-18): a post-handshake POST
  * carrying a version cMCP does not speak is rejected with 400; the
  * matching version is accepted; an absent header falls back to the
  * spec default and is also accepted. */
@@ -558,6 +558,134 @@ static void test_close_unblocks_reader(void) {
     cmcp_server_free(s);
 }
 
+/* Build a POST with an Origin header (and the standard headers). */
+static char *build_post_origin(const char *body, const char *origin) {
+    size_t body_len = body ? strlen(body) : 0;
+    size_t cap = body_len + 512;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    int n = snprintf(out, cap,
+        "POST /mcp HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/json\r\n"
+        "%s%s%s"
+        "Content-Length: %zu\r\n"
+        "\r\n"
+        "%s",
+        origin ? "Origin: " : "",
+        origin ? origin : "",
+        origin ? "\r\n" : "",
+        body_len,
+        body ? body : "");
+    if (n < 0 || (size_t)n >= cap) { free(out); return NULL; }
+    return out;
+}
+
+/* Origin allow-list (MCP 2025-11-25 Minor 3). CMCP_HTTP_ALLOWED_ORIGINS
+ * is snapshot at listen time, so each sub-case spins up its own
+ * transport with a different setenv before constructing the listener.
+ * Three cases: matching origin → 200; mismatched origin → 403;
+ * absent Origin header → 200 (non-browser clients don't emit it);
+ * unset env var (no list) → 200 regardless of Origin (backward-compat). */
+static void test_origin_allowlist(void) {
+    /* (a) Allowed origin → 200 OK. */
+    {
+        setenv("CMCP_HTTP_ALLOWED_ORIGINS",
+               "https://app.example.com, https://other.example.com", 1);
+        unsigned short port = pick_port();
+        TEST_ASSERT(port != 0);
+        cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+        cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+        server_arg_t sa = { s, t, 0 };
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread_main, &sa);
+
+        char *req = build_post_origin(INIT_BODY, "https://app.example.com");
+        char *resp = NULL;
+        size_t rn = 0;
+        TEST_ASSERT(do_request(port, req, &resp, &rn) == 0);
+        TEST_ASSERT(strstr(resp, "HTTP/1.1 200") != NULL);
+        free(req); free(resp);
+
+        cmcp_transport_wake(t);
+        pthread_join(th, NULL);
+        cmcp_transport_close(t);
+        cmcp_server_free(s);
+    }
+
+    /* (b) Disallowed origin → 403 Forbidden. */
+    {
+        setenv("CMCP_HTTP_ALLOWED_ORIGINS", "https://app.example.com", 1);
+        unsigned short port = pick_port();
+        TEST_ASSERT(port != 0);
+        cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+        cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+        server_arg_t sa = { s, t, 0 };
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread_main, &sa);
+
+        char *req = build_post_origin(INIT_BODY, "https://evil.example.com");
+        char *resp = NULL;
+        size_t rn = 0;
+        TEST_ASSERT(do_request(port, req, &resp, &rn) == 0);
+        TEST_ASSERT(strstr(resp, "HTTP/1.1 403") != NULL);
+        free(req); free(resp);
+
+        cmcp_transport_wake(t);
+        pthread_join(th, NULL);
+        cmcp_transport_close(t);
+        cmcp_server_free(s);
+    }
+
+    /* (c) Allow-list set, Origin header absent → 200 (curl/test path). */
+    {
+        setenv("CMCP_HTTP_ALLOWED_ORIGINS", "https://app.example.com", 1);
+        unsigned short port = pick_port();
+        TEST_ASSERT(port != 0);
+        cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+        cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+        server_arg_t sa = { s, t, 0 };
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread_main, &sa);
+
+        char *req = build_post(INIT_BODY, NULL);
+        char *resp = NULL;
+        size_t rn = 0;
+        TEST_ASSERT(do_request(port, req, &resp, &rn) == 0);
+        TEST_ASSERT(strstr(resp, "HTTP/1.1 200") != NULL);
+        free(req); free(resp);
+
+        cmcp_transport_wake(t);
+        pthread_join(th, NULL);
+        cmcp_transport_close(t);
+        cmcp_server_free(s);
+    }
+
+    /* (d) Allow-list unset → arbitrary Origin accepted (backward-compat). */
+    {
+        unsetenv("CMCP_HTTP_ALLOWED_ORIGINS");
+        unsigned short port = pick_port();
+        TEST_ASSERT(port != 0);
+        cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+        cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+        server_arg_t sa = { s, t, 0 };
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread_main, &sa);
+
+        char *req = build_post_origin(INIT_BODY, "https://anything.test");
+        char *resp = NULL;
+        size_t rn = 0;
+        TEST_ASSERT(do_request(port, req, &resp, &rn) == 0);
+        TEST_ASSERT(strstr(resp, "HTTP/1.1 200") != NULL);
+        free(req); free(resp);
+
+        cmcp_transport_wake(t);
+        pthread_join(th, NULL);
+        cmcp_transport_close(t);
+        cmcp_server_free(s);
+    }
+}
+
 /* ====================================================================== */
 
 int main(void) {
@@ -568,6 +696,7 @@ int main(void) {
     TEST_RUN(test_malformed_request);
     TEST_RUN(test_get_sse_handshake);
     TEST_RUN(test_protocol_version_header);
+    TEST_RUN(test_origin_allowlist);
     TEST_RUN(test_close_unblocks_reader);
 
     TEST_DONE();

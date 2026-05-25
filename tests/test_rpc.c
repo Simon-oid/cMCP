@@ -291,7 +291,7 @@ static void test_roundtrip_mcp_initialize(void) {
     const char *src =
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
         "\"params\":{"
-            "\"protocolVersion\":\"2025-06-18\","
+            "\"protocolVersion\":\"2025-11-25\","
             "\"capabilities\":{\"tools\":{}},"
             "\"clientInfo\":{\"name\":\"openclawd\",\"version\":\"0.0.1\"}"
         "}}";
@@ -302,7 +302,7 @@ static void test_roundtrip_mcp_initialize(void) {
     TEST_ASSERT(strcmp(msgs[0].method, "initialize") == 0);
     const cmcp_json_t *pv = cmcp_json_object_get(msgs[0].params, "protocolVersion");
     TEST_ASSERT(pv && pv->type == CMCP_JSON_STRING);
-    TEST_ASSERT(strcmp(pv->str.s, "2025-06-18") == 0);
+    TEST_ASSERT(strcmp(pv->str.s, "2025-11-25") == 0);
 
     /* Re-emit and re-parse — values should still match. */
     char *s = cmcp_rpc_emit(&msgs[0]);

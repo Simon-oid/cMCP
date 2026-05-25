@@ -125,9 +125,13 @@ struct cmcp_client {
     cmcp_rpc_pending_t         *pending;
     int                         initialized;
 
+    /* Optional client description (MCP 2025-11-25). */
+    char                       *description;
+
     /* Server identity captured during handshake. */
     char                       *server_name;
     char                       *server_version;
+    char                       *server_description; /* MCP 2025-11-25, may be NULL */
     char                       *server_protocol;   /* advertised protocol version */
     cmcp_server_capabilities_t  server_caps;
 
@@ -633,8 +637,10 @@ void cmcp_client_free(cmcp_client_t *c) {
 
     free(c->name);
     free(c->version);
+    free(c->description);
     free(c->server_name);
     free(c->server_version);
+    free(c->server_description);
     free(c->server_protocol);
     cmcp_rpc_pending_free(c->pending);
     pthread_mutex_destroy(&c->list_mu);
@@ -651,6 +657,18 @@ void cmcp_client_set_capabilities(cmcp_client_t *c,
                                    const cmcp_client_capabilities_t *caps) {
     if (!c || !caps) return;
     c->caps = *caps;
+}
+
+int cmcp_client_set_description(cmcp_client_t *c, const char *description) {
+    if (!c) return CMCP_EINVAL;
+    char *copy = NULL;
+    if (description) {
+        copy = xstrdup(description);
+        if (!copy) return CMCP_ENOMEM;
+    }
+    free(c->description);
+    c->description = copy;
+    return CMCP_OK;
 }
 
 void cmcp_client_set_notification_handler(cmcp_client_t *c,
@@ -809,6 +827,9 @@ const char *cmcp_client_server_name(const cmcp_client_t *c) {
 }
 const char *cmcp_client_server_version(const cmcp_client_t *c) {
     return c ? c->server_version : NULL;
+}
+const char *cmcp_client_server_description(const cmcp_client_t *c) {
+    return c ? c->server_description : NULL;
 }
 const char *cmcp_client_server_protocol(const cmcp_client_t *c) {
     return c ? c->server_protocol : NULL;
@@ -1033,6 +1054,10 @@ static int do_initialize(cmcp_client_t *c) {
     cmcp_json_t *ci = cmcp_json_new_object();
     cmcp_json_object_set(ci, "name",    cmcp_json_new_string(c->name));
     cmcp_json_object_set(ci, "version", cmcp_json_new_string(c->version));
+    if (c->description) {
+        cmcp_json_object_set(ci, "description",
+                              cmcp_json_new_string(c->description));
+    }
     cmcp_json_object_set(params, "clientInfo", ci);
 
     cmcp_rpc_message_t resp;
@@ -1072,6 +1097,7 @@ static int do_initialize(cmcp_client_t *c) {
     if (si && si->type == CMCP_JSON_OBJECT) {
         const cmcp_json_t *n = cmcp_json_object_get(si, "name");
         const cmcp_json_t *v = cmcp_json_object_get(si, "version");
+        const cmcp_json_t *d = cmcp_json_object_get(si, "description");
         if (n && n->type == CMCP_JSON_STRING) {
             free(c->server_name);
             c->server_name = xstrdup(n->str.s);
@@ -1079,6 +1105,10 @@ static int do_initialize(cmcp_client_t *c) {
         if (v && v->type == CMCP_JSON_STRING) {
             free(c->server_version);
             c->server_version = xstrdup(v->str.s);
+        }
+        if (d && d->type == CMCP_JSON_STRING) {
+            free(c->server_description);
+            c->server_description = xstrdup(d->str.s);
         }
     }
     server_caps_from_json(cmcp_json_object_get(resp.result, "capabilities"),

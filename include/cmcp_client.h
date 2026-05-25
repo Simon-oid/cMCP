@@ -21,6 +21,11 @@ void cmcp_client_free(cmcp_client_t *c);
 void cmcp_client_set_capabilities(cmcp_client_t *c,
                                    const cmcp_client_capabilities_t *caps);
 
+/* Optional human-readable description, echoed in the handshake's
+ * `clientInfo.description` (MCP 2025-11-25 Minor 2). Pass NULL to
+ * clear. Returns CMCP_OK or CMCP_ENOMEM. */
+int cmcp_client_set_description(cmcp_client_t *c, const char *description);
+
 /* ====================================================================== */
 /* Notification routing                                                    */
 /* ====================================================================== */
@@ -303,6 +308,9 @@ int cmcp_client_set_log_level(cmcp_client_t *c, cmcp_log_level_t level);
 const cmcp_server_capabilities_t *cmcp_client_server_caps(const cmcp_client_t *c);
 const char *cmcp_client_server_name(const cmcp_client_t *c);
 const char *cmcp_client_server_version(const cmcp_client_t *c);
+/* Server-advertised description (Minor 2 / MCP 2025-11-25). NULL if
+ * the server didn't send one or the handshake hasn't completed. */
+const char *cmcp_client_server_description(const cmcp_client_t *c);
 
 /* The protocol version the server advertised at handshake. Per the MCP
  * spec this may differ from CMCP_PROTOCOL_VERSION — negotiation is

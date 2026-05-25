@@ -11,6 +11,7 @@
 #include "worker.h"
 
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -85,6 +86,7 @@ typedef struct outgoing_pending {
 struct cmcp_server {
     char                       *name;
     char                       *version;
+    char                       *description;       /* optional, MCP 2025-11-25 */
     cmcp_server_capabilities_t  caps;
 
     server_state_t              state;
@@ -114,6 +116,7 @@ struct cmcp_server {
     /* Negotiated peer info, set on initialize. */
     char                        *peer_name;
     char                        *peer_version;
+    char                        *peer_description;   /* optional, MCP 2025-11-25 */
     cmcp_client_capabilities_t   peer_caps;
 
     /* Active transport, valid only during cmcp_server_run. notify_mu
@@ -233,8 +236,10 @@ void cmcp_server_free(cmcp_server_t *s) {
     if (!s) return;
     free(s->name);
     free(s->version);
+    free(s->description);
     free(s->peer_name);
     free(s->peer_version);
+    free(s->peer_description);
     for (size_t i = 0; i < s->n_tools; i++) tool_clear(&s->tools[i]);
     free(s->tools);
     for (size_t i = 0; i < s->n_resources; i++) resource_clear(&s->resources[i]);
@@ -261,6 +266,18 @@ void cmcp_server_set_capabilities(cmcp_server_t *s,
     s->caps = *caps;
 }
 
+int cmcp_server_set_description(cmcp_server_t *s, const char *description) {
+    if (!s) return CMCP_EINVAL;
+    char *copy = NULL;
+    if (description) {
+        copy = xstrdup(description);
+        if (!copy) return CMCP_ENOMEM;
+    }
+    free(s->description);
+    s->description = copy;
+    return CMCP_OK;
+}
+
 const cmcp_client_capabilities_t *cmcp_server_client_caps(const cmcp_server_t *s) {
     return s ? &s->peer_caps : NULL;
 }
@@ -269,6 +286,9 @@ const char *cmcp_server_client_name(const cmcp_server_t *s) {
 }
 const char *cmcp_server_client_version(const cmcp_server_t *s) {
     return s ? s->peer_version : NULL;
+}
+const char *cmcp_server_client_description(const cmcp_server_t *s) {
+    return s ? s->peer_description : NULL;
 }
 
 /* ====================================================================== */
@@ -606,6 +626,7 @@ static void handle_initialize(cmcp_server_t *s,
     if (ci && ci->type == CMCP_JSON_OBJECT) {
         const cmcp_json_t *n = cmcp_json_object_get(ci, "name");
         const cmcp_json_t *v = cmcp_json_object_get(ci, "version");
+        const cmcp_json_t *d = cmcp_json_object_get(ci, "description");
         if (n && n->type == CMCP_JSON_STRING) {
             free(s->peer_name);
             s->peer_name = xstrdup(n->str.s);
@@ -613,6 +634,10 @@ static void handle_initialize(cmcp_server_t *s,
         if (v && v->type == CMCP_JSON_STRING) {
             free(s->peer_version);
             s->peer_version = xstrdup(v->str.s);
+        }
+        if (d && d->type == CMCP_JSON_STRING) {
+            free(s->peer_description);
+            s->peer_description = xstrdup(d->str.s);
         }
     }
     const cmcp_json_t *cc = cmcp_json_object_get(req->params, "capabilities");
@@ -626,6 +651,10 @@ static void handle_initialize(cmcp_server_t *s,
     cmcp_json_t *si = cmcp_json_new_object();
     cmcp_json_object_set(si, "name",    cmcp_json_new_string(s->name));
     cmcp_json_object_set(si, "version", cmcp_json_new_string(s->version));
+    if (s->description) {
+        cmcp_json_object_set(si, "description",
+                              cmcp_json_new_string(s->description));
+    }
     cmcp_json_object_set(result, "serverInfo", si);
 
     cmcp_rpc_make_response(resp, &req->id, result);
@@ -1067,17 +1096,31 @@ static void handle_tools_call(cmcp_server_t *s,
      * fails any `type: object` schema with required keys, which is
      * the right answer. Tools without an input_schema skip this step.
      *
-     * Failures map to JSON-RPC -32602 INVALID_PARAMS with structured
-     * data identifying path / keyword / message — clients can
-     * surface or programmatically react to it. */
+     * MCP 2025-11-25 (Minor 5) flips this from a JSON-RPC protocol
+     * error to a tool-execution error so the model can self-correct.
+     * The path/keyword/message from the validator is rendered into a
+     * human-readable text content item — the wire shape is
+     *   { isError: true, content: [{ type: "text", text: "..." }] }
+     * Non-validation protocol errors (missing `name`, unknown tool,
+     * bad params shape) above stay as JSON-RPC errors. */
     if (t->input_schema) {
         cmcp_schema_error_t serr;
         int vr = cmcp_schema_validate(t->input_schema, args, &serr);
         if (vr == CMCP_ESCHEMA) {
-            cmcp_json_t *data = cmcp_schema_error_to_json(&serr);
+            char buf[512];
+            const char *path = (serr.path && *serr.path) ? serr.path : "/";
+            const char *kw   = serr.keyword ? serr.keyword : "?";
+            const char *msg  = serr.message ? serr.message : "validation failed";
+            snprintf(buf, sizeof buf,
+                     "Invalid arguments for tool '%s': %s (path: %s, keyword: %s)",
+                     t->name, msg, path, kw);
             cmcp_schema_error_clear(&serr);
-            reply_invalid_params(resp, &req->id,
-                                  "arguments failed schema validation", data);
+            cmcp_json_t *content = cmcp_tool_text_content(buf);
+            cmcp_json_t *result  = cmcp_json_new_object();
+            cmcp_json_object_set(result, "content", content);
+            cmcp_json_object_set(result, "isError",
+                                  cmcp_json_new_bool(1));
+            cmcp_rpc_make_response(resp, &req->id, result);
             return;
         }
         if (vr != CMCP_OK) {
@@ -1703,7 +1746,7 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
         }
 
         if (n != 1) {
-            /* Batch: MCP 2025-06-18 disallows. */
+            /* Batch: MCP 2025-11-25 disallows. */
             cmcp_id_t nid; cmcp_id_init_null(&nid);
             cmcp_rpc_message_t e;
             cmcp_rpc_make_error(&e, &nid, CMCP_RPC_INVALID_REQUEST,

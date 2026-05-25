@@ -416,13 +416,19 @@ static void test_read_missing(void) {
     free(text);
 }
 
-/* A missing required field is a protocol-level fault, not a tool-level
- * one: the server rejects it with -32602 before dispatch. */
+/* A missing required field is reported as a tool-execution error (MCP
+ * 2025-11-25 Minor 5), not -32602 — the model is meant to retry with
+ * the missing argument. The response is `{isError: true, content:
+ * [text]}` and the text names the missing `path` keyword. */
 static void test_schema_rejection(void) {
     char *text = NULL;
     int is_err = 0;
     int rc = call_tool(g_cli, "fs_read", NULL, &text, &is_err);
-    TEST_ASSERT(rc == CMCP_RPC_INVALID_PARAMS);
+    TEST_ASSERT(rc == 0);
+    TEST_ASSERT(is_err == 1);
+    TEST_ASSERT(text && strstr(text, "required") != NULL);
+    TEST_ASSERT(text && strstr(text, "path")     != NULL);
+    free(text);
 }
 
 /* ====================================================================== */

@@ -1,5 +1,5 @@
 {"t":1779653979.592604,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
 {"t":1779653979.592633,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
 {"t":1779653979.592636,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"crag_search\",\"arguments\":{\"query\":\"\"}}}"}
-{"t":1779653979.596938,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"resources\":{},\"tools\":{}},\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"crag-mcp\",\"version\":\"0.1.0\"}}}"}
-{"t":1779653979.596951,"dir":"out","frame":"{\"error\":{\"code\":-32602,\"data\":{\"keyword\":\"minLength\",\"message\":\"string too short (min 1)\",\"path\":\"/query\"},\"message\":\"arguments failed schema validation\"},\"id\":2,\"jsonrpc\":\"2.0\"}"}
+{"t":1779653979.593636,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"resources\":{},\"tools\":{}},\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"crag-mcp\",\"version\":\"0.1.0\"}}}"}
+{"t":1779653979.5946362,"dir":"out","frame":"{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"Invalid arguments for tool 'crag_search': string too short (min 1) (path: /query, keyword: minLength)\",\"type\":\"text\"}],\"isError\":true}}"}

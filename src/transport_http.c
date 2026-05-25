@@ -1,6 +1,6 @@
 /* Streamable HTTP transport — server side.
  *
- * Wire shape (MCP 2025-06-18):
+ * Wire shape (MCP 2025-11-25):
  *   POST /mcp    Content-Type: application/json
  *                Body: one JSON-RPC frame (request, response, or
  *                       notification)
@@ -349,6 +349,12 @@ typedef struct http_impl {
     /* SSE bookkeeping. */
     pthread_mutex_t    sse_mu;
     sse_conn_t        *sse_head;
+
+    /* Allow-list for the Origin header (MCP 2025-11-25 Minor 3:
+     * DNS-rebinding defense). NULL or empty → no check; otherwise a
+     * comma-separated list, snapshot from CMCP_HTTP_ALLOWED_ORIGINS at
+     * listen time so per-request handling is allocation-free. */
+    char              *allowed_origins;
 } http_impl_t;
 
 /* Forward decls. */
@@ -612,9 +618,9 @@ static void handle_get_sse(http_impl_t *impl, int fd, http_request_t *req) {
      * already exited and freed c. */
 }
 
-/* Validate the MCP-Protocol-Version header (2025-06-18 transports
- * section). Absent → accept: per spec the server falls back to the
- * default revision. Present but not the version cMCP speaks → 400.
+/* Validate the MCP-Protocol-Version header (transports section).
+ * Absent → accept: per spec the server falls back to the default
+ * revision. Present but not the version cMCP speaks → 400.
  * Returns 1 to proceed, 0 if a 400 was already sent. */
 static int check_protocol_version(int fd, const http_request_t *req) {
     const char *pv = http_header_get(req, "MCP-Protocol-Version");
@@ -624,6 +630,31 @@ static int check_protocol_version(int fd, const http_request_t *req) {
         return 0;
     }
     return 1;
+}
+
+/* Origin allow-list check (MCP 2025-11-25 Minor 3 — DNS rebinding
+ * defense). Caller passes `impl->allowed_origins` (NULL/"" → no check).
+ * Header absent → accept (non-browser clients don't emit Origin).
+ * Header present + matches one entry of the comma-separated list →
+ * accept. Otherwise 403. Returns 1 to proceed, 0 if 403 was sent. */
+static int check_origin(http_impl_t *impl, int fd, const http_request_t *req) {
+    if (!impl->allowed_origins || !*impl->allowed_origins) return 1;
+    const char *origin = http_header_get(req, "Origin");
+    if (!origin) return 1;
+    size_t olen = strlen(origin);
+    const char *p = impl->allowed_origins;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        const char *start = p;
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        while (len > 0 && *start == ' ') { start++; len--; }
+        while (len > 0 && start[len - 1] == ' ') len--;
+        if (len == olen && memcmp(start, origin, olen) == 0) return 1;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    reply_error(fd, 403, "Forbidden", "Origin not in allow-list\n");
+    return 0;
 }
 
 static void handle_one_connection(http_impl_t *impl, int fd) {
@@ -652,11 +683,19 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
                         strcmp(path, "/mcp") == 0);
 
     if (is_post_mcp) {
-        if (check_protocol_version(fd, &req)) handle_post(impl, fd, &req);
-        close(fd);
+        if (!check_origin(impl, fd, &req)) {
+            close(fd);
+        } else if (check_protocol_version(fd, &req)) {
+            handle_post(impl, fd, &req);
+            close(fd);
+        } else {
+            close(fd);
+        }
     } else if (is_get_mcp) {
         const char *acc = http_header_get(&req, "Accept");
-        if (!check_protocol_version(fd, &req)) {
+        if (!check_origin(impl, fd, &req)) {
+            close(fd);
+        } else if (!check_protocol_version(fd, &req)) {
             close(fd);
         } else if (acc && strstr(acc, "text/event-stream")) {
             handle_get_sse(impl, fd, &req);
@@ -900,6 +939,7 @@ static void http_close_fn(cmcp_transport_t *t) {
         }
         free(impl->req_body);
         free(impl->resp_body);
+        free(impl->allowed_origins);
         pthread_mutex_destroy(&impl->slot_mu);
         pthread_mutex_destroy(&impl->session_mu);
         pthread_mutex_destroy(&impl->sse_mu);
@@ -956,6 +996,14 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
     pthread_mutex_init(&impl->sse_mu, NULL);
     pthread_cond_init(&impl->read_cv, NULL);
     pthread_cond_init(&impl->write_cv, NULL);
+
+    /* Snapshot the Origin allow-list once. NULL or "" → no check. */
+    const char *envv = getenv("CMCP_HTTP_ALLOWED_ORIGINS");
+    if (envv && *envv) {
+        size_t n = strlen(envv);
+        impl->allowed_origins = (char *)malloc(n + 1);
+        if (impl->allowed_origins) memcpy(impl->allowed_origins, envv, n + 1);
+    }
 
     t->impl     = impl;
     t->read_fn  = http_read_fn;

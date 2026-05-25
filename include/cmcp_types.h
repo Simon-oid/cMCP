@@ -133,9 +133,10 @@ void cmcp_rpc_message_clear(cmcp_rpc_message_t *m);
  * *out_count (1 for a single message, N for a JSON-RPC batch). Free
  * with cmcp_rpc_messages_free().
  *
- * NOTE: MCP 2025-06-18 removes batch support at the protocol layer,
- * but this framing layer parses batches for completeness; higher
- * layers should reject batches with INVALID_REQUEST when applicable. */
+ * NOTE: MCP (since 2025-06-18, still the case in 2025-11-25) removes
+ * batch support at the protocol layer, but this framing layer parses
+ * batches for completeness; higher layers should reject batches with
+ * INVALID_REQUEST when applicable. */
 int  cmcp_rpc_parse(const char *text, size_t len,
                     cmcp_rpc_message_t **out_msgs, size_t *out_count);
 void cmcp_rpc_messages_free(cmcp_rpc_message_t *msgs, size_t count);

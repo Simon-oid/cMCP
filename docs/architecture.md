@@ -76,9 +76,9 @@ Lifted from cRAG's `util.c` as a starting point and extended with:
 JSON-RPC 2.0 framing. Discriminated-union message type
 (`cmcp_rpc_message_t`) covering request, response, notification.
 `cmcp_rpc_parse` accepts batches as well as single messages — MCP
-2025-06-18 *removes* batch support at the protocol level, but the
-framing layer parses them so higher layers can reject them with a
-clean `-32600`.
+(since 2025-06-18, still the case in 2025-11-25) *removes* batch
+support at the protocol level, but the framing layer parses them so
+higher layers can reject them with a clean `-32600`.
 
 The in-flight ID table (`cmcp_rpc_pending_t`) is a single monotonic
 positive-integer ID space per session. The client reserves an ID
@@ -114,7 +114,7 @@ in on the same vtable.
 
 ### transport_http.c (server side)
 
-Streamable HTTP per MCP 2025-06-18: a single `/mcp` endpoint with
+Streamable HTTP per MCP 2025-11-25: a single `/mcp` endpoint with
 `POST` (request → response) and `GET` with `Accept: text/event-stream`
 (SSE upgrade). Hand-rolled HTTP/1.1 server on top of `socket()` +
 `accept()`; a tiny request parser handles the request line, headers,
@@ -181,7 +181,7 @@ used by elicitation) are routed to every held-open holder by the
 `write_fn` classifier — see *Server-initiated notifications →
 Wire routing* below.
 
-**MCP-Protocol-Version header.** Per spec `2025-06-18`, every
+**MCP-Protocol-Version header.** Per spec (since `2025-06-18`), every
 post-handshake HTTP request MUST carry an `MCP-Protocol-Version:
 <version>` header; the server validates inbound (415 on mismatch) and
 the client emits outbound. The header is checked at the HTTP layer

@@ -1,5 +1,5 @@
 {"t":1779653980.594501,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
 {"t":1779653980.594528,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
 {"t":1779653980.594532,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"crag_search\",\"arguments\":{\"query\":\"x\",\"k\":21}}}"}
-{"t":1779653980.598620,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"resources\":{},\"tools\":{}},\"protocolVersion\":\"2025-06-18\",\"serverInfo\":{\"name\":\"crag-mcp\",\"version\":\"0.1.0\"}}}"}
-{"t":1779653980.598634,"dir":"out","frame":"{\"error\":{\"code\":-32602,\"data\":{\"keyword\":\"maximum\",\"message\":\"value above maximum\",\"path\":\"/k\"},\"message\":\"arguments failed schema validation\"},\"id\":2,\"jsonrpc\":\"2.0\"}"}
+{"t":1779653980.595532,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"resources\":{},\"tools\":{}},\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"crag-mcp\",\"version\":\"0.1.0\"}}}"}
+{"t":1779653980.596532,"dir":"out","frame":"{\"id\":2,\"jsonrpc\":\"2.0\",\"result\":{\"content\":[{\"text\":\"Invalid arguments for tool 'crag_search': value above maximum (path: /k, keyword: maximum)\",\"type\":\"text\"}],\"isError\":true}}"}

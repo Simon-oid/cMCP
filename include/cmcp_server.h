@@ -21,6 +21,18 @@ void           cmcp_server_free(cmcp_server_t *s);
 void cmcp_server_set_capabilities(cmcp_server_t *s,
                                    const cmcp_server_capabilities_t *caps);
 
+/* Optional human-readable description, echoed in the handshake's
+ * `serverInfo.description` (MCP 2025-11-25 Minor 2). The MCP registry's
+ * `server.json` format already carries it; the field now reaches the
+ * peer at handshake time so the host can show it during initialization.
+ * Pass NULL to clear. Returns CMCP_OK or CMCP_ENOMEM. */
+int cmcp_server_set_description(cmcp_server_t *s, const char *description);
+
+/* Read back the client's advertised description, if any (NULL when the
+ * peer didn't send one or the handshake hasn't completed). The returned
+ * pointer is borrowed and valid only as long as the server is. */
+const char *cmcp_server_client_description(const cmcp_server_t *s);
+
 /* ====================================================================== */
 /* Handler context                                                         */
 /* ====================================================================== */
@@ -132,7 +144,7 @@ cmcp_json_t *cmcp_tool_text_content(const char *text);
 
 /* Convenience: build a content-array containing a single resource_link
  * item — `{type: "resource_link", uri, name, description?, mimeType?}`
- * per the 2025-06-18 spec. Use when a tool wants to point at a
+ * per the 2025-11-25 spec. Use when a tool wants to point at a
  * resource instead of inlining its content. Multiple items can be
  * appended to a single array via cmcp_json_array_append; use this
  * helper for the first one and build subsequent ones inline. NULL

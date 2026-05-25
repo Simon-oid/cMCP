@@ -71,15 +71,16 @@ try {
   check(textOf(add).includes("42"),
         `tools/call add(2,40) → "${textOf(add)}"`);
 
-  /* A schema violation must come back as a JSON-RPC error, which the
-   * SDK surfaces as a thrown McpError. */
-  let rejected = false;
-  try {
-    await client.callTool({ name: "add", arguments: { a: "not-a-number" } });
-  } catch {
-    rejected = true;
-  }
-  check(rejected, "tools/call add with bad arguments is rejected");
+  /* MCP 2025-11-25 (Minor 5): input-schema violations on tools/call
+   * are returned as tool-execution errors (`isError: true`) rather
+   * than JSON-RPC protocol errors, so the model can self-correct on
+   * the next turn. The SDK does not throw — it returns the result
+   * with isError set. */
+  const bad = await client.callTool({
+    name: "add", arguments: { a: "not-a-number" },
+  });
+  check(bad && bad.isError === true,
+        "tools/call add with bad arguments → isError result (2025-11-25 shape)");
 } catch (err) {
   fail++;
   console.error(`    FAIL  exception: ${err?.stack || err}`);

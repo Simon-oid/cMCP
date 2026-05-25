@@ -4,9 +4,76 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
-## Unreleased — Tier 5 (agentic readiness, 2026-05-24)
+## Unreleased — Tier 6 (state-of-the-art library polish)
 
-No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stays at
+Seven axes mapped from five quality lenses (QUALITY / PROFESSIONALISM /
+CONFORMITY / SECURITY / PERFORMANCE). Foundation-ordered execution.
+Full design in [`TODO.md`](TODO.md) under "Tier 6".
+
+### 6.1.1 protocol spec bump — pin + spec-compliance wire changes
+
+`CMCP_PROTOCOL_VERSION` advances `2025-06-18` → `2025-11-25`. Four
+spec-compliance items also land in this commit; optional capabilities
+introduced by the new revision (icons, EnumSchema, URL-mode
+elicitation, sampling tools/toolChoice, SSE resumption) split into
+follow-up sub-commits 6.1.2 / 6.1.3 / 6.1.4 to keep blast radius
+contained.
+
+- **Pin bump.** `include/cmcp.h` advances to `2025-11-25`.
+  `scripts/check-spec-version.sh` exits 0 again. The version
+  appears in handshake payloads and HTTP `MCP-Protocol-Version`
+  headers on both sides automatically; the in-tree literal sweep
+  updates README / docs / comments / test asserts.
+- **Tools input-validation errors → tool-execution errors (Minor 5).**
+  Per spec clarification, an `inputSchema` violation on `tools/call`
+  now returns a success response with `{isError: true, content:
+  [...]}` rather than `-32602 INVALID_PARAMS`. Rationale: lets the
+  model self-correct on the next turn instead of failing the whole
+  RPC. Pre-handshake, non-object params, missing `name`, and
+  unknown-tool errors stay JSON-RPC errors (still protocol-shaped).
+  Structured `{path, keyword, message}` from the validator is
+  rendered into the error text content.
+- **HTTP Origin enforcement (Minor 3).** `transport_http.c` gains
+  an Origin allow-list controlled by `CMCP_HTTP_ALLOWED_ORIGINS`
+  (comma-separated). Default: no list configured → no Origin check
+  (backward-compat for tests / curl). When set, a request whose
+  `Origin` header doesn't appear in the list gets HTTP 403
+  Forbidden before reaching the JSON-RPC layer. Defense against
+  DNS rebinding from a browser.
+- **Optional `description` on Implementation (Minor 2).** New
+  `cmcp_server_set_description` / `cmcp_client_set_description`
+  setters; emitted in `serverInfo`/`clientInfo` when set and parsed
+  on the other side. Getters `cmcp_client_server_description` /
+  `cmcp_server_client_description`. Backward-compat (omitted on
+  the wire when unset).
+- **stdio stderr-for-all-logging (Minor 1).** Doc-only — cMCP
+  already does this.
+
+### Tests
+
+- `test_schema` integration assertions over the wire: schema
+  failures now match the `isError` shape, not `-32602`. Unit-level
+  schema tests are unaffected (validator return values unchanged).
+- `test_hostile_peer` schema-violating-args case: same shape flip.
+- New `test_http_origin` covers allow-list match / mismatch /
+  unset-allowlist paths.
+- New `test_description_field` covers both round-trip directions
+  of `cmcp_*_set_description`.
+- Test literals advance `2025-06-18` → `2025-11-25` in
+  `test_json.c`, `test_rpc.c`, fixtures.
+
+### Fixtures
+
+- All six wire fixtures under `conformance/fixtures/` re-captured
+  via `cmcp-tee`. Initialize-response `protocolVersion` flips to
+  `2025-11-25`. Two echo-server fixtures
+  (`add_schema_missing_required`, `add_schema_type_mismatch`)
+  also flip from the `-32602` shape to the `isError` shape;
+  `make replay` covers both.
+
+## Tier 5 (agentic readiness, 2026-05-24)
+
+No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at
 `2025-06-18`. Tier 5 is the quality bar for letting an LLM agent
 drive cMCP without a human in the loop. Closed in roughly axis order:
 
@@ -58,8 +125,9 @@ drive cMCP without a human in the loop. Closed in roughly axis order:
   + weekly `.github/workflows/spec-drift.yml`. Reports a non-zero
   exit when `CMCP_PROTOCOL_VERSION` differs from the newest dated
   revision under `modelcontextprotocol/modelcontextprotocol@main:schema/`.
-  Currently firing (pin is `2025-06-18`, upstream cut `2025-11-25`).
-  Upgrade workflow checklist in `docs/spec-version-upgrade.md`.
+  At Tier-5 ship: firing (pin `2025-06-18`, upstream had cut
+  `2025-11-25`). Resolved in Tier 6.1. Upgrade workflow checklist
+  in `docs/spec-version-upgrade.md`.
 
 ### Added — tool descriptions tightened by playbook pass
 

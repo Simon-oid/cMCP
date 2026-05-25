@@ -104,7 +104,7 @@ cmcp_transport_t *cmcp_transport_stdio_new_fds(int read_fd, int write_fd);
 /* ====================================================================== */
 /* Streamable HTTP transport — server side                                 */
 /* ====================================================================== */
-/* Streamable HTTP per MCP spec 2025-06-18: a single `/mcp` endpoint that
+/* Streamable HTTP per MCP spec 2025-11-25: a single `/mcp` endpoint that
  * accepts POST (request → response) and GET with `Accept:
  * text/event-stream` (SSE upgrade for server-to-client streams). Session
  * is identified by the `Mcp-Session-Id` header — minted on the first

@@ -573,8 +573,10 @@ static void test_hostile_client_tools_call_unknown_tool(void) {
 /* ====================================================================== */
 /* (H) Hostile client: tools/call whose arguments violate the input schema */
 /* ====================================================================== */
-/* `echo` requires {x:string}; we send {}. Schema validator must reject
- * with -32602 and structured data (path/keyword/message). */
+/* `echo` requires {x:string}; we send {}. MCP 2025-11-25 (Minor 5)
+ * returns this as a tool-execution error: success response with
+ * `isError: true` and a text content item naming the offending keyword
+ * — the model is meant to self-correct, not see a protocol failure. */
 
 static void test_hostile_client_tools_call_schema_violation(void) {
     pair_t p;
@@ -600,10 +602,12 @@ static void test_hostile_client_tools_call_schema_violation(void) {
         "\"params\":{\"name\":\"echo\",\"arguments\":{}}}") == 0);
     char *resp = hostile_recv(p.h_read, 2000);
     TEST_ASSERT(resp != NULL);
-    TEST_ASSERT(resp && strstr(resp, "\"id\":13") != NULL);
-    TEST_ASSERT(resp && strstr(resp, "-32602")   != NULL);
-    /* The validator should report a `required`-keyword failure. */
-    TEST_ASSERT(resp && strstr(resp, "required")  != NULL);
+    TEST_ASSERT(resp && strstr(resp, "\"id\":13")    != NULL);
+    /* No JSON-RPC -32602 — Minor 5 flips this to a success+isError result. */
+    TEST_ASSERT(resp && strstr(resp, "-32602")        == NULL);
+    TEST_ASSERT(resp && strstr(resp, "\"isError\":true") != NULL);
+    /* The validator's `required`-keyword finding is rendered into the text. */
+    TEST_ASSERT(resp && strstr(resp, "required")      != NULL);
     free(resp);
 
     /* Sanity: after a schema rejection the server keeps serving. */

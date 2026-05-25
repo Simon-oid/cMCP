@@ -132,7 +132,7 @@ test is:
 # Generate the payload offline, then drive the server directly
 python3 -c 'print("a"*8000, end="")' > /tmp/big.txt
 
-( printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}\n'
+( printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}\n'
   printf '{"jsonrpc":"2.0","method":"notifications/initialized"}\n'
   printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"text":"%s"}}}\n' "$(cat /tmp/big.txt)"
   sleep 0.2

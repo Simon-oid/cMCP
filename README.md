@@ -4,8 +4,10 @@
 
 A from-scratch implementation of the [Model Context Protocol](https://modelcontextprotocol.io/)
 in pure C11. Three static link targets — core, server, client — sharing
-one JSON-RPC 2.0 pipeline. stdio and Streamable HTTP transports. All
-optional capabilities of spec revision `2025-06-18` shipped.
+one JSON-RPC 2.0 pipeline. stdio and Streamable HTTP transports.
+Tracking spec revision `2025-11-25`; all optional capabilities of the
+prior `2025-06-18` revision shipped, with the 2025-11-25 wire-behavior
+changes landing in Tier 6.1 (in progress).
 
 No C++. No external JSON library. No third-party MCP SDK. Hand-rolled
 JSON parser, hand-rolled JSON Schema subset validator, hand-rolled
@@ -27,6 +29,17 @@ one example consumer and is built separately, behind an explicit
 `make crag-mcp` target.
 
 ## Status
+
+**Tier 6 in progress (state-of-the-art library polish).** Builds on
+Tier 5's agentic-readiness work (sanitisers, fuzzing, replay gate,
+playbooks, etc.). Tier 6.1 is the spec bump to `2025-11-25` — pin
+landed in `include/cmcp.h`; spec-compliance wire changes for
+input-validation-as-tool-error, HTTP Origin allow-list, and the
+optional `description` field on `Implementation` are wired here.
+Optional 2025-11-25 capabilities (icons, EnumSchema, URL elicitation,
+sampling `tools`/`toolChoice`, SSE polling) land in 6.1.2-6.1.4. See
+[`TODO.md`](TODO.md) under "Tier 6" and the design plan in
+`~/.claude/plans/eager-leaping-pike.md`.
 
 **v0.4 + agentic-readiness hardening (Tier 5 done, 2026-05-24).** The
 protocol surface stayed at v0.4 (full `2025-06-18` conformance); on
@@ -60,13 +73,15 @@ a human in the loop. What landed:
   (`scripts/check-spec-version.sh`) compares `CMCP_PROTOCOL_VERSION`
   against the newest dated revision under
   `modelcontextprotocol/modelcontextprotocol@main:schema/`.
-  Currently firing: upstream cut `2025-11-25`, pin is still
-  `2025-06-18`; bump is a deliberate decision —
-  see [`docs/spec-version-upgrade.md`](docs/spec-version-upgrade.md).
+  Fired through 2026-05-24 against upstream `2025-11-25`; the
+  bump landed in Tier 6.1 and the watch is back to green.
+  See [`docs/spec-version-upgrade.md`](docs/spec-version-upgrade.md)
+  for the upgrade workflow.
 
-**v0.4 — complete protocol surface for MCP `2025-06-18`.** All
-optional capabilities live and the three pre-existing spec violations
-closed (`ping`, client-side list pagination, HTTP
+**v0.4 — complete protocol surface for MCP `2025-06-18`** (the
+revision that preceded the Tier 6.1 bump). All optional capabilities
+live and the three pre-existing spec violations closed (`ping`,
+client-side list pagination, HTTP
 `MCP-Protocol-Version` header). New in v0.4: elicitation (both
 halves), structured tool output + `resource_link` content + UI `title`
 fields, structured logging (`logging/setLevel` +
@@ -144,7 +159,7 @@ make
 Output:
 
 ```
-Connected: echo-server 0.1.0 (protocol 2025-06-18)
+Connected: echo-server 0.1.0 (protocol 2025-11-25)
 
 Tools (2):
   echo  -  Return the `text` argument unchanged. Result is a single text content block whose body is byte-identical to the input (no quoting, no formatting, no trimming).
@@ -212,7 +227,7 @@ make crag-mcp                           # needs ../cRAG built
 
 ## Protocol coverage
 
-Tracking [MCP spec date `2025-06-18`](https://modelcontextprotocol.io/specification/) (pinned in `include/cmcp.h`).
+Tracking [MCP spec date `2025-11-25`](https://modelcontextprotocol.io/specification/2025-11-25/) (pinned in `include/cmcp.h`). 2025-11-25 wire-behavior changes are landing across the Tier 6.1 sub-axes.
 
 | Feature                                                    | v0.1 | v0.2 | v0.3 | v0.4 |
 |---|---|---|---|---|
