@@ -49,6 +49,43 @@ contained.
 - **stdio stderr-for-all-logging (Minor 1).** Doc-only — cMCP
   already does this.
 
+### 6.1.2 SSE polling + Last-Event-Id resumption (SEP-1699)
+
+The HTTP server now stamps every SSE event with an `id:` line and
+keeps a per-session ring of the last *N* events; clients that
+reconnect after a server-initiated disconnect resume via
+`Last-Event-Id`. SEP-1699 also reframes server-initiated disconnects
+as legal and expects clients to poll, which the cMCP client transport
+now does.
+
+**Server.** Every SSE event emitted via `cmcp_server_notify*` carries
+a per-session monotonic id starting at 1. Events are recorded in a
+fixed-capacity ring (default 256, env-tunable via
+`CMCP_HTTP_SSE_REPLAY_BUFFER`, clamped to 65536). A GET `/mcp`
+carrying `Last-Event-Id: N` replays every buffered event with id > N
+into the new stream before any live events; an absent header or an
+unknown / out-of-window id results in no replay (spec-legal — the
+client just starts seeing live events). Recording, replay, and
+live-emit all run under the shared `sse_mu` so replayed and live
+events cannot interleave out of order.
+
+**Client.** The SSE reader thread now loops on `curl_easy_perform`
+return: a clean server-side close triggers an immediate reconnect
+(50ms breath); HTTP errors and libcurl connection failures back off
+exponentially to a 5s cap. Every reconnect after the first event has
+been observed sends `Last-Event-Id: <highest>` so the server can
+replay anything that emit-fanned-out while the long-poll was being
+re-established. Highest event id is tracked under a new `sse_id_mu`,
+advanced on every event boundary that carried an `id:` field
+(including empty id-only heartbeats).
+
+**Tests.** `test_sse_event_ids_and_replay` (3 sub-cases / 16
+assertions in `test_http_server`): replay from id=0 yields all
+buffered events; replay from id=1 yields only event 2; replay from
+an out-of-window id (999) yields headers only, no events. Existing
+HTTP-SSE notification test still passes — the new id-bearing wire
+shape is backward-compatible with consumers that ignore `id:`.
+
 ### Tests
 
 - `test_schema` integration assertions over the wire: schema

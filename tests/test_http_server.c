@@ -14,6 +14,9 @@
 #include "cmcp_json.h"
 #include "cmcp_server.h"
 #include "cmcp_transport.h"
+#include "cmcp_types.h"
+
+#include <poll.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -686,6 +689,216 @@ static void test_origin_allowlist(void) {
     }
 }
 
+/* ============================================================
+ * SSE event-id + Last-Event-Id resumption (MCP 2025-11-25 SEP-1699)
+ * ============================================================ */
+
+/* Tool that emits `notifications/tools/list_changed` whenever invoked.
+ * The handler closes over the server pointer via userdata. Used to
+ * force the server to record events in its SSE replay ring. */
+static int trig_notif_handler(const cmcp_json_t *args, void *ud,
+                                cmcp_handler_ctx_t *hctx,
+                                cmcp_json_t **out_content, int *out_is_error) {
+    (void)args; (void)hctx;
+    cmcp_server_t *s = (cmcp_server_t *)ud;
+    cmcp_server_notify_tools_changed(s);
+    *out_content  = cmcp_tool_text_content("ok");
+    *out_is_error = 0;
+    return CMCP_OK;
+}
+
+/* Read up to `cap-1` bytes from `fd` within `timeout_ms`, then close.
+ * Returns the length read (NUL-terminates the buffer). */
+static size_t sse_read_window(int fd, char *buf, size_t cap, int timeout_ms) {
+    size_t total = 0;
+    int    remaining = timeout_ms;
+    while (total + 1 < cap && remaining > 0) {
+        struct pollfd p = { fd, POLLIN, 0 };
+        struct timespec start;
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        int pr = poll(&p, 1, remaining);
+        if (pr <= 0) break;
+        ssize_t n = recv(fd, buf + total, cap - 1 - total, 0);
+        if (n <= 0) break;
+        total += (size_t)n;
+        struct timespec end;
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        int elapsed = (int)((end.tv_sec  - start.tv_sec)  * 1000 +
+                            (end.tv_nsec - start.tv_nsec) / 1000000L);
+        remaining -= (elapsed > 0 ? elapsed : 1);
+    }
+    buf[total] = '\0';
+    return total;
+}
+
+/* Build a GET /mcp request that resumes via Last-Event-Id when
+ * include_leid is non-zero. Passing include_leid=1, leid=0 produces a
+ * header `Last-Event-Id: 0`, distinct from "no header" which the
+ * server treats as "no resume". */
+static char *build_get_sse_with_leid(const char *session_id,
+                                       int include_leid, uint64_t leid) {
+    size_t cap = 512;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    int n;
+    if (include_leid) {
+        n = snprintf(out, cap,
+            "GET /mcp HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Accept: text/event-stream\r\n"
+            "Mcp-Session-Id: %s\r\n"
+            "Last-Event-Id: %llu\r\n"
+            "\r\n",
+            session_id, (unsigned long long)leid);
+    } else {
+        n = snprintf(out, cap,
+            "GET /mcp HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Accept: text/event-stream\r\n"
+            "Mcp-Session-Id: %s\r\n"
+            "\r\n",
+            session_id);
+    }
+    if (n < 0 || (size_t)n >= cap) { free(out); return NULL; }
+    return out;
+}
+
+/* Drive a handshake POST and return the session id the server minted. */
+static int handshake_post_get_sid(unsigned short port,
+                                    char *out_sid, size_t cap) {
+    char *req = build_post(INIT_BODY, NULL);
+    if (!req) return -1;
+    char *resp = NULL; size_t rn = 0;
+    int rc = do_request(port, req, &resp, &rn);
+    free(req);
+    if (rc != 0) return -1;
+    int ok = extract_header(resp, "Mcp-Session-Id", out_sid, cap);
+    free(resp);
+    return ok ? 0 : -1;
+}
+
+/* POST tools/call(trig) — fire one notification on the wire. */
+static int trigger_one_notification(unsigned short port, const char *sid, int id) {
+    char body[256];
+    snprintf(body, sizeof body,
+             "{\"jsonrpc\":\"2.0\",\"id\":%d,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"trig\",\"arguments\":{}}}", id);
+    char *req = build_post(body, sid);
+    if (!req) return -1;
+    char *resp = NULL; size_t rn = 0;
+    int rc = do_request(port, req, &resp, &rn);
+    free(req); free(resp);
+    return rc;
+}
+
+/* Server emits an `id:` line on every SSE event (SEP-1699). A fresh
+ * resume from `Last-Event-Id: 0` replays everything recorded; from a
+ * mid-buffer id, replays only events after it. */
+static void test_sse_event_ids_and_replay(void) {
+    /* No Origin allow-list for this test. */
+    unsetenv("CMCP_HTTP_ALLOWED_ORIGINS");
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    TEST_ASSERT(t != NULL);
+
+    cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+    cmcp_server_set_capabilities(s, &(cmcp_server_capabilities_t){
+        .tools_list_changed = 1,
+    });
+    cmcp_server_add_tool(s, &(cmcp_tool_t){
+        .name = "trig", .handler = trig_notif_handler, .userdata = s,
+    });
+
+    server_arg_t sa = { s, t, 0 };
+    pthread_t th;
+    TEST_ASSERT(pthread_create(&th, NULL, server_thread_main, &sa) == 0);
+
+    char sid[64] = {0};
+    TEST_ASSERT(handshake_post_get_sid(port, sid, sizeof sid) == 0);
+
+    /* notifications/initialized so the server is READY. */
+    {
+        const char *body =
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}";
+        char *req = build_post(body, sid);
+        char *resp = NULL; size_t rn = 0;
+        TEST_ASSERT(do_request(port, req, &resp, &rn) == 0);
+        free(req); free(resp);
+    }
+
+    /* Fire two notifications BEFORE any SSE holder opens. The events
+     * land in the replay ring with ids 1 and 2; no live delivery
+     * because no GET is open yet. */
+    TEST_ASSERT(trigger_one_notification(port, sid, 2) == 0);
+    TEST_ASSERT(trigger_one_notification(port, sid, 3) == 0);
+
+    /* GET with Last-Event-Id: 0 → expect both events replayed. */
+    {
+        char *req = build_get_sse_with_leid(sid, 1, 0);
+        TEST_ASSERT(req != NULL);
+        int fd = open_client(port);
+        TEST_ASSERT(fd >= 0);
+        TEST_ASSERT(send_all(fd, req, strlen(req)) == 0);
+        free(req);
+
+        char buf[8192];
+        size_t n = sse_read_window(fd, buf, sizeof buf, 500);
+        close(fd);
+        TEST_ASSERT(n > 0);
+        /* Headers + at least the two id lines */
+        TEST_ASSERT(strstr(buf, "HTTP/1.1 200")    != NULL);
+        TEST_ASSERT(strstr(buf, "Content-Type: text/event-stream") != NULL);
+        TEST_ASSERT(strstr(buf, "id: 1\n")          != NULL);
+        TEST_ASSERT(strstr(buf, "id: 2\n")          != NULL);
+        TEST_ASSERT(strstr(buf, "notifications/tools/list_changed") != NULL);
+    }
+
+    /* GET with Last-Event-Id: 1 → expect only event 2 replayed. */
+    {
+        char *req = build_get_sse_with_leid(sid, 1, 1);
+        TEST_ASSERT(req != NULL);
+        int fd = open_client(port);
+        TEST_ASSERT(fd >= 0);
+        TEST_ASSERT(send_all(fd, req, strlen(req)) == 0);
+        free(req);
+
+        char buf[8192];
+        size_t n = sse_read_window(fd, buf, sizeof buf, 500);
+        close(fd);
+        TEST_ASSERT(n > 0);
+        TEST_ASSERT(strstr(buf, "id: 1\n")  == NULL);  /* not replayed */
+        TEST_ASSERT(strstr(buf, "id: 2\n")  != NULL);
+    }
+
+    /* GET with Last-Event-Id beyond the highest assigned → no replay
+     * (server starts the stream fresh, no buffered events to deliver). */
+    {
+        char *req = build_get_sse_with_leid(sid, 1, 999);
+        TEST_ASSERT(req != NULL);
+        int fd = open_client(port);
+        TEST_ASSERT(fd >= 0);
+        TEST_ASSERT(send_all(fd, req, strlen(req)) == 0);
+        free(req);
+
+        char buf[8192];
+        size_t n = sse_read_window(fd, buf, sizeof buf, 300);
+        close(fd);
+        TEST_ASSERT(n > 0);
+        TEST_ASSERT(strstr(buf, "HTTP/1.1 200") != NULL);
+        /* Stream opened but no historical events visible — only the
+         * headers + an empty body window. */
+        const char *body_start = strstr(buf, "\r\n\r\n");
+        TEST_ASSERT(body_start && strstr(body_start, "id: ") == NULL);
+    }
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+}
+
 /* ====================================================================== */
 
 int main(void) {
@@ -697,6 +910,7 @@ int main(void) {
     TEST_RUN(test_get_sse_handshake);
     TEST_RUN(test_protocol_version_header);
     TEST_RUN(test_origin_allowlist);
+    TEST_RUN(test_sse_event_ids_and_replay);
     TEST_RUN(test_close_unblocks_reader);
 
     TEST_DONE();

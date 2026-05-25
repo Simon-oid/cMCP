@@ -70,6 +70,8 @@
 #define HTTP_MAX_BODY_BYTES      (4 * 1024 * 1024)   /* 4 MiB body */
 #define HTTP_LISTEN_BACKLOG      16
 #define HTTP_ACCEPT_POLL_MS      250            /* shutdown polling cadence */
+#define HTTP_SSE_REPLAY_DEFAULT  256            /* events kept for resumption */
+#define HTTP_SSE_REPLAY_MAX      65536          /* env-set ceiling */
 
 /* Wake signal for SSE holder threads so close() can join them. */
 #ifndef CMCP_HTTP_WAKE_SIGNAL
@@ -346,9 +348,25 @@ typedef struct http_impl {
     int                resp_present;
     int                resp_was_minted; /* mint session id on this response */
 
-    /* SSE bookkeeping. */
+    /* SSE bookkeeping. sse_mu guards both the holder list AND the
+     * event ring + counter (MCP 2025-11-25 SEP-1699): a single lock so
+     * an emit can atomically assign an id, record the event in the
+     * ring, and fan out to every holder. Replay during a new GET also
+     * runs under this lock, so a holder registered for replay starts
+     * receiving live events at exactly the right point. */
     pthread_mutex_t    sse_mu;
     sse_conn_t        *sse_head;
+
+    /* Event ring for Last-Event-Id resumption. Per-session monotonic
+     * seq counter; the ring records the last `event_ring_capacity`
+     * events. Body is owned by the ring entry (freed on eviction).
+     * Sized at listen time from CMCP_HTTP_SSE_REPLAY_BUFFER (default
+     * HTTP_SSE_REPLAY_DEFAULT, clamped to HTTP_SSE_REPLAY_MAX). */
+    uint64_t           event_next_id;
+    void              *event_ring;          /* sse_buf_entry_t[] */
+    size_t             event_ring_capacity;
+    size_t             event_ring_head;     /* next write slot */
+    size_t             event_ring_count;    /* live entries */
 
     /* Allow-list for the Origin header (MCP 2025-11-25 Minor 3:
      * DNS-rebinding defense). NULL or empty → no check; otherwise a
@@ -357,10 +375,21 @@ typedef struct http_impl {
     char              *allowed_origins;
 } http_impl_t;
 
+typedef struct {
+    uint64_t  id;
+    char     *body;     /* owned; raw JSON-RPC notification body */
+    size_t    len;
+} sse_buf_entry_t;
+
 /* Forward decls. */
 static void *acceptor_main(void *arg);
 static void  handle_one_connection(http_impl_t *impl, int fd);
 static void  release_pending_failure(http_impl_t *impl);
+static int   sse_emit_event_to_fd(int fd, uint64_t id,
+                                   const char *body, size_t len);
+static uint64_t sse_record_event(http_impl_t *impl,
+                                  const char *body, size_t len);
+static int   sse_replay_after(http_impl_t *impl, uint64_t last_event_id, int fd);
 
 /* ====================================================================== */
 /* SSE holder thread                                                        */
@@ -596,12 +625,40 @@ static void handle_get_sse(http_impl_t *impl, int fd, http_request_t *req) {
         return;
     }
 
+    /* Last-Event-Id resumption (MCP 2025-11-25 SEP-1699). If the header
+     * is present and parses to an integer, replay every buffered event
+     * with id > that value, then register the new holder for live
+     * events — both under sse_mu so live and replayed events are not
+     * interleaved out of order. Unknown / unparseable / older-than-
+     * buffer ids result in no replay, which is spec-legal: the client
+     * just starts seeing live events. */
+    uint64_t last_event_id = 0;
+    int      have_resume   = 0;
+    const char *leid = http_header_get(req, "Last-Event-Id");
+    if (leid && *leid) {
+        char *end;
+        unsigned long long parsed = strtoull(leid, &end, 10);
+        if (end != leid && *end == '\0') {
+            last_event_id = (uint64_t)parsed;
+            have_resume = 1;
+        }
+    }
+
     sse_conn_t *c = (sse_conn_t *)calloc(1, sizeof *c);
     if (!c) { close(fd); return; }
     c->fd    = fd;
     c->owner = impl;
 
     pthread_mutex_lock(&impl->sse_mu);
+    if (have_resume) {
+        int rc = sse_replay_after(impl, last_event_id, fd);
+        if (rc != CMCP_OK) {
+            pthread_mutex_unlock(&impl->sse_mu);
+            free(c);
+            close(fd);
+            return;
+        }
+    }
     c->next = impl->sse_head;
     impl->sse_head = c;
     pthread_mutex_unlock(&impl->sse_mu);
@@ -778,18 +835,25 @@ static int http_read_fn(cmcp_transport_t *t, char **out_buf, size_t *out_len) {
     return CMCP_OK;
 }
 
-/* Frame `body` as an SSE event and send to one fd. Each event is a
- * single `data: <body>\n\n`. Newlines inside `body` are emitted as
- * separate `data:` continuation lines, per the EventSource spec. */
-static int sse_emit_event(int fd, const char *body, size_t len) {
-    /* Use a small write buffer to avoid one send() per byte. */
-    size_t cap = len + 16;
+/* Frame `body` as an SSE event with the given id and send to one fd.
+ * Each event is `id: <id>\ndata: <body>\n\n`. Newlines inside `body`
+ * are emitted as separate `data:` continuation lines, per the
+ * EventSource spec. Per SEP-1699 (MCP 2025-11-25) every event carries
+ * an id so a reconnecting client can pick up via Last-Event-Id. */
+static int sse_emit_event_to_fd(int fd, uint64_t id,
+                                  const char *body, size_t len) {
+    /* Sized for the id header (decimal uint64 fits in 24 chars) + the
+     * worst-case body framing. The 1.5x slop covers the case where
+     * every byte of body is a newline that doubles into 7 bytes
+     * (`\ndata: `). */
+    size_t cap = 64 + len * 8 + 16;
     char *out = (char *)malloc(cap);
     if (!out) return CMCP_ENOMEM;
     size_t n = 0;
-    /* Open the line. */
+    int idlen = snprintf(out, cap, "id: %llu\n", (unsigned long long)id);
+    if (idlen < 0 || (size_t)idlen >= cap) { free(out); return CMCP_EIO; }
+    n = (size_t)idlen;
     memcpy(out + n, "data: ", 6); n += 6;
-    /* Walk body, splitting on '\n' into continuation `data:` lines. */
     for (size_t i = 0; i < len; i++) {
         char c = body[i];
         if (n + 8 >= cap) {
@@ -805,7 +869,6 @@ static int sse_emit_event(int fd, const char *body, size_t len) {
             out[n++] = c;
         }
     }
-    /* Close the event with a blank line. */
     if (n + 2 > cap) {
         cap += 2;
         char *nb = (char *)realloc(out, cap);
@@ -817,6 +880,50 @@ static int sse_emit_event(int fd, const char *body, size_t len) {
     int rc = send_all(fd, out, n);
     free(out);
     return rc;
+}
+
+/* Record `body` in the replay ring (evicts the oldest entry if full).
+ * Caller must hold sse_mu. Returns the assigned event id; 0 means
+ * allocation failure and the event isn't recorded (but should still
+ * be emitted to live holders — the spec doesn't require persistence). */
+static uint64_t sse_record_event(http_impl_t *impl,
+                                   const char *body, size_t len) {
+    uint64_t id = impl->event_next_id++;
+    if (impl->event_ring_capacity == 0) return id;
+    sse_buf_entry_t *ring = (sse_buf_entry_t *)impl->event_ring;
+    char *copy = (char *)malloc(len);
+    if (!copy) return id;   /* live emit still happens; just no replay */
+    memcpy(copy, body, len);
+    sse_buf_entry_t *slot = &ring[impl->event_ring_head];
+    free(slot->body);
+    slot->id   = id;
+    slot->body = copy;
+    slot->len  = len;
+    impl->event_ring_head = (impl->event_ring_head + 1) % impl->event_ring_capacity;
+    if (impl->event_ring_count < impl->event_ring_capacity) {
+        impl->event_ring_count++;
+    }
+    return id;
+}
+
+/* Stream every buffered event with id > last_event_id, in order, to
+ * the given fd. Caller must hold sse_mu. Returns 0 on success, an
+ * error code if any send failed (caller drops the holder). */
+static int sse_replay_after(http_impl_t *impl, uint64_t last_event_id, int fd) {
+    if (impl->event_ring_capacity == 0 || impl->event_ring_count == 0) return CMCP_OK;
+    sse_buf_entry_t *ring = (sse_buf_entry_t *)impl->event_ring;
+    size_t cap = impl->event_ring_capacity;
+    /* Oldest entry index = head - count (mod capacity). */
+    size_t idx = (impl->event_ring_head + cap - impl->event_ring_count) % cap;
+    for (size_t i = 0; i < impl->event_ring_count; i++) {
+        sse_buf_entry_t *e = &ring[idx];
+        if (e->id > last_event_id) {
+            int rc = sse_emit_event_to_fd(fd, e->id, e->body, e->len);
+            if (rc != CMCP_OK) return rc;
+        }
+        idx = (idx + 1) % cap;
+    }
+    return CMCP_OK;
 }
 
 static int http_write_fn(cmcp_transport_t *t, const char *buf, size_t len) {
@@ -832,9 +939,10 @@ static int http_write_fn(cmcp_transport_t *t, const char *buf, size_t len) {
     body_kind_t kind = classify_body(buf, len);
     if (kind.is_notif) {
         pthread_mutex_lock(&impl->sse_mu);
+        uint64_t id = sse_record_event(impl, buf, len);
         sse_conn_t *c = impl->sse_head;
         while (c) {
-            sse_emit_event(c->fd, buf, len);
+            sse_emit_event_to_fd(c->fd, id, buf, len);
             c = c->next;
         }
         pthread_mutex_unlock(&impl->sse_mu);
@@ -940,6 +1048,13 @@ static void http_close_fn(cmcp_transport_t *t) {
         free(impl->req_body);
         free(impl->resp_body);
         free(impl->allowed_origins);
+        if (impl->event_ring) {
+            sse_buf_entry_t *ring = (sse_buf_entry_t *)impl->event_ring;
+            for (size_t i = 0; i < impl->event_ring_capacity; i++) {
+                free(ring[i].body);
+            }
+            free(impl->event_ring);
+        }
         pthread_mutex_destroy(&impl->slot_mu);
         pthread_mutex_destroy(&impl->session_mu);
         pthread_mutex_destroy(&impl->sse_mu);
@@ -1003,6 +1118,28 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
         size_t n = strlen(envv);
         impl->allowed_origins = (char *)malloc(n + 1);
         if (impl->allowed_origins) memcpy(impl->allowed_origins, envv, n + 1);
+    }
+
+    /* Snapshot the SSE replay-buffer size from CMCP_HTTP_SSE_REPLAY_BUFFER
+     * (default HTTP_SSE_REPLAY_DEFAULT; clamped to HTTP_SSE_REPLAY_MAX).
+     * 0 disables the buffer (events still get IDs but no resumption). */
+    size_t cap = HTTP_SSE_REPLAY_DEFAULT;
+    const char *re = getenv("CMCP_HTTP_SSE_REPLAY_BUFFER");
+    if (re && *re) {
+        char *end;
+        unsigned long parsed = strtoul(re, &end, 10);
+        if (end != re && *end == '\0') {
+            if (parsed > HTTP_SSE_REPLAY_MAX) parsed = HTTP_SSE_REPLAY_MAX;
+            cap = (size_t)parsed;
+        }
+    }
+    impl->event_ring_capacity = cap;
+    impl->event_next_id       = 1;
+    if (cap > 0) {
+        impl->event_ring = calloc(cap, sizeof(sse_buf_entry_t));
+        /* Tolerate calloc failure: ring stays NULL, events are still
+         * assigned ids and emitted, just not buffered for replay. */
+        if (!impl->event_ring) impl->event_ring_capacity = 0;
     }
 
     t->impl     = impl;

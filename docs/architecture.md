@@ -181,6 +181,19 @@ used by elicitation) are routed to every held-open holder by the
 `write_fn` classifier — see *Server-initiated notifications →
 Wire routing* below.
 
+**Event IDs + Last-Event-Id resumption (MCP 2025-11-25 SEP-1699).**
+Every SSE event carries an `id:` line whose value is a per-session
+monotonic counter starting at 1. The transport keeps a ring buffer
+of the last *N* events (default 256, env-tunable via
+`CMCP_HTTP_SSE_REPLAY_BUFFER`, clamped to 65536); when a `GET /mcp`
+request carries `Last-Event-Id: N`, every buffered event with
+id > N is streamed before the holder is registered for live events.
+Recording and replay both run under the holder-list mutex, so live
+and replayed events cannot interleave out of order. An out-of-window
+`Last-Event-Id` (e.g. older than the ring's tail or higher than
+anything emitted) results in headers + no replay — spec-legal, the
+client just sees live events from that point on.
+
 **MCP-Protocol-Version header.** Per spec (since `2025-06-18`), every
 post-handshake HTTP request MUST carry an `MCP-Protocol-Version:
 <version>` header; the server validates inbound (415 on mismatch) and
@@ -227,10 +240,20 @@ mutex, broadcasting a condvar that wakes the SSE thread (which has
 been parked since startup waiting for exactly this). Subsequent
 POSTs add the header automatically.
 
-**Shutdown.** The SSE thread is parked on a libcurl `curl_easy_perform`
-that won't return until the server closes the connection — except
-that we install a `CURLOPT_XFERINFOFUNCTION` progress callback that
-returns non-zero when a `shutting_down` flag is set, which forces
+**Polling + resumption (MCP 2025-11-25 SEP-1699).** The SSE thread
+runs a reconnect loop, not a single long-poll: `curl_easy_perform`
+returns when the server closes the stream (the spec now lets it do
+that at will) and the thread re-establishes the GET, carrying
+`Last-Event-Id: <highest-seen>` in its headers so the server can
+replay any events that fanned out while the long-poll was being
+re-established. Backoff is 50ms after a clean (200) close, doubling
+from 100ms to a 5s cap on errors. The highest event id is tracked
+under `sse_id_mu`, advanced on every event boundary that carried an
+`id:` field (including empty id-only heartbeats).
+
+**Shutdown.** The reconnect loop checks `shutting_down` on every
+iteration; a wake makes the in-flight `curl_easy_perform` return
+early via `CURLOPT_XFERINFOFUNCTION` returning non-zero, which forces
 curl to abort the transfer with `CURLE_ABORTED_BY_CALLBACK`. The
 queue_pop loop in `read_fn` is plain pthread_cond_wait, which is
 immune to signals, so we expose a `wake_fn` on the transport vtable.

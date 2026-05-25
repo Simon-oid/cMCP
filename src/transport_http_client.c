@@ -35,10 +35,12 @@
 #include <curl/curl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 /* ====================================================================== */
 /* Frame queue                                                              */
@@ -64,6 +66,13 @@ typedef struct {
 
     pthread_t        sse_thread;
     int              sse_started;
+
+    /* Highest SSE event id observed (MCP 2025-11-25 SEP-1699). The
+     * reader updates this as each event with an `id:` field is emitted;
+     * the thread main snapshot it under sse_id_mu before each reconnect
+     * to populate the `Last-Event-Id` header. 0 = no event seen yet. */
+    pthread_mutex_t  sse_id_mu;
+    uint64_t         last_event_id;
 
     /* Atomic flag — read from sse_progress_cb under libcurl's thread
      * without our mutex (line 341 below), so it needs real cross-
@@ -262,13 +271,46 @@ typedef struct {
     size_t line_buf_len;
     size_t line_buf_cap;
 
+    /* `id:` field accumulated for the current event (SEP-1699). On
+     * emit, parsed to uint64 and used to advance impl->last_event_id
+     * so a reconnect can include the right Last-Event-Id header. */
+    char     event_id_buf[32];
+    int      event_id_present;
+
     http_client_impl_t *impl;
 } sse_state_t;
 
 static void sse_emit(sse_state_t *st) {
-    if (st->event_data_len == 0) return;
+    if (st->event_data_len == 0) {
+        /* Empty events (id-only heartbeats) still advance the id. */
+        if (st->event_id_present) {
+            char *end;
+            unsigned long long parsed = strtoull(st->event_id_buf, &end, 10);
+            if (end != st->event_id_buf && *end == '\0') {
+                pthread_mutex_lock(&st->impl->sse_id_mu);
+                if ((uint64_t)parsed > st->impl->last_event_id) {
+                    st->impl->last_event_id = (uint64_t)parsed;
+                }
+                pthread_mutex_unlock(&st->impl->sse_id_mu);
+            }
+            st->event_id_present = 0;
+        }
+        return;
+    }
     queue_push(st->impl, st->event_data, st->event_data_len);
     st->event_data_len = 0;
+    if (st->event_id_present) {
+        char *end;
+        unsigned long long parsed = strtoull(st->event_id_buf, &end, 10);
+        if (end != st->event_id_buf && *end == '\0') {
+            pthread_mutex_lock(&st->impl->sse_id_mu);
+            if ((uint64_t)parsed > st->impl->last_event_id) {
+                st->impl->last_event_id = (uint64_t)parsed;
+            }
+            pthread_mutex_unlock(&st->impl->sse_id_mu);
+        }
+        st->event_id_present = 0;
+    }
 }
 
 static int sse_data_append(sse_state_t *st, const char *v, size_t vlen) {
@@ -308,8 +350,17 @@ static void sse_consume_line(sse_state_t *st, const char *line, size_t len) {
 
     if (fname_len == 4 && memcmp(line, "data", 4) == 0) {
         sse_data_append(st, fval, fval_len);
+    } else if (fname_len == 2 && memcmp(line, "id", 2) == 0) {
+        /* Capture the id; advancement happens on event emit so the
+         * id is treated as ATOMIC with the event it labels. Truncate
+         * to fit our small buffer — any well-formed uint64 fits. */
+        size_t take = fval_len;
+        if (take >= sizeof st->event_id_buf) take = sizeof st->event_id_buf - 1;
+        memcpy(st->event_id_buf, fval, take);
+        st->event_id_buf[take] = '\0';
+        st->event_id_present = 1;
     }
-    /* Other fields (event:, id:, retry:) are ignored in v0.2. */
+    /* Other fields (event:, retry:) are ignored in v0.2. */
 }
 
 static int sse_line_push(sse_state_t *st, char ch) {
@@ -371,32 +422,80 @@ static void *sse_thread_main(void *arg) {
     sse_state_t st = {0};
     st.impl = impl;
 
-    CURL *c = curl_easy_init();
-    if (!c) return NULL;
+    /* Reconnect loop (MCP 2025-11-25 SEP-1699). curl_easy_perform
+     * returns either when the server closes the SSE stream or when
+     * the progress callback aborts on shutdown. Servers are allowed
+     * to disconnect at any time; clients must support resumption via
+     * Last-Event-Id. We loop with exponential backoff (100ms → 5s
+     * cap) until shutdown, sending Last-Event-Id on every attempt
+     * after the first event has been seen. */
+    long backoff_ms = 100;
+    for (;;) {
+        if (atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) break;
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, "Accept: text/event-stream");
-    headers = curl_slist_append(headers, "Cache-Control: no-cache");
-    headers = curl_slist_append(headers, sid_header);
-    headers = curl_slist_append(headers,
-                "MCP-Protocol-Version: " CMCP_PROTOCOL_VERSION);
+        pthread_mutex_lock(&impl->sse_id_mu);
+        uint64_t resume = impl->last_event_id;
+        pthread_mutex_unlock(&impl->sse_id_mu);
 
-    curl_easy_setopt(c, CURLOPT_URL,             impl->url);
-    curl_easy_setopt(c, CURLOPT_HTTPGET,         1L);
-    curl_easy_setopt(c, CURLOPT_HTTPHEADER,      headers);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,   sse_write_cb);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA,       &st);
-    curl_easy_setopt(c, CURLOPT_NOSIGNAL,        1L);
-    curl_easy_setopt(c, CURLOPT_NOPROGRESS,      0L);
-    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, sse_progress_cb);
-    curl_easy_setopt(c, CURLOPT_XFERINFODATA,     impl);
+        char leid_header[64] = {0};
+        if (resume > 0) {
+            snprintf(leid_header, sizeof leid_header,
+                      "Last-Event-Id: %llu", (unsigned long long)resume);
+        }
 
-    /* Blocks until the server closes the SSE stream or our progress
-     * callback aborts on shutdown. */
-    curl_easy_perform(c);
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Accept: text/event-stream");
+        headers = curl_slist_append(headers, "Cache-Control: no-cache");
+        headers = curl_slist_append(headers, sid_header);
+        headers = curl_slist_append(headers,
+                    "MCP-Protocol-Version: " CMCP_PROTOCOL_VERSION);
+        if (resume > 0) {
+            headers = curl_slist_append(headers, leid_header);
+        }
 
-    curl_easy_cleanup(c);
-    curl_slist_free_all(headers);
+        CURL *c = curl_easy_init();
+        if (!c) {
+            curl_slist_free_all(headers);
+            break;
+        }
+        curl_easy_setopt(c, CURLOPT_URL,              impl->url);
+        curl_easy_setopt(c, CURLOPT_HTTPGET,          1L);
+        curl_easy_setopt(c, CURLOPT_HTTPHEADER,       headers);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,    sse_write_cb);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA,        &st);
+        curl_easy_setopt(c, CURLOPT_NOSIGNAL,         1L);
+        curl_easy_setopt(c, CURLOPT_NOPROGRESS,       0L);
+        curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, sse_progress_cb);
+        curl_easy_setopt(c, CURLOPT_XFERINFODATA,     impl);
+
+        CURLcode perform_rc = curl_easy_perform(c);
+        long status = 0;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &status);
+        curl_easy_cleanup(c);
+        curl_slist_free_all(headers);
+
+        if (atomic_load_explicit(&impl->shutting_down,
+                                  memory_order_relaxed)) break;
+
+        /* A successful long-poll that the server closed cleanly is the
+         * polling shape the spec describes — reconnect immediately
+         * (small backoff so we don't hot-loop if the server is in a
+         * tight close cycle). On HTTP errors (4xx/5xx) or libcurl
+         * connection failures back off more aggressively so we don't
+         * spin against a dead endpoint. */
+        long delay = (perform_rc == CURLE_OK && status == 200)
+                       ? 50 : backoff_ms;
+        struct timespec ts = { delay / 1000,
+                                (long)(delay % 1000) * 1000000L };
+        nanosleep(&ts, NULL);
+        if (perform_rc != CURLE_OK || status >= 400) {
+            backoff_ms = backoff_ms < 5000 ? backoff_ms * 2 : 5000;
+        } else {
+            backoff_ms = 100;
+        }
+    }
+
     free(st.event_data);
     free(st.line_buf);
     return NULL;
@@ -455,6 +554,7 @@ static void http_client_close(cmcp_transport_t *t) {
         pthread_cond_destroy(&impl->q_cv);
         pthread_mutex_destroy(&impl->session_mu);
         pthread_cond_destroy(&impl->session_cv);
+        pthread_mutex_destroy(&impl->sse_id_mu);
         free(impl);
     }
     free(t);
@@ -484,6 +584,7 @@ cmcp_transport_t *cmcp_transport_http_connect(const char *url) {
     pthread_cond_init (&impl->q_cv, NULL);
     pthread_mutex_init(&impl->session_mu, NULL);
     pthread_cond_init (&impl->session_cv, NULL);
+    pthread_mutex_init(&impl->sse_id_mu, NULL);
 
     t->impl     = impl;
     t->read_fn  = http_client_read;
@@ -496,6 +597,7 @@ cmcp_transport_t *cmcp_transport_http_connect(const char *url) {
         pthread_cond_destroy(&impl->q_cv);
         pthread_mutex_destroy(&impl->session_mu);
         pthread_cond_destroy(&impl->session_cv);
+        pthread_mutex_destroy(&impl->sse_id_mu);
         goto fail;
     }
     impl->sse_started = 1;
