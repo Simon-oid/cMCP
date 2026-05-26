@@ -160,6 +160,37 @@ light it up without re-handshaking).
   also flip from the `-32602` shape to the `isError` shape;
   `make replay` covers both.
 
+### 6.1.4 fixture audit + full quality matrix re-green
+
+Closes the 6.1 axis. No new surface — verification only.
+
+- Fixture audit. All six tracked wire fixtures already pin
+  `protocolVersion: "2025-11-25"` (re-captured during 6.1.1) and
+  use the `{isError: true, content: [...]}` validation-failure
+  shape. The new surface from 6.1.2/6.1.3 isn't exercisable from
+  the existing echo-server / filesystem-mcp / crag-mcp traffic
+  shapes (SSE resumption is HTTP-only; icons / URL elicitation /
+  sub-caps need consumers that don't exist yet), so no
+  additional fixtures land in this sub-axis — that surface is
+  covered by unit tests under `tests/`.
+- Full quality matrix re-greened post-6.1.3, on `main`
+  (`d297431`):
+  - `make test`: 2826 assertions across 22 binaries.
+  - `make test-asan`: clean (ASan + UBSan).
+  - `make test-tsan`: clean.
+  - `make valgrind`: clean.
+  - `make replay`: 5 PASS + 1 SKIP
+    (`crag-mcp/stats_resource_read` legitimately skipped: needs
+    `$CRAG_TEST_DB` pointing at a real indexed cRAG DB; the
+    other two crag-mcp fixtures pass against a fresh empty DB).
+  - `make conformance`: 32/32 (cMCP client vs TS
+    server-everything, latest reference SDK) + 8/8 (TS client vs
+    cMCP echo-server, including the explicit "2025-11-25 shape"
+    isError assertion the SDK schema-validates against).
+  - `make fuzz-smoke`: 60s per harness × 4 harnesses (json, rpc,
+    schema, http), no crashes / leaks. ~1.6M / 2.0M / 2.4M / 26M
+    runs respectively on the 5800X.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at
