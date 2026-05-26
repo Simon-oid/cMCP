@@ -1,0 +1,53 @@
+name: CodeQL
+
+# GitHub's CodeQL analysis. Free for public repos. Runs on every push to
+# main and on every PR (same trigger as ci.yml). Findings appear under the
+# repo's Security → Code scanning tab.
+#
+# CodeQL is the fourth static-analysis checker on top of the three local
+# lanes in `make analyze` (clang-tidy / scan-build / cppcheck). It catches
+# a different bug class — interprocedural data-flow + taint tracking — that
+# the per-TU checkers don't always surface.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly fallback in case the on-push run flakes. Wednesday 02:17 UTC.
+    - cron: '17 2 * * 3'
+
+jobs:
+  analyze:
+    name: CodeQL (cpp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          # `cpp` covers C as well as C++.
+          languages: cpp
+          # Default queries + the security-and-quality suite (the slightly
+          # broader set — surfaces a few more style/portability issues).
+          queries: security-and-quality
+
+      - name: Build for CodeQL
+        run: make all
+
+      - name: CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:cpp"

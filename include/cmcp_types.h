@@ -61,17 +61,21 @@ const char *cmcp_log_level_to_name(cmcp_log_level_t lvl);
  * *out_level; returns -1 on unknown/NULL name. */
 int cmcp_log_level_from_name(const char *name, cmcp_log_level_t *out_level);
 
-/* JSON-RPC 2.0 standard error codes. */
-#define CMCP_RPC_PARSE_ERROR       -32700
-#define CMCP_RPC_INVALID_REQUEST   -32600
-#define CMCP_RPC_METHOD_NOT_FOUND  -32601
-#define CMCP_RPC_INVALID_PARAMS    -32602
-#define CMCP_RPC_INTERNAL_ERROR    -32603
+/* JSON-RPC 2.0 standard error codes. Parenthesised so they survive
+ * use in macro-expansion contexts where the surrounding tokens could
+ * otherwise re-bind the leading `-` (e.g. `x - CMCP_RPC_PARSE_ERROR`
+ * would otherwise expand to `x - -32700`, which still parses but is
+ * the kind of thing static analysers, rightly, flag). */
+#define CMCP_RPC_PARSE_ERROR       (-32700)
+#define CMCP_RPC_INVALID_REQUEST   (-32600)
+#define CMCP_RPC_METHOD_NOT_FOUND  (-32601)
+#define CMCP_RPC_INVALID_PARAMS    (-32602)
+#define CMCP_RPC_INTERNAL_ERROR    (-32603)
 
 /* JSON-RPC reserves -32000..-32099 for implementation-defined server
  * errors. cMCP and MCP application errors live in this range. */
-#define CMCP_RPC_SERVER_ERROR_MIN  -32099
-#define CMCP_RPC_SERVER_ERROR_MAX  -32000
+#define CMCP_RPC_SERVER_ERROR_MIN  (-32099)
+#define CMCP_RPC_SERVER_ERROR_MAX  (-32000)
 
 /* ------------------------------------------------------------------ */
 /* JSON-RPC ID                                                         */

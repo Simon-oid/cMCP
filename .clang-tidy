@@ -1,0 +1,90 @@
+# cMCP clang-tidy config (Tier 6 axis 6.2.2)
+#
+# We enable a curated set of checks: bugprone-*, cert-* (C-specific
+# security), clang-analyzer-*, portability-*, plus selective misc/
+# performance/readability picks. C++-specific check groups
+# (cppcoreguidelines, modernize, fuchsia, google-*) are explicitly off
+# — this is a C11 library.
+#
+# Disabled-with-rationale checks live under the per-check NOTE: comments
+# below. Anything else is on.
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  portability-*,
+  misc-include-cleaner,
+  misc-misleading-bidirectional,
+  misc-misleading-identifier,
+  misc-redundant-expression,
+  misc-static-assert,
+  misc-unused-parameters,
+  performance-no-int-to-ptr,
+  readability-misleading-indentation,
+  readability-non-const-parameter,
+  readability-redundant-control-flow,
+  readability-redundant-declaration,
+  readability-redundant-preprocessor,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-narrowing-conversions,
+  -bugprone-signed-char-misuse,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp,
+  -cert-err33-c,
+  -clang-analyzer-security.insecureAPI.strcpy,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  -misc-include-cleaner,
+  -bugprone-reserved-identifier,
+  -cert-dcl37-c,
+  -cert-dcl51-cpp
+
+# NOTE: bugprone-easily-swappable-parameters: ~every C function with
+#   (const char *name, const char *value) trips this. Real bug class
+#   in C++ where overloads exist; not actionable in a flat-C API.
+#
+# NOTE: bugprone-assignment-in-if-condition: idiomatic `if ((rc = f()))`
+#   pattern; we use it deliberately in error-prop chains.
+#
+# NOTE: bugprone-narrowing-conversions / -signed-char-misuse: too noisy
+#   on a JSON parser that does intentional codepoint↔byte conversions.
+#
+# NOTE: bugprone-multi-level-implicit-pointer-conversion: `void**`
+#   out-params are idiomatic; documented in the umbrella header.
+#
+# NOTE: cert-dcl37-c / -dcl51-cpp: reserve-name rules — false positives
+#   on legitimate `_t` typedef suffixes (POSIX-style). Also the duplicate
+#   of bugprone-reserved-identifier below.
+#
+# NOTE: bugprone-reserved-identifier: every `#define _POSIX_C_SOURCE
+#   200809L` and `#define _GNU_SOURCE` (the POSIX feature-test macros
+#   we have to define before pulling in <unistd.h>, <time.h>, etc.) is
+#   flagged. The leading underscore + uppercase IS the POSIX-mandated
+#   shape for feature-test macros — adding it is the spec, not a
+#   reserved-name bug. There is no `AllowedIdentifiers` option for
+#   this check yet upstream, so the whole check is off.
+#
+# NOTE: cert-err33-c: requires checking every libc return; we deliberately
+#   ignore some (fclose on read-only fd; we already flushed). Re-enable
+#   if the noise/signal ratio improves in a future tidy version.
+#
+# NOTE: clang-analyzer-security.insecureAPI.strcpy + DeprecatedOrUnsafe-
+#   BufferHandling: blanket flag every strcpy/strncpy/sprintf use. We've
+#   audited each call site for bounded inputs; the alternative
+#   (memcpy_s + a custom buffer type) would not improve safety.
+#
+# NOTE: misc-include-cleaner: enabled in the Checks list above but
+#   explicitly disabled here to prevent thrashing — the header-IWYU
+#   pass is its own deliberate audit cycle, not part of the per-PR
+#   gate.
+
+HeaderFilterRegex: '^(include|src)/.*\.h$'
+FormatStyle: none
+WarningsAsErrors: '*'
+
+CheckOptions:
+  - key: bugprone-suspicious-string-compare.WarnOnImplicitComparison
+    value: 'false'
+  - key: readability-non-const-parameter.IgnoreMacros
+    value: 'true'

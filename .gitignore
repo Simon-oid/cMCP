@@ -44,6 +44,14 @@ fuzz/corpus_*/*
 tests/soak/soak_driver
 tests/soak/*.csv
 
+# Coverage artifacts (Tier 6 axis 6.2.1). The Makefile target regenerates
+# everything under coverage/ on demand; gcov drops .gcno alongside the
+# .o it instrumented and .gcda alongside the binary that ran it.
+*.gcno
+*.gcda
+*.gcov
+coverage/
+
 # Editor / tool state
 .claude/
 

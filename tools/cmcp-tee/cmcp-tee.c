@@ -173,6 +173,6 @@ int main(int argc, char **argv) {
 
     int status = 0;
     waitpid(pid, &status, 0);
-    fclose(g_log);
+    if (g_log) fclose(g_log);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }

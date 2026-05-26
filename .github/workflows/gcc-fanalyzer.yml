@@ -1,0 +1,55 @@
+name: gcc -fanalyzer (weekly)
+
+# gcc's static analyzer is slow and false-positive-prone, so it runs
+# weekly rather than per-push. The signal it produces overlaps with
+# clang-analyzer / CodeQL but the bug-class detection differs enough
+# that occasional cross-checks are worth the time budget.
+#
+# Findings are surfaced as warnings in the job log; this lane does NOT
+# fail the build on a new finding (-Werror is off), since a single GCC
+# release can introduce a wave of false positives. Use the log as a
+# diff against the previous week and triage manually.
+
+on:
+  schedule:
+    # Sundays 03:42 UTC. The cron offset is arbitrary; we just want it
+    # off the top-of-hour rush.
+    - cron: '42 3 * * 0'
+  workflow_dispatch:
+
+jobs:
+  fanalyzer:
+    name: build with -fanalyzer
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Build with -fanalyzer (warnings only)
+        # -fanalyzer turns on GCC's static analyzer. We do NOT add it to
+        # WarningsAsErrors — the analyzer has known false positives that
+        # would block legitimate work.
+        run: |
+          make clean
+          CFLAGS='-std=c11 -Wall -Wextra -Wpedantic -O2 -g -Iinclude -fanalyzer' \
+            make all 2>&1 | tee /tmp/fanalyzer.log
+
+      - name: Summarise findings
+        if: always()
+        run: |
+          echo "=== finding counts by category ==="
+          grep -E "warning:.*\[\-Wanalyzer-" /tmp/fanalyzer.log \
+            | sed -E 's/.*\[\-W([^]]+)\].*/\1/' \
+            | sort | uniq -c | sort -rn || echo "no findings"
+
+      - name: Upload full log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fanalyzer-log
+          path: /tmp/fanalyzer.log

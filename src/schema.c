@@ -83,11 +83,17 @@ static size_t utf8_cp_count(const char *s, size_t n) {
     for (size_t i = 0; i < n; ) {
         unsigned char c = (unsigned char)s[i];
         size_t step;
+        /* The ASCII branch and the malformed-leading-byte fallback both
+         * advance by one byte but represent different things: a valid
+         * codepoint vs. an invalid one we recover from by skipping. The
+         * shared step is the intent, not duplication.
+         * NOLINTBEGIN(bugprone-branch-clone) */
         if      (c < 0x80)        step = 1;
         else if ((c & 0xE0) == 0xC0) step = 2;
         else if ((c & 0xF0) == 0xE0) step = 3;
         else if ((c & 0xF8) == 0xF0) step = 4;
         else                          step = 1;
+        /* NOLINTEND(bugprone-branch-clone) */
         if (i + step > n) step = n - i;
         i += step;
         count++;

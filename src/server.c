@@ -981,7 +981,7 @@ static void *watchdog_main(void *arg) {
     while (!wd->stop) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
-        ts.tv_nsec += 200 * 1000 * 1000;   /* 200ms poll */
+        ts.tv_nsec += 200L * 1000 * 1000;   /* 200ms poll */
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&wd->cv, &wd->mu, &ts);
         if (wd->stop) break;
@@ -1636,6 +1636,15 @@ static void server_handle_message(cmcp_server_t *s,
         return;
     }
 
+    /* JSON-RPC parse rejects method-less requests, so this is structurally
+     * unreachable — but the analyzer doesn't see that constraint, and a
+     * defensive guard is cheap. */
+    if (!msg->method) {
+        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INVALID_REQUEST,
+                             "Request missing `method`", NULL);
+        return;
+    }
+
     if (strcmp(msg->method, "tools/list") == 0) {
         handle_tools_list(s, msg, resp);
         return;
@@ -2053,7 +2062,7 @@ int cmcp_server_send_request(cmcp_server_t *s,
     while (!p->done) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 50 * 1000 * 1000;
+        ts.tv_nsec += 50L * 1000 * 1000;
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&p->cv, &p->mu, &ts);
         if (p->done) break;

@@ -66,8 +66,8 @@
 /* Constants & limits                                                       */
 /* ====================================================================== */
 
-#define HTTP_MAX_HEADERS_BYTES   (16 * 1024)    /* 16 KiB request line + headers */
-#define HTTP_MAX_BODY_BYTES      (4 * 1024 * 1024)   /* 4 MiB body */
+#define HTTP_MAX_HEADERS_BYTES   ((size_t)16 * 1024)         /* 16 KiB request line + headers */
+#define HTTP_MAX_BODY_BYTES      ((size_t)4 * 1024 * 1024)   /* 4 MiB body */
 #define HTTP_LISTEN_BACKLOG      16
 #define HTTP_ACCEPT_POLL_MS      250            /* shutdown polling cadence */
 #define HTTP_SSE_REPLAY_DEFAULT  256            /* events kept for resumption */
@@ -277,7 +277,12 @@ static void mint_session_id(char out[37]) {
     int got = 0;
     int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
-        ssize_t n = read(fd, raw, sizeof raw);
+        /* /dev/urandom never blocks once the kernel has seeded its CSPRNG
+         * (effectively always, on any system that has finished boot). The
+         * surrounding lock protects the session table; the few microseconds
+         * a 16-byte read costs aren't worth refactoring the mint path to
+         * happen outside the lock. */
+        ssize_t n = read(fd, raw, sizeof raw);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         if (n == (ssize_t)sizeof raw) got = 1;
         close(fd);
     }
@@ -739,7 +744,14 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
     int is_get_mcp  = (strcmp(req.method, "GET") == 0 &&
                         strcmp(path, "/mcp") == 0);
 
+    /* The two POST/GET dispatch ladders below have multiple branches that
+     * all end with close(fd); the response bodies they emit (origin reject,
+     * protocol-version reject, success) are written from inside the
+     * check_origin / check_protocol_version / handle_post helpers, so the
+     * close-on-exit pattern is genuine uniformity, not accidental
+     * duplication. */
     if (is_post_mcp) {
+        /* NOLINTBEGIN(bugprone-branch-clone) */
         if (!check_origin(impl, fd, &req)) {
             close(fd);
         } else if (check_protocol_version(fd, &req)) {
@@ -748,8 +760,10 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
         } else {
             close(fd);
         }
+        /* NOLINTEND(bugprone-branch-clone) */
     } else if (is_get_mcp) {
         const char *acc = http_header_get(&req, "Accept");
+        /* NOLINTBEGIN(bugprone-branch-clone) */
         if (!check_origin(impl, fd, &req)) {
             close(fd);
         } else if (!check_protocol_version(fd, &req)) {
@@ -762,6 +776,7 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
                          "GET /mcp requires Accept: text/event-stream\n");
             close(fd);
         }
+        /* NOLINTEND(bugprone-branch-clone) */
     } else {
         reply_error(fd, 404, "Not Found", "no such endpoint\n");
         close(fd);
@@ -853,7 +868,12 @@ static int sse_emit_event_to_fd(int fd, uint64_t id,
     int idlen = snprintf(out, cap, "id: %llu\n", (unsigned long long)id);
     if (idlen < 0 || (size_t)idlen >= cap) { free(out); return CMCP_EIO; }
     n = (size_t)idlen;
-    memcpy(out + n, "data: ", 6); n += 6;
+    /* The buffer being assembled is an SSE wire frame, not a C string —
+     * length is tracked in `n` and the eventual send() goes through
+     * write(2) with that length. Both memcpys deliberately copy 6 bytes
+     * of "data: " without a trailing NUL; the analyser's
+     * not-null-terminated-result rule is for C-string contexts. */
+    memcpy(out + n, "data: ", 6); n += 6;  // NOLINT(bugprone-not-null-terminated-result)
     for (size_t i = 0; i < len; i++) {
         char c = body[i];
         if (n + 8 >= cap) {
@@ -864,7 +884,7 @@ static int sse_emit_event_to_fd(int fd, uint64_t id,
         }
         if (c == '\n') {
             out[n++] = '\n';
-            memcpy(out + n, "data: ", 6); n += 6;
+            memcpy(out + n, "data: ", 6); n += 6;  // NOLINT(bugprone-not-null-terminated-result)
         } else {
             out[n++] = c;
         }
@@ -1136,7 +1156,11 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
     impl->event_ring_capacity = cap;
     impl->event_next_id       = 1;
     if (cap > 0) {
-        impl->event_ring = calloc(cap, sizeof(sse_buf_entry_t));
+        /* `cap` is the env-tunable replay-ring size, clamped to
+         * HTTP_SSE_REPLAY_MAX (65536) at parse time above. Worst case is
+         * 65536 * sizeof(sse_buf_entry_t) (a few MB) — bounded, not
+         * unbounded attacker input. */
+        impl->event_ring = calloc(cap, sizeof(sse_buf_entry_t));  // NOLINT(clang-analyzer-optin.taint.TaintedAlloc)
         /* Tolerate calloc failure: ring stays NULL, events are still
          * assigned ids and emitted, just not buffered for replay. */
         if (!impl->event_ring) impl->event_ring_capacity = 0;

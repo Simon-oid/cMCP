@@ -59,3 +59,45 @@ jobs:
       # python3 is preinstalled on ubuntu-latest; the driver is stdlib-only.
       - name: make replay
         run: make replay
+
+  coverage:
+    name: make coverage (lcov + gcovr)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build + coverage dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev lcov gcovr
+
+      - name: make coverage
+        run: make coverage
+
+      - name: Post coverage summary to job log
+        run: cat coverage/summary.txt
+
+      # Upload the genhtml output so reviewers can browse line-by-line.
+      # Retention is the default (90 days) — coverage HTML is small.
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: coverage/html/
+
+  analyze:
+    name: make analyze (clang-tidy + scan-build + cppcheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build + analysis dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev \
+              clang clang-tidy clang-tools cppcheck
+
+      - name: make analyze
+        run: make analyze

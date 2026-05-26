@@ -57,14 +57,22 @@ static int stdio_write(cmcp_transport_t *t, const char *buf, size_t len) {
     /* Frames must not contain raw newlines — JSON encoders escape them
      * inside strings, so this should never trip in practice, but a
      * defensive check keeps a buggy upper layer from desyncing the
-     * wire forever. */
-    if (memchr(buf, '\n', len) != NULL) return CMCP_EINVAL;
+     * wire forever. memchr is undefined on a NULL pointer even when
+     * len == 0; short-circuit so the static analyser can see we never
+     * dereference. */
+    if (len > 0 && memchr(buf, '\n', len) != NULL) return CMCP_EINVAL;
 
     pthread_mutex_lock(&s->write_mu);
     int rc = CMCP_OK;
+    /* Three near-identical branches: each fails the same way (EIO);
+     * the cascade just stops at the first one that does. Refactoring
+     * to a single `||` chain would lose the ordering signal in a
+     * future debugger session.
+     * NOLINTBEGIN(bugprone-branch-clone) */
     if (len > 0 && fwrite(buf, 1, len, s->out) != len)        rc = CMCP_EIO;
     else if (fputc('\n', s->out) == EOF)                       rc = CMCP_EIO;
     else if (fflush(s->out) != 0)                              rc = CMCP_EIO;
+    /* NOLINTEND(bugprone-branch-clone) */
     pthread_mutex_unlock(&s->write_mu);
     return rc;
 }

@@ -191,6 +191,102 @@ Closes the 6.1 axis. No new surface — verification only.
     schema, http), no crashes / leaks. ~1.6M / 2.0M / 2.4M / 26M
     runs respectively on the 5800X.
 
+### 6.2 code-quality measurement (coverage + static analysis)
+
+Closes Tier 5's measurement gap: the sanitiser bar (5.1) told us
+nothing about which library code the suite actually exercised, and
+the bug classes the sanitisers miss (NULL-deref on error paths,
+unchecked returns, dead branches, taint-flow) had no automated
+signal at all. 6.2 introduces two new local quality gates and two
+new CI lanes, plus a one-time triage pass that closes every
+finding either with a fix or a documented suppression.
+
+#### Coverage (`make coverage`)
+
+Rebuilds the library + test suite with `gcc --coverage -O0` (gcov
+instrumentation), runs the full hermetic suite to populate `.gcda`
+files, then aggregates into three views under `coverage/`:
+
+- `coverage.info` — lcov tracefile.
+- `html/index.html` — browsable line + branch report (via
+  `genhtml --branch-coverage`).
+- `summary.txt` — gcovr text summary for CI logs.
+
+Only `src/` is measured. `tests/`, `fuzz/`, `conformance/`,
+`examples/`, and `tools/` are excluders, not subjects. Baseline at
+this commit on `main`:
+
+- Lines:     86.8 % (3974 of 4578)
+- Functions: 98.8 % (318 of 322)
+- Branches:  63.2 % (2303 of 3642)
+
+The branch number is the lowest of the three because gcov counts
+every error path as a branch — most uncovered branches are
+`malloc returned NULL`, `recv() < 0`, `clock_gettime() failed`
+and similar shapes the hermetic suite doesn't simulate.
+
+#### Static-analysis matrix (`make analyze`)
+
+Three independent checkers run in sequence; the target fails on
+the first unsuppressed finding from any of them:
+
+1. **clang-tidy** — per-translation-unit checks. Curated `.clang-tidy`
+   config: `bugprone-*`, `cert-*`, `clang-analyzer-*`, `portability-*`,
+   plus selective `misc/performance/readability` picks. C++-specific
+   groups (cppcoreguidelines, modernize, fuchsia, google-*) explicitly
+   off. Inline NOLINT comments at the call sites carry rationale.
+2. **scan-build** — clang static analyzer driving the full build
+   (interprocedural, path-sensitive). `unix.BlockInCriticalSection`
+   is disabled globally — see the inline rationale in
+   `transport_http.c` (one read of `/dev/urandom` inside the session-
+   table mutex; the read never blocks on Linux once the CSPRNG is
+   seeded).
+3. **cppcheck** — independent open-source analyzer.
+   `--enable=warning,performance,portability`. The `style` category
+   is intentionally off: it's dominated by const-correctness
+   suggestions which are useful as a future const-pass but not a
+   bug class. Project suppressions live in `.cppcheck-suppressions`.
+
+A fourth checker, **CodeQL**, runs in CI only (free for OSS repos)
+on every push, every PR, and weekly as a flake fallback. A fifth,
+**gcc -fanalyzer**, runs weekly via a separate cron workflow; it's
+slow + FP-prone, so it surfaces findings as job-log warnings rather
+than blocking the build.
+
+#### One-time triage (closing all initial findings on `main`)
+
+The first clang-tidy run surfaced 28 findings across 9 categories;
+all closed in this commit:
+
+| Finding | Resolution |
+|---|---|
+| 10× `bugprone-reserved-identifier` on POSIX `_POSIX_C_SOURCE` / `_GNU_SOURCE` / `_XOPEN_SOURCE` / `_DEFAULT_SOURCE` | **Suppress in config.** The leading-underscore + uppercase shape *is* the POSIX-mandated form for feature-test macros; the check has no AllowedIdentifiers option upstream. |
+| 7× `bugprone-macro-parentheses` on negative-integer JSON-RPC error-code macros (`cmcp_types.h`) | **Fix.** Wrap each `-32xxx` in parentheses. |
+| 6× `bugprone-implicit-widening-of-multiplication-result` (timespec arithmetic in `server.c`; size-constant macros in `transport_http.c`) | **Fix.** Cast literal to `long` / `size_t` so the multiplication happens at the destination width. |
+| 4× `bugprone-branch-clone` (cascading `rc = CMCP_EIO` in stdio write; close-on-failure ladders in `transport_http.c`; UTF-8 lead-byte fallback in `schema.c`) | **Suppress in-source.** Each cascade is a deliberate signal in a future debugger session, not duplication. |
+| 2× `bugprone-not-null-terminated-result` on SSE-frame `memcpy("data: ", ..., 6)` | **Suppress in-source.** The buffer is a length-prefixed wire frame, not a C string. |
+| 2× `clang-analyzer-core.NonNullParamChecker` (server dispatch `strcmp(msg->method, ...)`; stdio write `memchr(buf, ...)`) | **Fix.** Add defensive `if (!msg->method)` guard in the request-dispatch path (the JSON-RPC parser already rejects method-less requests; this is belt-and-braces). Short-circuit `len == 0` before `memchr` in stdio write so the analyzer-tracked precondition becomes concrete. |
+| 1× `clang-analyzer-unix.BlockInCriticalSection` on `read("/dev/urandom", ...)` under the session-table mutex | **Suppress in-source + scan-build flag.** `/dev/urandom` is non-blocking once the CSPRNG is seeded; refactoring to move the open outside the mutex would add lock ordering for no real win. |
+| 1× `clang-analyzer-optin.taint.TaintedAlloc` on the SSE replay-ring `calloc` | **Suppress in-source.** Size comes from `CMCP_HTTP_SSE_REPLAY_BUFFER`, clamped to 65536 (HTTP_SSE_REPLAY_MAX) at parse time — bounded, not unbounded attacker input. |
+| 1× `clang-analyzer-core.NullDereference` on the SSE line-buffer push (`transport_http_client.c`) | **Fix.** Add explicit `if (!st->line_buf) return -1;` after the realloc branch — the invariant was already correct, the analyzer just couldn't see it. |
+| 1× `readability-non-const-parameter` on the libcurl `CURLOPT_WRITEFUNCTION` callback | **Suppress in-source.** libcurl's callback typedef requires the non-const signature. |
+
+scan-build surfaced one additional finding (cmcp-tee `fclose(NULL)`
+on an unreachable error path) — fixed with a defensive
+`if (g_log)` guard. cppcheck (warning/performance/portability)
+surfaced zero substantive findings; the 26 `style`-category
+const-correctness hints are deferred to a future const-correctness
+sweep.
+
+#### CI lanes added
+
+- `ci.yml` gains `coverage` (uploads `coverage/html/` as artifact)
+  and `analyze` (clang-tidy + scan-build + cppcheck) jobs.
+- `codeql.yml` runs CodeQL `cpp` on every push + PR + weekly
+  fallback cron.
+- `gcc-fanalyzer.yml` runs GCC's static analyzer weekly; warnings
+  only, full log archived as an artifact.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at

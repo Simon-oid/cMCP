@@ -371,12 +371,18 @@ static int sse_line_push(sse_state_t *st, char ch) {
         st->line_buf = nb;
         st->line_buf_cap = nc;
     }
+    /* The grow branch above re-establishes the invariant
+     * `line_buf != NULL ⇒ line_buf_cap > 0`; the analyser can't prove
+     * that across the realloc boundary, so make it concrete here. */
+    if (!st->line_buf) return -1;
     st->line_buf[st->line_buf_len++] = ch;
     st->line_buf[st->line_buf_len] = '\0';
     return 0;
 }
 
-static size_t sse_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
+/* libcurl's CURLOPT_WRITEFUNCTION signature requires `char *ptr` (non-const);
+ * we don't mutate it, but the typedef is what it is. */
+static size_t sse_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {  // NOLINT(readability-non-const-parameter)
     sse_state_t *st = (sse_state_t *)ud;
     size_t total = size * nmemb;
 

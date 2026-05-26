@@ -217,6 +217,116 @@ test-tsan:
 	$(MAKE) --no-print-directory test CFLAGS="$(TSAN_CFLAGS)" \
 	    TSAN_OPTIONS="$(TSAN_OPTS)"
 
+# --- Coverage (Tier 6 axis 6.2.1) -----------------------------------------
+# `make coverage` rebuilds the library + test suite with gcov instrumentation,
+# runs the full hermetic suite to populate .gcda files, then produces three
+# views of the result:
+#
+#   1. coverage/coverage.info   — lcov tracefile (input to genhtml / lcov CLI)
+#   2. coverage/html/index.html — browsable line/branch coverage report
+#   3. coverage/summary.txt     — gcovr text summary (drop-in for CI logs)
+#
+# Coverage is measured for the library code under src/ only. tests/, fuzz/,
+# conformance/, examples/, and tools/ are excluded — they are exercisers, not
+# subjects. Each run does a full clean rebuild because gcov .gcno files are
+# tied 1:1 to the .o that produced them, and stale .gcno from a previous
+# CFLAGS produces wildly misleading branch counts.
+COV_BASE_CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -O0 -g -Iinclude \
+                   $(CURL_CFLAGS) --coverage -fno-inline
+COV_LDFLAGS     := --coverage
+COV_DIR         := coverage
+
+coverage:
+	@command -v lcov    >/dev/null || { echo "lcov not installed";    exit 1; }
+	@command -v genhtml >/dev/null || { echo "genhtml not installed"; exit 1; }
+	@command -v gcovr   >/dev/null || { echo "gcovr not installed";   exit 1; }
+	$(MAKE) --no-print-directory clean
+	$(MAKE) --no-print-directory test \
+	    CFLAGS="$(COV_BASE_CFLAGS)" LDFLAGS="$(COV_LDFLAGS)"
+	@mkdir -p $(COV_DIR)
+	@echo "=== lcov: capture (src/ only) ==="
+	@lcov --rc geninfo_unexecuted_blocks=1 --capture --directory src \
+	      --output-file $(COV_DIR)/coverage.info --quiet \
+	      --ignore-errors mismatch,gcov,unused,negative,inconsistent
+	@lcov --remove $(COV_DIR)/coverage.info \
+	      '*/tests/*' '*/fuzz/*' '*/conformance/*' \
+	      '*/examples/*' '*/tools/*' '/usr/*' \
+	      --output-file $(COV_DIR)/coverage.info --quiet \
+	      --ignore-errors unused,inconsistent
+	@echo "=== genhtml: writing $(COV_DIR)/html/ ==="
+	@genhtml $(COV_DIR)/coverage.info \
+	    --output-directory $(COV_DIR)/html --quiet \
+	    --title "cMCP coverage" --legend --branch-coverage \
+	    --ignore-errors negative,inconsistent,source
+	@echo "=== gcovr summary ==="
+	@gcovr --root . --filter 'src/.*' \
+	    --exclude '.*/tests/.*' --exclude '.*/fuzz/.*' \
+	    --gcov-ignore-parse-errors=negative_hits.warn_once_per_file \
+	    --print-summary --txt-metric branch \
+	    --output $(COV_DIR)/summary.txt
+	@cat $(COV_DIR)/summary.txt
+	@echo
+	@echo "HTML report: $(COV_DIR)/html/index.html"
+
+# --- Static analysis matrix (Tier 6 axis 6.2.2) ---------------------------
+# `make analyze` runs three independent checkers in sequence:
+#
+#   1. clang-tidy    (per-TU, .clang-tidy config; checks bugprone/cert/
+#                     clang-analyzer/portability/etc.)
+#   2. scan-build    (clang static analyzer driving a full build;
+#                     interprocedural path-sensitive analysis)
+#   3. cppcheck      (independent open-source analyzer; suppressions
+#                     in .cppcheck-suppressions)
+#
+# Each tool gets the same source set: src/*.c plus the reference-binary
+# entry points under tools/ (excluding crag-mcp, which depends on the
+# external cRAG tree). Tests / fuzz / examples / conformance harnesses
+# are excluded — they are exercisers, not subjects.
+#
+# A fourth checker, CodeQL, runs only in CI via the GitHub-OSS lane.
+# A fifth, gcc -fanalyzer, runs weekly (slow + false-positive-prone).
+ANALYZE_SRC := $(CORE_SRC) $(SERVER_SRC) $(CLIENT_SRC) \
+               tools/cmcp-inspect/main.c \
+               tools/filesystem-mcp/main.c
+
+ANALYZE_INCLUDES := -Iinclude $(CURL_CFLAGS)
+
+analyze: analyze-clang-tidy analyze-scan-build analyze-cppcheck
+
+analyze-clang-tidy:
+	@command -v clang-tidy >/dev/null || { echo "clang-tidy not installed"; exit 1; }
+	@echo "=== analyze: clang-tidy ==="
+	@clang-tidy --quiet $(ANALYZE_SRC) -- \
+	    -std=c11 $(ANALYZE_INCLUDES)
+
+analyze-scan-build:
+	@command -v scan-build >/dev/null || { echo "scan-build not installed"; exit 1; }
+	@echo "=== analyze: scan-build ==="
+	$(MAKE) --no-print-directory clean
+	@# unix.BlockInCriticalSection fires on the read(/dev/urandom, ...)
+	@# inside mint_session_id (transport_http.c) — /dev/urandom doesn't
+	@# block once the CSPRNG is seeded; rationale tracked in the inline
+	@# NOLINT comment for the clang-tidy lane.
+	@scan-build --status-bugs -o /tmp/cmcp-scan-build \
+	    -disable-checker unix.BlockInCriticalSection \
+	    $(MAKE) --no-print-directory all CC=clang
+
+analyze-cppcheck:
+	@command -v cppcheck >/dev/null || { echo "cppcheck not installed"; exit 1; }
+	@echo "=== analyze: cppcheck ==="
+	@# --enable: warning + performance + portability. `style` is dominated
+	@# by constParameter*/constVariable* suggestions — useful as a future
+	@# const-correctness sweep but not a bug class for this gate. Re-enable
+	@# if a more aggressive review pass wants it.
+	@cppcheck --enable=warning,performance,portability \
+	    --suppressions-list=.cppcheck-suppressions \
+	    --inline-suppr \
+	    --error-exitcode=1 \
+	    --quiet \
+	    --std=c11 \
+	    -Iinclude \
+	    $(ANALYZE_SRC)
+
 # --- libFuzzer harnesses (Tier-5 axis 5.4) --------------------------------
 # Each harness in fuzz/fuzz_*.c is a tiny LLVMFuzzerTestOneInput wrapper
 # around one parser entry point. libFuzzer is clang-only (gcc has no
@@ -284,6 +394,10 @@ clean:
 	      $(FUZZ_BINS) $(SOAK_BIN) \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o
+	@find . -name '*.gcno' -delete -o -name '*.gcda' -delete 2>/dev/null || true
+	@rm -rf $(COV_DIR)
 
-.PHONY: all test valgrind test-asan test-tsan fuzz-build fuzz-smoke \
+.PHONY: all test valgrind test-asan test-tsan coverage \
+        analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
+        fuzz-build fuzz-smoke \
         soak soak-churn clean crag-mcp conformance replay check-spec-drift

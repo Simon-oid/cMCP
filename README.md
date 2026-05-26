@@ -122,11 +122,13 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the release log and
 
 ```bash
 make            # libs (core/server/client) + cmcp-inspect + filesystem-mcp + cmcp-tee + examples
-make test       # build and run the test binaries — currently 2716 assertions across 22 binaries
+make test       # build and run the test binaries — currently 2826 assertions across 22 binaries
 make valgrind   # same, under valgrind (leak-free)
 make test-asan  # full rebuild under -fsanitize=address,undefined; runs suite
 make test-tsan  # full rebuild under -fsanitize=thread; runs suite
 make replay     # wire-fixture regression gate (conformance/replay/)
+make coverage   # rebuild with --coverage; lcov + genhtml + gcovr report under coverage/
+make analyze    # clang-tidy + scan-build + cppcheck static-analysis matrix
 make fuzz-smoke # 60s per libFuzzer harness against the seed corpus (clang-only)
 make soak       # stdio soak driver (env knobs in tests/soak/run.sh)
 make crag-mcp   # build the cRAG reference server (needs sibling ../cRAG/)
@@ -135,17 +137,24 @@ make check-spec-drift # compare CMCP_PROTOCOL_VERSION vs upstream spec dirs
 make clean
 ```
 
-`make test`, `make test-asan`, `make test-tsan`, and `make replay` are
-hermetic and offline; CI runs all four on every push.
-`make conformance` is the heavyweight opt-in — it `npm install`s
-Anthropic's pinned TypeScript reference SDK and runs cMCP against it
-in both directions; see [`conformance/README.md`](conformance/README.md).
-`make soak`, `make fuzz-*`, and `make check-spec-drift` are also
-opt-in (long-running, clang-only, or network-touching respectively).
+`make test`, `make test-asan`, `make test-tsan`, `make replay`,
+`make coverage`, and `make analyze` are hermetic and offline; CI
+runs all six on every push (the coverage HTML lands as a job
+artifact, and a CodeQL lane runs alongside as a fourth static-
+analysis checker). `make conformance` is the heavyweight opt-in —
+it `npm install`s Anthropic's pinned TypeScript reference SDK and
+runs cMCP against it in both directions; see
+[`conformance/README.md`](conformance/README.md). `make soak`,
+`make fuzz-*`, and `make check-spec-drift` are also opt-in
+(long-running, clang-only, or network-touching respectively).
 
 System dependency: `libcurl` headers (`pkg-config --cflags libcurl`
 must work) — used by the Streamable HTTP client transport. Everything
-else is hand-rolled or system-standard.
+else is hand-rolled or system-standard. `make coverage` additionally
+needs `lcov` + `genhtml` + `gcovr`; `make analyze` needs `clang-tidy`
++ `scan-build` + `cppcheck`. Each target prints which tool is missing
+and exits cleanly so the rest of the suite stays runnable on a
+minimal box.
 
 ## Five-minute tour
 
