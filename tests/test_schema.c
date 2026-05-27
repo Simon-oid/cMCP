@@ -663,6 +663,334 @@ static void test_tools_call_no_schema_accepts_anything(void) {
 }
 
 /* ====================================================================== */
+/* 6.7 additions: const, pattern, multipleOf, exclusiveBounds,             */
+/* min/maxItems, uniqueItems, min/maxProperties, propertyNames,            */
+/* patternProperties, additionalProperties-subschema, prefixItems,         */
+/* tuple-form items + additionalItems, allOf/anyOf/oneOf/not,              */
+/* if/then/else, boolean schemas.                                          */
+/* ====================================================================== */
+
+static void test_const(void) {
+    cmcp_json_t *s = J("{\"const\":42}");
+    cmcp_json_t *ok = J("42");
+    cmcp_json_t *bad = J("43");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "const") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_const_object(void) {
+    cmcp_json_t *s   = J("{\"const\":{\"a\":1,\"b\":\"x\"}}");
+    cmcp_json_t *ok  = J("{\"a\":1,\"b\":\"x\"}");
+    cmcp_json_t *bad = J("{\"a\":1,\"b\":\"y\"}");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_pattern(void) {
+    cmcp_json_t *s = J("{\"pattern\":\"^[A-Z][a-z]+$\"}");
+    cmcp_json_t *ok = J("\"Hello\"");
+    cmcp_json_t *bad = J("\"hello\"");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "pattern") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_pattern_does_not_apply_to_non_strings(void) {
+    cmcp_json_t *s   = J("{\"pattern\":\"^[A-Z]+$\"}");
+    cmcp_json_t *num = J("42");
+    /* Pattern is only meaningful for strings. */
+    TEST_ASSERT(cmcp_schema_validate(s, num, NULL) == CMCP_OK);
+    cmcp_json_free(s); cmcp_json_free(num);
+}
+
+static void test_pattern_invalid_regex_silently_accepts(void) {
+    /* Malformed pattern is a schema author error; we accept the value
+     * rather than reject every string. */
+    cmcp_json_t *s = J("{\"pattern\":\"[unterminated\"}");
+    cmcp_json_t *v = J("\"anything\"");
+    TEST_ASSERT(cmcp_schema_validate(s, v, NULL) == CMCP_OK);
+    cmcp_json_free(s); cmcp_json_free(v);
+}
+
+static void test_multipleof_integer(void) {
+    cmcp_json_t *s = J("{\"multipleOf\":3}");
+    cmcp_json_t *ok = J("9");
+    cmcp_json_t *bad = J("10");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_multipleof_fraction(void) {
+    cmcp_json_t *s = J("{\"multipleOf\":0.5}");
+    cmcp_json_t *ok = J("1.5");
+    cmcp_json_t *bad = J("1.7");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_exclusive_bounds(void) {
+    cmcp_json_t *s = J("{\"exclusiveMinimum\":0,\"exclusiveMaximum\":10}");
+    cmcp_json_t *ok = J("5");
+    cmcp_json_t *zero = J("0");
+    cmcp_json_t *ten  = J("10");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, zero, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, ten,  NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(zero); cmcp_json_free(ten);
+}
+
+static void test_min_max_items(void) {
+    cmcp_json_t *s = J("{\"minItems\":2,\"maxItems\":4}");
+    cmcp_json_t *too_short = J("[1]");
+    cmcp_json_t *ok        = J("[1,2,3]");
+    cmcp_json_t *too_long  = J("[1,2,3,4,5]");
+    TEST_ASSERT(cmcp_schema_validate(s, too_short, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, ok,        NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, too_long,  NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(too_short);
+    cmcp_json_free(ok); cmcp_json_free(too_long);
+}
+
+static void test_unique_items(void) {
+    cmcp_json_t *s = J("{\"uniqueItems\":true}");
+    cmcp_json_t *ok = J("[1,2,3]");
+    cmcp_json_t *bad = J("[1,2,2,3]");
+    cmcp_json_t *deep_bad = J("[{\"x\":1},{\"x\":1}]");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "uniqueItems") == 0);
+    cmcp_schema_error_clear(&e);
+    TEST_ASSERT(cmcp_schema_validate(s, deep_bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok);
+    cmcp_json_free(bad); cmcp_json_free(deep_bad);
+}
+
+static void test_min_max_properties(void) {
+    cmcp_json_t *s = J("{\"minProperties\":1,\"maxProperties\":2}");
+    cmcp_json_t *empty = J("{}");
+    cmcp_json_t *ok    = J("{\"a\":1,\"b\":2}");
+    cmcp_json_t *big   = J("{\"a\":1,\"b\":2,\"c\":3}");
+    TEST_ASSERT(cmcp_schema_validate(s, empty, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, ok,    NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, big,   NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(empty);
+    cmcp_json_free(ok); cmcp_json_free(big);
+}
+
+static void test_property_names(void) {
+    cmcp_json_t *s = J(
+        "{\"propertyNames\":{\"pattern\":\"^[a-z]+$\"}}");
+    cmcp_json_t *ok = J("{\"foo\":1,\"bar\":2}");
+    cmcp_json_t *bad = J("{\"foo\":1,\"Bar\":2}");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "propertyNames") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_pattern_properties(void) {
+    cmcp_json_t *s = J(
+        "{\"patternProperties\":{\"^x_\":{\"type\":\"integer\"}}}");
+    cmcp_json_t *ok      = J("{\"x_count\":3,\"name\":\"any\"}");
+    cmcp_json_t *bad     = J("{\"x_count\":\"not-an-int\"}");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_additional_properties_subschema(void) {
+    /* properties pins `a` as integer; additionalProperties pins
+     * everything else as string. */
+    cmcp_json_t *s = J(
+        "{\"properties\":{\"a\":{\"type\":\"integer\"}},"
+        " \"additionalProperties\":{\"type\":\"string\"}}");
+    cmcp_json_t *ok = J("{\"a\":7,\"b\":\"hello\"}");
+    cmcp_json_t *bad = J("{\"a\":7,\"b\":42}");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_prefix_items(void) {
+    cmcp_json_t *s = J(
+        "{\"prefixItems\":["
+        "  {\"type\":\"string\"},"
+        "  {\"type\":\"integer\"}"
+        "]}");
+    cmcp_json_t *ok  = J("[\"hi\",42]");
+    cmcp_json_t *bad = J("[\"hi\",\"nope\"]");
+    cmcp_json_t *extra = J("[\"hi\",42,\"trailing\"]"); /* allowed by default */
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, extra, NULL) == CMCP_OK);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad); cmcp_json_free(extra);
+}
+
+static void test_prefix_items_with_items_for_rest(void) {
+    /* 2020-12 shape: prefixItems for positions, items for the rest. */
+    cmcp_json_t *s = J(
+        "{\"prefixItems\":[{\"type\":\"string\"}],"
+        " \"items\":{\"type\":\"integer\"}}");
+    cmcp_json_t *ok  = J("[\"x\",1,2,3]");
+    cmcp_json_t *bad = J("[\"x\",1,\"two\"]");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_tuple_items_draft07(void) {
+    /* Draft-07 shape: `items` is an array (tuple) + `additionalItems`
+     * for the rest. */
+    cmcp_json_t *s = J(
+        "{\"items\":[{\"type\":\"string\"},{\"type\":\"integer\"}],"
+        " \"additionalItems\":false}");
+    cmcp_json_t *ok    = J("[\"x\",7]");
+    cmcp_json_t *extra = J("[\"x\",7,42]");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, extra, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "additionalItems") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(extra);
+}
+
+static void test_all_of(void) {
+    cmcp_json_t *s = J(
+        "{\"allOf\":["
+        "  {\"type\":\"integer\"},"
+        "  {\"minimum\":10},"
+        "  {\"maximum\":100}"
+        "]}");
+    cmcp_json_t *ok  = J("50");
+    cmcp_json_t *low = J("5");
+    cmcp_json_t *str = J("\"nope\"");
+    TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, low, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, str, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(low); cmcp_json_free(str);
+}
+
+static void test_any_of(void) {
+    cmcp_json_t *s = J(
+        "{\"anyOf\":["
+        "  {\"type\":\"string\"},"
+        "  {\"type\":\"integer\",\"minimum\":0}"
+        "]}");
+    cmcp_json_t *str  = J("\"hi\"");
+    cmcp_json_t *nat  = J("3");
+    cmcp_json_t *neg  = J("-1");
+    cmcp_json_t *bool_ = J("true");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, str, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, nat, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, neg, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, bool_, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "anyOf") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(s); cmcp_json_free(str); cmcp_json_free(nat);
+    cmcp_json_free(neg); cmcp_json_free(bool_);
+}
+
+static void test_one_of(void) {
+    /* Disjoint branches: integer OR string. */
+    cmcp_json_t *s = J(
+        "{\"oneOf\":["
+        "  {\"type\":\"integer\"},"
+        "  {\"type\":\"string\"}"
+        "]}");
+    cmcp_json_t *i   = J("3");
+    cmcp_json_t *str = J("\"x\"");
+    cmcp_json_t *b   = J("true");
+    TEST_ASSERT(cmcp_schema_validate(s, i, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, str, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, b, NULL) == CMCP_ESCHEMA);
+
+    /* Overlapping branches: must fail because TWO match. */
+    cmcp_json_t *over = J(
+        "{\"oneOf\":["
+        "  {\"type\":\"integer\"},"
+        "  {\"type\":\"integer\",\"minimum\":0}"
+        "]}");
+    cmcp_json_t *positive = J("5");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(over, positive, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "oneOf") == 0);
+    cmcp_schema_error_clear(&e);
+
+    cmcp_json_free(s); cmcp_json_free(i); cmcp_json_free(str); cmcp_json_free(b);
+    cmcp_json_free(over); cmcp_json_free(positive);
+}
+
+static void test_not(void) {
+    cmcp_json_t *s = J("{\"not\":{\"type\":\"string\"}}");
+    cmcp_json_t *str = J("\"nope\"");
+    cmcp_json_t *num = J("42");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(s, num, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, str, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "not") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(s); cmcp_json_free(str); cmcp_json_free(num);
+}
+
+static void test_if_then_else(void) {
+    /* If object has key `kind == "user"`, require key `email`.
+     * Else, require key `id`. */
+    cmcp_json_t *s = J(
+        "{\"if\":{\"properties\":{\"kind\":{\"const\":\"user\"}},"
+                 "\"required\":[\"kind\"]},"
+        " \"then\":{\"required\":[\"email\"]},"
+        " \"else\":{\"required\":[\"id\"]}}");
+    cmcp_json_t *user_ok   = J("{\"kind\":\"user\",\"email\":\"a@b\"}");
+    cmcp_json_t *user_bad  = J("{\"kind\":\"user\"}");
+    cmcp_json_t *other_ok  = J("{\"kind\":\"bot\",\"id\":1}");
+    cmcp_json_t *other_bad = J("{\"kind\":\"bot\"}");
+    TEST_ASSERT(cmcp_schema_validate(s, user_ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, user_bad, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(s, other_ok, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(s, other_bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(s); cmcp_json_free(user_ok); cmcp_json_free(user_bad);
+    cmcp_json_free(other_ok); cmcp_json_free(other_bad);
+}
+
+static void test_boolean_schema_true_false(void) {
+    /* Top-level boolean schemas. */
+    cmcp_json_t *yes = J("true");
+    cmcp_json_t *no  = J("false");
+    cmcp_json_t *v   = J("42");
+    TEST_ASSERT(cmcp_schema_validate(yes, v, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(no,  v, NULL) == CMCP_ESCHEMA);
+
+    /* Boolean subschemas in additionalProperties: true accepts anything,
+     * false rejects any unlisted property. */
+    cmcp_json_t *open  = J(
+        "{\"properties\":{\"a\":{\"type\":\"integer\"}},"
+        " \"additionalProperties\":true}");
+    cmcp_json_t *closed = J(
+        "{\"properties\":{\"a\":{\"type\":\"integer\"}},"
+        " \"additionalProperties\":false}");
+    cmcp_json_t *val = J("{\"a\":1,\"extra\":\"anything\"}");
+    TEST_ASSERT(cmcp_schema_validate(open, val, NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(closed, val, NULL) == CMCP_ESCHEMA);
+
+    cmcp_json_free(yes); cmcp_json_free(no); cmcp_json_free(v);
+    cmcp_json_free(open); cmcp_json_free(closed); cmcp_json_free(val);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_schema:\n");
@@ -688,6 +1016,31 @@ int main(void) {
     TEST_RUN(test_nested_path);
     TEST_RUN(test_error_to_json);
     TEST_RUN(test_bad_inputs);
+
+    /* 6.7 additions. */
+    TEST_RUN(test_const);
+    TEST_RUN(test_const_object);
+    TEST_RUN(test_pattern);
+    TEST_RUN(test_pattern_does_not_apply_to_non_strings);
+    TEST_RUN(test_pattern_invalid_regex_silently_accepts);
+    TEST_RUN(test_multipleof_integer);
+    TEST_RUN(test_multipleof_fraction);
+    TEST_RUN(test_exclusive_bounds);
+    TEST_RUN(test_min_max_items);
+    TEST_RUN(test_unique_items);
+    TEST_RUN(test_min_max_properties);
+    TEST_RUN(test_property_names);
+    TEST_RUN(test_pattern_properties);
+    TEST_RUN(test_additional_properties_subschema);
+    TEST_RUN(test_prefix_items);
+    TEST_RUN(test_prefix_items_with_items_for_rest);
+    TEST_RUN(test_tuple_items_draft07);
+    TEST_RUN(test_all_of);
+    TEST_RUN(test_any_of);
+    TEST_RUN(test_one_of);
+    TEST_RUN(test_not);
+    TEST_RUN(test_if_then_else);
+    TEST_RUN(test_boolean_schema_true_false);
 
     /* Wire integration. */
     TEST_RUN(test_tools_call_schema_violation);

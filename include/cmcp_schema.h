@@ -1,14 +1,15 @@
 /**
  * @file cmcp_schema.h
- * @brief JSON Schema *subset* validator for tool inputs.
+ * @brief JSON Schema validator for tool inputs.
  *
  * cMCP's `tools/call` handler validates the incoming `arguments`
- * object against the tool's declared `inputSchema` before dispatch;
- * the validator implemented here is the subset supported in v0.x.
- * See `docs/schema-subset.md` for the keyword set and `docs/schema-
- * conformance.md` (post-6.7) for the eventual full-Ajv-equivalent
- * surface. Failures surface to the peer as JSON-RPC error -32602
- * with structured `{path, keyword, message}` data.
+ * object against the tool's declared `inputSchema` before dispatch.
+ * Validator surface near-parity with Ajv (the JSON Schema
+ * implementation the TypeScript MCP SDK uses); see
+ * `docs/schema-conformance.md` for the full keyword list and the
+ * documented deliberate departures (regex flavour, integer-vs-number
+ * distinction). Failures surface to the peer as JSON-RPC error
+ * -32602 with structured `{path, keyword, message}` data.
  */
 #ifndef CMCP_SCHEMA_H
 #define CMCP_SCHEMA_H
@@ -16,29 +17,33 @@
 #include "cmcp_json.h"
 
 /* ====================================================================== */
-/* JSON Schema validator — strict subset                                   */
+/* JSON Schema validator                                                   */
 /* ====================================================================== */
 /* Validates a `cmcp_json_t` value against a `cmcp_json_t` schema. The
  * schema is itself a JSON document; it is parsed at tool-registration
  * time and kept as a parsed tree so validation is allocation-light.
  *
- * The supported subset for v0.1 is documented in
- * `docs/schema-subset.md`. Quick reference:
+ * Supported keywords (full list + semantics in docs/schema-conformance.md):
  *
- *   type                    string OR array-of-strings:
- *                           "string", "number", "integer", "boolean",
- *                           "array", "object", "null"
- *   properties              { name: <subschema>, ... }
- *   required                [ "name", ... ]
- *   enum                    [ value, ... ]      (deep-equal compare)
- *   minLength / maxLength   on strings (counts Unicode code points)
- *   minimum / maximum       on numbers (inclusive)
- *   items                   single subschema applied to every element
- *   additionalProperties    only `false` is meaningful in v0.1
+ *   type, enum, const
+ *   minLength / maxLength / pattern              on strings
+ *   minimum / maximum / exclusive{Min,Max}imum   on numbers
+ *   multipleOf                                   on numbers
+ *   minItems / maxItems / uniqueItems            on arrays
+ *   items (single + tuple), prefixItems          on arrays
+ *   additionalItems                              on arrays
+ *   properties, required                         on objects
+ *   patternProperties, additionalProperties      on objects
+ *   propertyNames                                on objects
+ *   minProperties / maxProperties                on objects
+ *   allOf / anyOf / oneOf / not                  combinators
+ *   if / then / else                             conditional
+ *   true / false                                 boolean schemas
  *
- * Anything else in the schema (e.g. $ref, oneOf, format, description,
- * pattern, …) is silently ignored; this is forwards-compatible — a
- * stricter validator can be wired in later without breaking callers. */
+ * Not yet implemented (silently accepted; landing post-6.7):
+ *   $ref / $defs / definitions, format, dependentRequired/Schemas,
+ *   contains, unevaluatedProperties/Items. See docs/schema-conformance.md
+ *   for the deferred list and rationale. */
 
 typedef struct {
     /* JSON Pointer (RFC 6901) into the offending value. "" = root. */

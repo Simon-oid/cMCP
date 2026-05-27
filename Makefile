@@ -7,7 +7,7 @@ CURL_LIBS   := $(shell $(PKG_CONFIG) --libs libcurl)
 
 CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -O2 -g -Iinclude $(CURL_CFLAGS)
 LDFLAGS ?=
-LDLIBS  ?= $(CURL_LIBS) -lpthread
+LDLIBS  ?= $(CURL_LIBS) -lpthread -lm
 
 # --- Source partitioning into three link targets ---------------------------
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.

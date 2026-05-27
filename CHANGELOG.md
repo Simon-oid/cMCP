@@ -445,6 +445,83 @@ hard to undo once pushed; the user runs them on `main`, then
 `git push --tags` once. Going forward (post-policy), every release
 section in CHANGELOG ships with its tag at release time.
 
+### 6.7 schema validator: near-parity with Ajv
+
+`src/schema.c` expanded from a 9-keyword subset to near-parity with
+Ajv (the JSON Schema implementation the TypeScript MCP SDK uses).
+This closes the silent-divergence risk between cMCP-hosted and TS-
+SDK-hosted tools — schemas written for either now validate identically
+on both sides for the keywords listed below.
+
+#### Audit (`docs/schema-audit.md`)
+
+Enumerated every JSON Schema draft 2020-12 / Ajv keyword and mapped
+each to one of: ✅ pre-existing, 🟢 added in 6.7, 🟡 partial / departure,
+⛔ deliberately not implemented, ◻️ deferred post-6.7. Used to scope
+6.7.2 and to size the 6.7.3 cross-check corpus.
+
+#### Implemented in 6.7.2
+
+- **Combinators:** `allOf`, `anyOf`, `oneOf`, `not`.
+  - `anyOf` short-circuits on first match; `oneOf` stops counting
+    after the second match.
+  - Combinator failure surfaces the combinator keyword itself
+    (e.g. `"keyword": "anyOf"`), not the inner branch failure —
+    when no branch matched, no single branch is "the" reason.
+- **Conditional:** `if` / `then` / `else`. `if` runs in
+  schema-only mode (its failure is silent — only steers the branch).
+- **Annotation:** `const` (deep-equality; equivalent to single-
+  element `enum` but matches Ajv's surface).
+- **Numeric:** `multipleOf` (integer fast-path via `%`; `fmod` with
+  1e-9 relative epsilon for fractional divisors), `exclusiveMinimum`,
+  `exclusiveMaximum`.
+- **Strings:** `pattern` via POSIX ERE (`<regex.h>`). Flavour
+  differences from ECMAScript regex documented in
+  `docs/schema-conformance.md` — ASCII patterns are identical;
+  `\d` / `\w` / lookahead are POSIX departures.
+- **Arrays:** `minItems`, `maxItems`, `uniqueItems` (deep-equality
+  pairwise), `prefixItems` (draft-2020-12 tuple form), `items`-as-
+  array (draft-07 tuple form), `additionalItems` (draft-07).
+- **Objects:** `minProperties`, `maxProperties`, `propertyNames`
+  (subschema applied to each key as a string), `patternProperties`
+  (POSIX ERE → subschema), `additionalProperties` as subschema
+  (the existing `false` short-form remains).
+- **Boolean schemas:** `true` (always accept) and `false` (always
+  reject) at every position — top-level and as subschemas inside
+  `additionalProperties` / `items` / etc.
+
+`-lm` added to `LDLIBS` (and `Libs.private:` in `cmcp-core.pc.in`)
+because the validator's `multipleOf` uses `fmod`. CMake imported
+target `cmcp::core` gains `m` in `INTERFACE_LINK_LIBRARIES`. The
+install-smoke `Makefile` now passes `--static` to `pkg-config` so
+the consumer's static link line picks up `Libs.private` transitives.
+
+#### Tests
+
+`tests/test_schema.c` grows 23 new test functions (66 new assertions)
+covering positive + negative cases for each new keyword. Total
+schema-test count: 104 → 170 assertions. Full suite: 2826 → 2892
+assertions. Valgrind-clean on `tests/test_schema` — `regcomp`/
+`regfree` pairs balanced; combinator speculation never leaks the
+err scratch.
+
+#### `docs/schema-conformance.md`
+
+Supersedes `docs/schema-subset.md` (removed). The keyword table is
+the new public surface contract for the validator. Cross-references
+from `README.md`, `docs/architecture.md`, and `include/cmcp_schema.h`
+updated.
+
+#### Deferred to post-6.7
+
+`$ref` / `$defs` / `definitions` (bounded ref resolver), `format`
+(`date-time`, `email`, `uri`, `uuid`), `dependentRequired` /
+`dependentSchemas` / `dependencies`, `contains` / `minContains` /
+`maxContains`, `unevaluatedProperties` / `unevaluatedItems`. Rationale
+per keyword in `docs/schema-conformance.md`. The 6.7.3 Ajv cross-check
+harness (corpus of ≥500 (schema, value) pairs vs Ajv) lands in a
+follow-up commit alongside `make schema-conformance`.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at

@@ -87,8 +87,8 @@ response and routes the parsed message to whoever was waiting.
 
 ### schema.c
 
-JSON Schema subset — exactly the keywords listed in
-[`schema-subset.md`](schema-subset.md). The server validates inbound
+JSON Schema validator — keyword list and deliberate departures in
+[`schema-conformance.md`](schema-conformance.md). The server validates inbound
 `tools/call.arguments` against the registered tool's `inputSchema`
 *before* the handler runs; failures surface as `-32602` with structured
 `{path, keyword, message}` error data. The same validator is also

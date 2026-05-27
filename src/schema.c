@@ -2,6 +2,8 @@
 #include "cmcp_schema.h"
 #include "cmcp_json.h"
 
+#include <regex.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -154,6 +156,11 @@ static char *xstrdup(const char *s) {
 static int fail(cmcp_schema_error_t *err, const path_buf_t *p,
                 const char *keyword, const char *fmt, ...) {
     if (!err) return CMCP_ESCHEMA;
+    /* Don't overwrite an already-populated error. Combinator code
+     * walks subschemas speculatively (anyOf/oneOf) and reuses the
+     * same err scratch; only the *first* substantive failure should
+     * end up in the surfaced error. */
+    if (err->keyword) return CMCP_ESCHEMA;
     err->path    = xstrdup(p ? p->data : "");
     err->keyword = xstrdup(keyword);
 
@@ -185,6 +192,14 @@ cmcp_json_t *cmcp_schema_error_to_json(const cmcp_schema_error_t *e) {
 
 static int validate(const cmcp_json_t *schema, const cmcp_json_t *value,
                      path_buf_t *path, cmcp_schema_error_t *err);
+
+/* Speculative validation: same as validate(), but never populates
+ * err. Used by combinators that probe N subschemas and only surface
+ * the *substantive* failure (or success) at the top level. */
+static int validate_quiet(const cmcp_json_t *schema, const cmcp_json_t *value,
+                          path_buf_t *path) {
+    return validate(schema, value, path, NULL);
+}
 
 /* `type` keyword: string OR array of strings. */
 static int check_type(const cmcp_json_t *schema, const cmcp_json_t *value,
@@ -220,6 +235,43 @@ static int check_enum(const cmcp_json_t *schema, const cmcp_json_t *value,
     return fail(err, path, "enum", "value not in enum");
 }
 
+static int check_const(const cmcp_json_t *schema, const cmcp_json_t *value,
+                        path_buf_t *path, cmcp_schema_error_t *err) {
+    const cmcp_json_t *c = cmcp_json_object_get(schema, "const");
+    if (!c) return CMCP_OK;
+    if (cmcp_json_equal(c, value)) return CMCP_OK;
+    return fail(err, path, "const", "value does not match const");
+}
+
+/* ====================================================================== */
+/* String keywords                                                         */
+/* ====================================================================== */
+
+static int check_pattern(const cmcp_json_t *schema, const cmcp_json_t *value,
+                          path_buf_t *path, cmcp_schema_error_t *err) {
+    if (value->type != CMCP_JSON_STRING) return CMCP_OK;
+    const cmcp_json_t *pat = cmcp_json_object_get(schema, "pattern");
+    if (!pat || pat->type != CMCP_JSON_STRING) return CMCP_OK;
+
+    /* POSIX ERE — see docs/schema-conformance.md for flavour notes.
+     * JSON values may contain embedded NULs; POSIX regex APIs are NUL-
+     * terminated. We accept the truncation here because tool-input
+     * strings carrying NULs would already be a wire oddity. */
+    regex_t re;
+    int rc = regcomp(&re, pat->str.s, REG_EXTENDED | REG_NOSUB);
+    if (rc != 0) {
+        /* Schema author error — invalid regex. Per spec we still
+         * validate the rest of the schema; this keyword is dropped. */
+        return CMCP_OK;
+    }
+    int matched = regexec(&re, value->str.s, 0, NULL, 0) == 0;
+    regfree(&re);
+    if (!matched) {
+        return fail(err, path, "pattern", "string does not match pattern");
+    }
+    return CMCP_OK;
+}
+
 static int check_string(const cmcp_json_t *schema, const cmcp_json_t *value,
                          path_buf_t *path, cmcp_schema_error_t *err) {
     if (value->type != CMCP_JSON_STRING) return CMCP_OK;
@@ -239,32 +291,93 @@ static int check_string(const cmcp_json_t *schema, const cmcp_json_t *value,
                          "string too long (max %lld)", maxl->i);
         }
     }
-    return CMCP_OK;
+    return check_pattern(schema, value, path, err);
+}
+
+/* ====================================================================== */
+/* Number keywords                                                         */
+/* ====================================================================== */
+
+static double json_num(const cmcp_json_t *v) {
+    return v->type == CMCP_JSON_INT ? (double)v->i : v->d;
 }
 
 static int check_number(const cmcp_json_t *schema, const cmcp_json_t *value,
                          path_buf_t *path, cmcp_schema_error_t *err) {
     if (value->type != CMCP_JSON_INT && value->type != CMCP_JSON_DOUBLE)
         return CMCP_OK;
-    double v = value->type == CMCP_JSON_INT
-                  ? (double)value->i : value->d;
-    const cmcp_json_t *mn = cmcp_json_object_get(schema, "minimum");
-    const cmcp_json_t *mx = cmcp_json_object_get(schema, "maximum");
-    if (mn) {
-        double bound = mn->type == CMCP_JSON_INT
-                          ? (double)mn->i : mn->d;
-        if (v < bound) {
+    double v = json_num(value);
+
+    const cmcp_json_t *mn  = cmcp_json_object_get(schema, "minimum");
+    const cmcp_json_t *mx  = cmcp_json_object_get(schema, "maximum");
+    const cmcp_json_t *emn = cmcp_json_object_get(schema, "exclusiveMinimum");
+    const cmcp_json_t *emx = cmcp_json_object_get(schema, "exclusiveMaximum");
+    const cmcp_json_t *mo  = cmcp_json_object_get(schema, "multipleOf");
+
+    if (mn && (mn->type == CMCP_JSON_INT || mn->type == CMCP_JSON_DOUBLE)) {
+        if (v < json_num(mn))
             return fail(err, path, "minimum", "value below minimum");
-        }
     }
-    if (mx) {
-        double bound = mx->type == CMCP_JSON_INT
-                          ? (double)mx->i : mx->d;
-        if (v > bound) {
+    if (mx && (mx->type == CMCP_JSON_INT || mx->type == CMCP_JSON_DOUBLE)) {
+        if (v > json_num(mx))
             return fail(err, path, "maximum", "value above maximum");
+    }
+    if (emn && (emn->type == CMCP_JSON_INT || emn->type == CMCP_JSON_DOUBLE)) {
+        if (v <= json_num(emn))
+            return fail(err, path, "exclusiveMinimum",
+                         "value not strictly above exclusiveMinimum");
+    }
+    if (emx && (emx->type == CMCP_JSON_INT || emx->type == CMCP_JSON_DOUBLE)) {
+        if (v >= json_num(emx))
+            return fail(err, path, "exclusiveMaximum",
+                         "value not strictly below exclusiveMaximum");
+    }
+    if (mo && (mo->type == CMCP_JSON_INT || mo->type == CMCP_JSON_DOUBLE)) {
+        double m = json_num(mo);
+        if (m <= 0.0) return CMCP_OK; /* schema author error */
+        if (value->type == CMCP_JSON_INT && mo->type == CMCP_JSON_INT
+            && mo->i != 0) {
+            /* Integer fast-path avoids fp error. */
+            if (value->i % mo->i != 0)
+                return fail(err, path, "multipleOf",
+                             "value is not a multiple of %lld", mo->i);
+        } else {
+            /* Floating-point modulo, with a tolerance for representation
+             * error. Ajv uses a similar epsilon when comparing fmod
+             * results to zero. */
+            double r = fmod(v, m);
+            double eps = 1e-9 * (fabs(v) > 1.0 ? fabs(v) : 1.0);
+            if (fabs(r) > eps && fabs(r - m) > eps)
+                return fail(err, path, "multipleOf",
+                             "value is not a multiple of %g", m);
         }
     }
     return CMCP_OK;
+}
+
+/* ====================================================================== */
+/* Object keywords                                                         */
+/* ====================================================================== */
+
+/* Returns whether the value-side key `key` is covered by `properties`
+ * (literal key match) or by any `patternProperties` regex. */
+static int key_covered(const cmcp_json_t *schema, const char *key) {
+    const cmcp_json_t *props = cmcp_json_object_get(schema, "properties");
+    if (props && props->type == CMCP_JSON_OBJECT
+        && cmcp_json_object_get(props, key))
+        return 1;
+    const cmcp_json_t *pp = cmcp_json_object_get(schema, "patternProperties");
+    if (pp && pp->type == CMCP_JSON_OBJECT) {
+        for (size_t i = 0; i < pp->obj.len; i++) {
+            regex_t re;
+            if (regcomp(&re, pp->obj.keys[i], REG_EXTENDED | REG_NOSUB) != 0)
+                continue;
+            int m = regexec(&re, key, 0, NULL, 0) == 0;
+            regfree(&re);
+            if (m) return 1;
+        }
+    }
+    return 0;
 }
 
 static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
@@ -287,28 +400,202 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
         }
     }
 
-    /* properties + additionalProperties: false */
+    /* minProperties / maxProperties */
+    const cmcp_json_t *minp = cmcp_json_object_get(schema, "minProperties");
+    const cmcp_json_t *maxp = cmcp_json_object_get(schema, "maxProperties");
+    if (minp && minp->type == CMCP_JSON_INT
+        && (long long)value->obj.len < minp->i)
+        return fail(err, path, "minProperties",
+                     "too few properties (min %lld)", minp->i);
+    if (maxp && maxp->type == CMCP_JSON_INT
+        && (long long)value->obj.len > maxp->i)
+        return fail(err, path, "maxProperties",
+                     "too many properties (max %lld)", maxp->i);
+
+    /* propertyNames: subschema applied to each key (as a string value).
+     * The subschema validates against a synthetic string node so a
+     * caller can constrain keys to e.g. /^[a-z]+$/. */
+    const cmcp_json_t *pn = cmcp_json_object_get(schema, "propertyNames");
+    if (pn) {
+        for (size_t i = 0; i < value->obj.len; i++) {
+            cmcp_json_t *key_node = cmcp_json_new_string(value->obj.keys[i]);
+            if (!key_node) return CMCP_ENOMEM;
+            size_t saved = path_push_prop(path, value->obj.keys[i]);
+            int rc = validate(pn, key_node, path, err);
+            path_pop(path, saved);
+            cmcp_json_free(key_node);
+            if (rc != CMCP_OK) {
+                /* Reframe the keyword: the constraint that failed is
+                 * propertyNames, not whatever sub-keyword the inner
+                 * validate() reported. */
+                if (err && err->keyword) {
+                    free(err->keyword);
+                    err->keyword = xstrdup("propertyNames");
+                }
+                return rc;
+            }
+        }
+    }
+
+    /* properties + patternProperties + additionalProperties */
     const cmcp_json_t *props = cmcp_json_object_get(schema, "properties");
+    const cmcp_json_t *pp    = cmcp_json_object_get(schema, "patternProperties");
     const cmcp_json_t *addl  = cmcp_json_object_get(schema, "additionalProperties");
-    int reject_addl = addl && addl->type == CMCP_JSON_BOOL && !addl->b;
-    int has_props = props && props->type == CMCP_JSON_OBJECT;
+
+    /* additionalProperties: false  → reject any unlisted key
+     * additionalProperties: subschema → apply to any key not in
+     *                                   properties / patternProperties */
+    int addl_false = addl && addl->type == CMCP_JSON_BOOL && !addl->b;
+    int addl_is_subschema = addl &&
+        (addl->type == CMCP_JSON_OBJECT || addl->type == CMCP_JSON_BOOL);
 
     for (size_t i = 0; i < value->obj.len; i++) {
         const char *key = value->obj.keys[i];
         const cmcp_json_t *child = value->obj.values[i];
-        const cmcp_json_t *subschema = NULL;
-        if (has_props) subschema = cmcp_json_object_get(props, key);
 
-        if (!subschema && reject_addl) {
+        /* Direct properties match. */
+        const cmcp_json_t *sub = NULL;
+        if (props && props->type == CMCP_JSON_OBJECT)
+            sub = cmcp_json_object_get(props, key);
+
+        if (sub) {
+            size_t saved = path_push_prop(path, key);
+            int rc = validate(sub, child, path, err);
+            path_pop(path, saved);
+            if (rc != CMCP_OK) return rc;
+        }
+
+        /* patternProperties: every matching pattern's subschema must
+         * pass. (Note: this can compose with `properties` on the same
+         * key — both are applied.) */
+        int matched_pp = 0;
+        if (pp && pp->type == CMCP_JSON_OBJECT) {
+            for (size_t j = 0; j < pp->obj.len; j++) {
+                regex_t re;
+                if (regcomp(&re, pp->obj.keys[j], REG_EXTENDED | REG_NOSUB) != 0)
+                    continue;
+                int m = regexec(&re, key, 0, NULL, 0) == 0;
+                regfree(&re);
+                if (m) {
+                    matched_pp = 1;
+                    const cmcp_json_t *ps = pp->obj.values[j];
+                    size_t saved = path_push_prop(path, key);
+                    int rc = validate(ps, child, path, err);
+                    path_pop(path, saved);
+                    if (rc != CMCP_OK) return rc;
+                }
+            }
+        }
+
+        /* additionalProperties is only consulted for keys NOT covered
+         * by either properties or patternProperties. */
+        int covered = sub != NULL || matched_pp;
+        if (!covered && addl_false) {
             size_t saved = path_push_prop(path, key);
             int rc = fail(err, path, "additionalProperties",
                            "unexpected property");
             path_pop(path, saved);
             return rc;
         }
-        if (subschema && subschema->type == CMCP_JSON_OBJECT) {
+        if (!covered && addl_is_subschema && !addl_false) {
             size_t saved = path_push_prop(path, key);
-            int rc = validate(subschema, child, path, err);
+            int rc = validate(addl, child, path, err);
+            path_pop(path, saved);
+            if (rc != CMCP_OK) return rc;
+        }
+        (void)key_covered; /* silence unused if future change shadows it */
+    }
+    return CMCP_OK;
+}
+
+/* ====================================================================== */
+/* Array keywords                                                          */
+/* ====================================================================== */
+
+static int check_array(const cmcp_json_t *schema, const cmcp_json_t *value,
+                        path_buf_t *path, cmcp_schema_error_t *err) {
+    if (value->type != CMCP_JSON_ARRAY) return CMCP_OK;
+
+    /* minItems / maxItems */
+    const cmcp_json_t *mi = cmcp_json_object_get(schema, "minItems");
+    const cmcp_json_t *xi = cmcp_json_object_get(schema, "maxItems");
+    if (mi && mi->type == CMCP_JSON_INT
+        && (long long)value->arr.len < mi->i)
+        return fail(err, path, "minItems",
+                     "array too short (min %lld)", mi->i);
+    if (xi && xi->type == CMCP_JSON_INT
+        && (long long)value->arr.len > xi->i)
+        return fail(err, path, "maxItems",
+                     "array too long (max %lld)", xi->i);
+
+    /* uniqueItems */
+    const cmcp_json_t *uniq = cmcp_json_object_get(schema, "uniqueItems");
+    if (uniq && uniq->type == CMCP_JSON_BOOL && uniq->b) {
+        for (size_t i = 0; i < value->arr.len; i++) {
+            for (size_t j = i + 1; j < value->arr.len; j++) {
+                if (cmcp_json_equal(value->arr.items[i], value->arr.items[j]))
+                    return fail(err, path, "uniqueItems",
+                                 "duplicate items at indices %zu and %zu",
+                                 i, j);
+            }
+        }
+    }
+
+    /* prefixItems (2020-12) OR tuple-form items (draft-07): an array
+     * of subschemas applied positionally. */
+    const cmcp_json_t *prefix = cmcp_json_object_get(schema, "prefixItems");
+    const cmcp_json_t *items  = cmcp_json_object_get(schema, "items");
+    const cmcp_json_t *tuple  = NULL;
+    if (prefix && prefix->type == CMCP_JSON_ARRAY) tuple = prefix;
+    else if (items && items->type == CMCP_JSON_ARRAY) tuple = items;
+
+    size_t prefix_len = tuple ? tuple->arr.len : 0;
+    if (tuple) {
+        size_t bound = prefix_len < value->arr.len
+                          ? prefix_len : value->arr.len;
+        for (size_t i = 0; i < bound; i++) {
+            size_t saved = path_push_idx(path, i);
+            int rc = validate(tuple->arr.items[i], value->arr.items[i],
+                              path, err);
+            path_pop(path, saved);
+            if (rc != CMCP_OK) return rc;
+        }
+    }
+
+    /* items beyond the prefix:
+     *   - draft-07 with tuple `items`: `additionalItems` is the schema
+     *     (or boolean) for entries past `items.length`
+     *   - draft-2020-12 with `prefixItems`: `items` (now scalar) is
+     *     the schema for entries past `prefixItems.length`
+     *   - single-subschema `items` (legacy / non-tuple): applied to
+     *     every element */
+    const cmcp_json_t *rest = NULL;
+    int rest_false = 0;
+    if (prefix) {
+        if (items && items->type != CMCP_JSON_ARRAY) {
+            if (items->type == CMCP_JSON_BOOL && !items->b) rest_false = 1;
+            else rest = items;
+        }
+    } else if (items && items->type == CMCP_JSON_ARRAY) {
+        const cmcp_json_t *ai = cmcp_json_object_get(schema,
+                                                     "additionalItems");
+        if (ai) {
+            if (ai->type == CMCP_JSON_BOOL && !ai->b) rest_false = 1;
+            else rest = ai;
+        }
+    } else if (items && items->type != CMCP_JSON_ARRAY) {
+        rest = items;
+    }
+
+    if (rest_false && value->arr.len > prefix_len)
+        return fail(err, path, "additionalItems",
+                     "additional items not allowed past index %zu",
+                     prefix_len);
+
+    if (rest) {
+        for (size_t i = prefix_len; i < value->arr.len; i++) {
+            size_t saved = path_push_idx(path, i);
+            int rc = validate(rest, value->arr.items[i], path, err);
             path_pop(path, saved);
             if (rc != CMCP_OK) return rc;
         }
@@ -316,29 +603,103 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
     return CMCP_OK;
 }
 
-static int check_array(const cmcp_json_t *schema, const cmcp_json_t *value,
-                        path_buf_t *path, cmcp_schema_error_t *err) {
-    if (value->type != CMCP_JSON_ARRAY) return CMCP_OK;
-    const cmcp_json_t *items = cmcp_json_object_get(schema, "items");
-    if (!items || items->type != CMCP_JSON_OBJECT) return CMCP_OK;
-    for (size_t i = 0; i < value->arr.len; i++) {
-        size_t saved = path_push_idx(path, i);
-        int rc = validate(items, value->arr.items[i], path, err);
-        path_pop(path, saved);
-        if (rc != CMCP_OK) return rc;
+/* ====================================================================== */
+/* Combinators: allOf / anyOf / oneOf / not                                */
+/* ====================================================================== */
+
+static int check_combinators(const cmcp_json_t *schema, const cmcp_json_t *value,
+                              path_buf_t *path, cmcp_schema_error_t *err) {
+    /* allOf — every subschema must pass. The first failure surfaces. */
+    const cmcp_json_t *allof = cmcp_json_object_get(schema, "allOf");
+    if (allof && allof->type == CMCP_JSON_ARRAY) {
+        for (size_t i = 0; i < allof->arr.len; i++) {
+            int rc = validate(allof->arr.items[i], value, path, err);
+            if (rc != CMCP_OK) return rc;
+        }
     }
+
+    /* anyOf — at least one subschema must pass. We probe quietly; if
+     * none match, surface a single "no branch matched" error. */
+    const cmcp_json_t *anyof = cmcp_json_object_get(schema, "anyOf");
+    if (anyof && anyof->type == CMCP_JSON_ARRAY) {
+        int found = 0;
+        for (size_t i = 0; i < anyof->arr.len; i++) {
+            if (validate_quiet(anyof->arr.items[i], value, path) == CMCP_OK) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+            return fail(err, path, "anyOf", "no anyOf branch matched");
+    }
+
+    /* oneOf — exactly one must pass. */
+    const cmcp_json_t *oneof = cmcp_json_object_get(schema, "oneOf");
+    if (oneof && oneof->type == CMCP_JSON_ARRAY) {
+        size_t hits = 0;
+        for (size_t i = 0; i < oneof->arr.len && hits < 2; i++) {
+            if (validate_quiet(oneof->arr.items[i], value, path) == CMCP_OK)
+                hits++;
+        }
+        if (hits == 0)
+            return fail(err, path, "oneOf", "no oneOf branch matched");
+        if (hits > 1)
+            return fail(err, path, "oneOf", "multiple oneOf branches matched");
+    }
+
+    /* not — subschema must NOT pass. */
+    const cmcp_json_t *neg = cmcp_json_object_get(schema, "not");
+    if (neg) {
+        if (validate_quiet(neg, value, path) == CMCP_OK)
+            return fail(err, path, "not", "value matched a forbidden subschema");
+    }
+
     return CMCP_OK;
 }
 
+/* if / then / else conditional. `if` is evaluated in schema-only mode
+ * — its failure is silent and only steers the branch selection. */
+static int check_conditional(const cmcp_json_t *schema, const cmcp_json_t *value,
+                              path_buf_t *path, cmcp_schema_error_t *err) {
+    const cmcp_json_t *if_sch   = cmcp_json_object_get(schema, "if");
+    if (!if_sch) return CMCP_OK;
+    const cmcp_json_t *then_sch = cmcp_json_object_get(schema, "then");
+    const cmcp_json_t *else_sch = cmcp_json_object_get(schema, "else");
+    int if_matched = validate_quiet(if_sch, value, path) == CMCP_OK;
+    if (if_matched && then_sch)
+        return validate(then_sch, value, path, err);
+    if (!if_matched && else_sch)
+        return validate(else_sch, value, path, err);
+    return CMCP_OK;
+}
+
+/* ====================================================================== */
+/* Top-level dispatch                                                      */
+/* ====================================================================== */
+
 static int validate(const cmcp_json_t *schema, const cmcp_json_t *value,
                      path_buf_t *path, cmcp_schema_error_t *err) {
+    /* Boolean schemas — JSON Schema allows `true` (always pass) and
+     * `false` (always fail) as a whole schema. They appear most often
+     * as subschemas inside additionalProperties / items / patternProperties. */
+    if (schema->type == CMCP_JSON_BOOL) {
+        if (schema->b) return CMCP_OK;
+        return fail(err, path, "false", "schema rejects all values");
+    }
+    if (schema->type != CMCP_JSON_OBJECT)
+        /* Schema author error — silently accept. */
+        return CMCP_OK;
+
     int rc;
-    if ((rc = check_type(schema, value, path, err))   != CMCP_OK) return rc;
-    if ((rc = check_enum(schema, value, path, err))   != CMCP_OK) return rc;
-    if ((rc = check_string(schema, value, path, err)) != CMCP_OK) return rc;
-    if ((rc = check_number(schema, value, path, err)) != CMCP_OK) return rc;
-    if ((rc = check_object(schema, value, path, err)) != CMCP_OK) return rc;
-    if ((rc = check_array(schema, value, path, err))  != CMCP_OK) return rc;
+    if ((rc = check_type(schema, value, path, err))          != CMCP_OK) return rc;
+    if ((rc = check_enum(schema, value, path, err))          != CMCP_OK) return rc;
+    if ((rc = check_const(schema, value, path, err))         != CMCP_OK) return rc;
+    if ((rc = check_string(schema, value, path, err))        != CMCP_OK) return rc;
+    if ((rc = check_number(schema, value, path, err))        != CMCP_OK) return rc;
+    if ((rc = check_object(schema, value, path, err))        != CMCP_OK) return rc;
+    if ((rc = check_array(schema, value, path, err))         != CMCP_OK) return rc;
+    if ((rc = check_combinators(schema, value, path, err))   != CMCP_OK) return rc;
+    if ((rc = check_conditional(schema, value, path, err))   != CMCP_OK) return rc;
     return CMCP_OK;
 }
 
@@ -349,7 +710,10 @@ static int validate(const cmcp_json_t *schema, const cmcp_json_t *value,
 int cmcp_schema_validate(const cmcp_json_t *schema,
                           const cmcp_json_t *value,
                           cmcp_schema_error_t *err) {
-    if (!schema || schema->type != CMCP_JSON_OBJECT) return CMCP_EINVAL;
+    /* Allow boolean top-level schemas (true / false). */
+    if (!schema) return CMCP_EINVAL;
+    if (schema->type != CMCP_JSON_OBJECT && schema->type != CMCP_JSON_BOOL)
+        return CMCP_EINVAL;
     if (err) cmcp_schema_error_init(err);
 
     /* Treat NULL value as a JSON null so the inner functions can deref

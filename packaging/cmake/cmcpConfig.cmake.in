@@ -43,12 +43,15 @@ foreach(_comp ${_cmcp_components})
 endforeach()
 
 # Dependency wiring. server/client both pull in core; core pulls in
-# libcurl + pthread (the transport's hard deps). Static linking
-# requires this chain to be expressed so the consumer's link line
-# picks up the transitive symbols.
+# libcurl + pthread (the transport's hard deps) and libm (the schema
+# validator's multipleOf uses fmod). Static linking requires this
+# chain to be expressed so the consumer's link line picks up the
+# transitive symbols. libm is the platform math library — on Linux
+# `-lm`; on macOS it's part of libc and CMake silently elides the
+# flag, so the literal `m` is portable.
 if(TARGET cmcp::core)
     set_target_properties(cmcp::core PROPERTIES
-        INTERFACE_LINK_LIBRARIES "CURL::libcurl;Threads::Threads")
+        INTERFACE_LINK_LIBRARIES "CURL::libcurl;Threads::Threads;m")
 endif()
 if(TARGET cmcp::server AND TARGET cmcp::core)
     set_target_properties(cmcp::server PROPERTIES

@@ -338,13 +338,14 @@ fuzz/         libFuzzer harnesses + seed corpora (Tier 5.4)
 conformance/  cross-check vs MCP TS SDK; replay-based regression gate
               over captured wire transcripts; agent playbooks
 scripts/      tooling (spec-version drift watch)
-docs/         architecture, schema-subset, agentic-readiness plan,
+docs/         architecture, schema-conformance, agentic-readiness plan,
               spec-version-upgrade checklist
 ```
 
 Architecture, threading model, and ownership rules are in
 [`docs/architecture.md`](docs/architecture.md). The supported
-JSON Schema subset is in [`docs/schema-subset.md`](docs/schema-subset.md).
+JSON Schema validator surface (near-parity with Ajv) is documented in
+[`docs/schema-conformance.md`](docs/schema-conformance.md).
 The Tier-5 quality plan is in
 [`docs/agentic-readiness.md`](docs/agentic-readiness.md).
 
