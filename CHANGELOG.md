@@ -522,6 +522,80 @@ per keyword in `docs/schema-conformance.md`. The 6.7.3 Ajv cross-check
 harness (corpus of ≥500 (schema, value) pairs vs Ajv) lands in a
 follow-up commit alongside `make schema-conformance`.
 
+### 6.5.1 threat model + HTTP slowloris defense
+
+First written threat model for cMCP, plus the HTTP transport's first
+DoS-defense layer.
+
+#### `docs/threat-model.md`
+
+STRIDE pass over the 5 trust boundaries (peer↔transport server-side,
+peer↔transport client-side, transport↔rpc, rpc↔handler, handler↔host).
+Per boundary: assets, numbered threats, mitigations (existing 🟢,
+partial 🟡, deferred ◻️, out-of-scope ⛔). Cross-references the
+hostile-peer suite and the fuzz harnesses for "what we test."
+Includes the explicit closed-question record on TLS: terminator only,
+not "TLS later" — `docs/deployment-tls.md` covers the proxy recipes
+(slated for 6.5.4).
+
+#### Per-connection read budget (`src/transport_http.c`)
+
+Two new env knobs, both snapshotted at `cmcp_transport_http_listen`
+time (per-request handling stays allocation-free):
+
+- `CMCP_HTTP_IDLE_TIMEOUT_MS` (default `30000`). Caps any single
+  `recv()` wait. A slow-write peer that dribbles bytes one per
+  minute can no longer hold a worker indefinitely.
+- `CMCP_HTTP_DEADLINE_MS` (default `120000`). Caps the cumulative
+  wall-clock budget for one request-receive cycle (headers + body).
+  Defends against the dribble-just-fast-enough-to-evade-idle case:
+  the peer sends one byte every 25ms, never trips the idle timer,
+  but blows the whole-request deadline.
+
+Both default to non-zero values; `0` or negative disables. When
+either trips, the server returns `408 Request Timeout` and closes
+the connection.
+
+Implementation: a `conn_budget_t` struct threaded through
+`read_headers_block` and `read_exact`. A new `budgeted_recv()` helper
+wraps `poll()` + `recv()` and decrements the deadline by the wall-
+clock elapsed (`clock_gettime(CLOCK_MONOTONIC)`). `errno = ETIMEDOUT`
+on timeout so the caller maps to `CMCP_ETIMEOUT` → 408.
+
+#### Tests
+
+Two new cases in `tests/test_http_server.c`:
+
+- `test_slowloris_idle_timeout`: send a partial request line, wait
+  past the configured idle window (250ms in the test), assert
+  408 or clean hangup.
+- `test_slowloris_deadline`: send one byte every 50ms for a request
+  that takes ~1.5s — under the 1000ms idle but over the 500ms
+  deadline. Assert the server closes us out.
+
+Both install `SIG_IGN` for `SIGPIPE` (the library uses `MSG_NOSIGNAL`
+on its sends; the tests' raw `send()` helpers don't, so writing into
+a closed socket would otherwise kill the test process). Total
+suite: 2892 → 2903 assertions across 22 binaries. ASan / valgrind
+clean.
+
+#### Threat-table cross-refs
+
+The threat-model entries `B1.4` (slow-write peer) and `B1.5`
+(connection flood) reference the new env knobs. Mitigations for
+`B1.4` are 🟢 (this commit). `B1.5` is 🟢 *with a 6.5.2 caveat* —
+the concurrent-connection cap + accept-rate limiter land in the
+next commit; the threat-model text is forward-stated and will be
+accurate once 6.5.2 ships.
+
+#### Deferred to 6.5.2 / 6.5.3 / 6.5.4
+
+- `CMCP_HTTP_MAX_CONNECTIONS` + accept-rate token bucket (6.5.2).
+- Protocol-layer limits (`CMCP_RPC_MAX_DEPTH`, max array/object
+  size, max in-flight) in `src/rpc.c` (6.5.3).
+- Log redactor + `CMCP_LOG_REDACT` (6.5.4).
+- `docs/deployment-tls.md` (terminator recipes; 6.5.4).
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at

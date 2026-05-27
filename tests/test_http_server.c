@@ -17,6 +17,7 @@
 #include "cmcp_types.h"
 
 #include <poll.h>
+#include <signal.h>
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -900,8 +901,131 @@ static void test_sse_event_ids_and_replay(void) {
 }
 
 /* ====================================================================== */
+/* Slowloris defense (Tier 6 axis 6.5.1b)                                  */
+/* ====================================================================== */
+
+/* A peer that opens a connection and sends only partial headers — never
+ * finishing the request — used to be able to hold a worker indefinitely.
+ * With CMCP_HTTP_IDLE_TIMEOUT_MS the server closes the connection (and
+ * sends 408) after the configured idle window. We set 250ms here to
+ * keep the test cheap. */
+static void test_slowloris_idle_timeout(void) {
+    setenv("CMCP_HTTP_IDLE_TIMEOUT_MS", "250", 1);
+
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_server_t *s = cmcp_server_new("slow-loris-test", "0.1.0");
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    TEST_ASSERT(t != NULL);
+
+    server_arg_t arg = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &arg);
+
+    int fd = open_client(port);
+    TEST_ASSERT(fd >= 0);
+
+    /* Send only the request line and a leading header — no terminator.
+     * A polite peer would follow up; a slowloris stops here. */
+    const char *partial =
+        "POST /mcp HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n";
+    TEST_ASSERT(send_all(fd, partial, strlen(partial)) == 0);
+
+    /* Wait past the idle window and assert the server closes us out.
+     * It should send 408 first; we tolerate either receiving the 408
+     * or an outright RST — both are valid signals that the server is
+     * defending itself, not hanging. */
+    char buf[1024];
+    /* Bounded read window: timeout is wall-clock at the test side, so
+     * we wait up to 2s for the server to react to the 250ms idle. */
+    struct pollfd p = { fd, POLLIN, 0 };
+    int rv = poll(&p, 1, 2000);
+    TEST_ASSERT(rv > 0);    /* server closed or wrote something */
+    ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
+    close(fd);
+    if (n > 0) {
+        buf[n] = '\0';
+        TEST_ASSERT(strstr(buf, "408") != NULL);
+    } else {
+        /* n == 0: server hung up (no bytes); n < 0: RST. Either way,
+         * the connection did not survive the idle window — pass. */
+        TEST_ASSERT(n <= 0);
+    }
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+    unsetenv("CMCP_HTTP_IDLE_TIMEOUT_MS");
+}
+
+/* The whole-request deadline applies even if the peer dribbles bytes
+ * inside the idle window. We set a very short deadline (500ms) and a
+ * normal idle (1000ms), then have a peer send one byte every ~250ms
+ * — never tripping the idle timer but blowing the deadline. */
+static void test_slowloris_deadline(void) {
+    setenv("CMCP_HTTP_IDLE_TIMEOUT_MS", "1000", 1);
+    setenv("CMCP_HTTP_DEADLINE_MS", "500", 1);
+
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_server_t *s = cmcp_server_new("slow-deadline-test", "0.1.0");
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    TEST_ASSERT(t != NULL);
+
+    server_arg_t arg = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &arg);
+
+    int fd = open_client(port);
+    TEST_ASSERT(fd >= 0);
+
+    /* Send a long request line one byte at a time, ~50ms between bytes.
+     * Each individual recv is well under idle_ms; cumulative time over
+     * deadline_ms triggers the whole-request budget. */
+    const char *partial = "POST /mcp HTTP/1.1\r\nHost: x\r\n";
+    for (size_t i = 0; i < strlen(partial); i++) {
+        if (send_all(fd, partial + i, 1) != 0) break;
+        struct timespec ts = { 0, 50 * 1000 * 1000 };  /* 50ms */
+        nanosleep(&ts, NULL);
+    }
+
+    /* By now ~1.5s elapsed at the test side; the server must have
+     * tripped the 500ms deadline. */
+    struct pollfd p = { fd, POLLIN, 0 };
+    int rv = poll(&p, 1, 2000);
+    TEST_ASSERT(rv > 0);
+    char buf[1024];
+    ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
+    close(fd);
+    if (n > 0) {
+        buf[n] = '\0';
+        TEST_ASSERT(strstr(buf, "408") != NULL);
+    } else {
+        TEST_ASSERT(n <= 0);
+    }
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+    unsetenv("CMCP_HTTP_IDLE_TIMEOUT_MS");
+    unsetenv("CMCP_HTTP_DEADLINE_MS");
+}
+
+/* ====================================================================== */
 
 int main(void) {
+    /* The slowloris tests intentionally write to a socket while the
+     * server is closing it from its end (idle / deadline trip). Without
+     * SIGPIPE ignored, the test process gets killed mid-send. The
+     * library itself uses MSG_NOSIGNAL on its sends; the tests' raw
+     * `send()` helpers don't, so we ignore at the process level. */
+    signal(SIGPIPE, SIG_IGN);
+
     fprintf(stderr, "test_http_server:\n");
 
     TEST_RUN(test_initialize_round_trip);
@@ -912,6 +1036,8 @@ int main(void) {
     TEST_RUN(test_origin_allowlist);
     TEST_RUN(test_sse_event_ids_and_replay);
     TEST_RUN(test_close_unblocks_reader);
+    TEST_RUN(test_slowloris_idle_timeout);
+    TEST_RUN(test_slowloris_deadline);
 
     TEST_DONE();
 }

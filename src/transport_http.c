@@ -73,6 +73,14 @@
 #define HTTP_SSE_REPLAY_DEFAULT  256            /* events kept for resumption */
 #define HTTP_SSE_REPLAY_MAX      65536          /* env-set ceiling */
 
+/* Slowloris / per-connection-budget defaults (Tier 6 axis 6.5.1). The
+ * idle timeout caps any single recv() wait — a slow-write peer that
+ * dribbles bytes can't hold a worker indefinitely. The deadline caps
+ * the full request-reception window: header block + body read combined.
+ * Both are env-tunable; 0 (or negative) disables. */
+#define HTTP_IDLE_TIMEOUT_DEFAULT_MS  30000     /* per-recv wait */
+#define HTTP_DEADLINE_DEFAULT_MS      120000    /* whole request-receive wall clock */
+
 /* Wake signal for SSE holder threads so close() can join them. */
 #ifndef CMCP_HTTP_WAKE_SIGNAL
 #define CMCP_HTTP_WAKE_SIGNAL  SIGUSR2
@@ -93,12 +101,69 @@ typedef cmcp_http_request_t http_request_t;
 #define http_header_get    cmcp_http_header_get
 
 /* ====================================================================== */
-/* Read until \r\n\r\n or limit reached. Caller frees *out_buf.            */
-/* Returns CMCP_OK on success, CMCP_EIO on socket error / EOF before       */
-/* end of headers, CMCP_EPROTOCOL on header section overflow.              */
+/* Per-connection read budget (Tier 6 axis 6.5.1)                          */
 /* ====================================================================== */
 
-static int read_headers_block(int fd, char **out_buf, size_t *out_len,
+/* Threaded through every recv() inside one request-receive cycle. The
+ * idle limit caps any one poll() wait; the deadline caps the cumulative
+ * wall-clock budget for the whole request. */
+typedef struct {
+    int idle_ms;        /* per-recv timeout; <= 0 means no idle cap */
+    int deadline_ms;    /* remaining whole-request budget; < 0 means none */
+} conn_budget_t;
+
+/* Wait until fd is readable (subject to budget), then recv. Same return
+ * shape as recv(): >0 bytes, 0 peer-closed, -1 error (errno set; uses
+ * ETIMEDOUT to signal idle/deadline expiry so the caller can map it
+ * to a `408 Request Timeout`). Updates the deadline in-place. */
+static ssize_t budgeted_recv(int fd, void *buf, size_t n,
+                              conn_budget_t *b) {
+    int wait_ms = b->idle_ms > 0 ? b->idle_ms : -1;
+    if (b->deadline_ms >= 0) {
+        if (wait_ms < 0 || b->deadline_ms < wait_ms) wait_ms = b->deadline_ms;
+    }
+
+    struct timespec t0;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    struct pollfd p = { fd, POLLIN, 0 };
+    int rv = poll(&p, 1, wait_ms);
+
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long elapsed_ms = (long)(t1.tv_sec  - t0.tv_sec)  * 1000 +
+                      (long)(t1.tv_nsec - t0.tv_nsec) / 1000000;
+    if (b->deadline_ms >= 0) {
+        b->deadline_ms -= (int)elapsed_ms;
+        if (b->deadline_ms < 0) b->deadline_ms = 0;
+    }
+
+    if (rv < 0) {
+        /* EINTR loops at the caller's discretion; everything else is a
+         * hard error. */
+        return -1;
+    }
+    if (rv == 0) {
+        errno = ETIMEDOUT;
+        return -1;
+    }
+    if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+        /* Peer error / hangup before any bytes — treat as clean close
+         * so the caller distinguishes from "transport corrupted." */
+        return 0;
+    }
+    return recv(fd, buf, n, 0);
+}
+
+/* ====================================================================== */
+/* Read until \r\n\r\n or limit reached. Caller frees *out_buf.            */
+/* Returns CMCP_OK on success, CMCP_EIO on socket error / EOF before       */
+/* end of headers, CMCP_EPROTOCOL on header section overflow,              */
+/* CMCP_ETIMEOUT when the idle / deadline budget expires.                  */
+/* ====================================================================== */
+
+static int read_headers_block(int fd, conn_budget_t *budget,
+                               char **out_buf, size_t *out_len,
                                size_t *out_body_offset) {
     size_t cap = 4096, len = 0;
     char *buf = (char *)malloc(cap);
@@ -114,8 +179,12 @@ static int read_headers_block(int fd, char **out_buf, size_t *out_len,
             buf = nb;
             cap = new_cap;
         }
-        ssize_t n = recv(fd, buf + len, cap - 1 - len, 0);
-        if (n <= 0) { free(buf); return CMCP_EIO; }
+        ssize_t n = budgeted_recv(fd, buf + len, cap - 1 - len, budget);
+        if (n < 0) {
+            int rc = (errno == ETIMEDOUT) ? CMCP_ETIMEOUT : CMCP_EIO;
+            free(buf); return rc;
+        }
+        if (n == 0) { free(buf); return CMCP_EIO; }
         len += (size_t)n;
         buf[len] = '\0';
 
@@ -140,8 +209,8 @@ static int read_headers_block(int fd, char **out_buf, size_t *out_len,
 }
 
 /* Read exactly `len` bytes into a fresh buffer (NUL-terminated). */
-static int read_exact(int fd, size_t len, char **out, char *prefix,
-                       size_t prefix_len) {
+static int read_exact(int fd, conn_budget_t *budget, size_t len,
+                       char **out, char *prefix, size_t prefix_len) {
     char *buf = (char *)malloc(len + 1);
     if (!buf) return CMCP_ENOMEM;
     size_t have = 0;
@@ -151,8 +220,12 @@ static int read_exact(int fd, size_t len, char **out, char *prefix,
         have = take;
     }
     while (have < len) {
-        ssize_t n = recv(fd, buf + have, len - have, 0);
-        if (n <= 0) { free(buf); return CMCP_EIO; }
+        ssize_t n = budgeted_recv(fd, buf + have, len - have, budget);
+        if (n < 0) {
+            int rc = (errno == ETIMEDOUT) ? CMCP_ETIMEOUT : CMCP_EIO;
+            free(buf); return rc;
+        }
+        if (n == 0) { free(buf); return CMCP_EIO; }
         have += (size_t)n;
     }
     buf[len] = '\0';
@@ -161,9 +234,10 @@ static int read_exact(int fd, size_t len, char **out, char *prefix,
 }
 
 /* Read one full HTTP request from fd. */
-static int http_read_request(int fd, http_request_t *out) {
+static int http_read_request(int fd, conn_budget_t *budget,
+                              http_request_t *out) {
     char *block = NULL; size_t block_len = 0, body_off = 0;
-    int rc = read_headers_block(fd, &block, &block_len, &body_off);
+    int rc = read_headers_block(fd, budget, &block, &block_len, &body_off);
     if (rc != CMCP_OK) return rc;
 
     rc = cmcp_http_parse_head(block, body_off, out);
@@ -196,7 +270,7 @@ static int http_read_request(int fd, http_request_t *out) {
         out->body_len = 0;
     } else {
         char *body = NULL;
-        rc = read_exact(fd, body_len, &body, prefix, prefix_len);
+        rc = read_exact(fd, budget, body_len, &body, prefix, prefix_len);
         if (rc != CMCP_OK) {
             free(block); http_request_clear(out); return rc;
         }
@@ -378,6 +452,12 @@ typedef struct http_impl {
      * comma-separated list, snapshot from CMCP_HTTP_ALLOWED_ORIGINS at
      * listen time so per-request handling is allocation-free. */
     char              *allowed_origins;
+
+    /* Per-connection read budget (Tier 6 axis 6.5.1). Snapshotted from
+     * CMCP_HTTP_IDLE_TIMEOUT_MS and CMCP_HTTP_DEADLINE_MS at listen
+     * time. Both are advisory caps; 0 (or negative) disables. */
+    int                idle_timeout_ms;
+    int                deadline_ms;
 } http_impl_t;
 
 typedef struct {
@@ -721,11 +801,22 @@ static int check_origin(http_impl_t *impl, int fd, const http_request_t *req) {
 
 static void handle_one_connection(http_impl_t *impl, int fd) {
     http_request_t req = {0};
-    int rc = http_read_request(fd, &req);
+    conn_budget_t budget = {
+        .idle_ms     = impl->idle_timeout_ms,
+        .deadline_ms = impl->deadline_ms,
+    };
+    int rc = http_read_request(fd, &budget, &req);
     if (rc != CMCP_OK) {
         if (rc == CMCP_EUNSUPPORTED) {
             reply_error(fd, 501, "Not Implemented",
                          "chunked transfer encoding not supported\n");
+        } else if (rc == CMCP_ETIMEOUT) {
+            /* Slowloris / deadline: peer dribbled bytes (or stalled
+             * entirely) past the configured budget. 408 is the spec
+             * code for client-side timeout; libcurl + most browsers
+             * treat it as a clean abort. */
+            reply_error(fd, 408, "Request Timeout",
+                         "idle or whole-request deadline exceeded\n");
         } else {
             reply_error(fd, 400, "Bad Request", "malformed request\n");
         }
@@ -1138,6 +1229,23 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
         size_t n = strlen(envv);
         impl->allowed_origins = (char *)malloc(n + 1);
         if (impl->allowed_origins) memcpy(impl->allowed_origins, envv, n + 1);
+    }
+
+    /* Snapshot the per-connection read-budget knobs (Tier 6 axis 6.5.1).
+     * Idle: per-recv timeout — slowloris defense. Deadline: cumulative
+     * wall-clock budget for the whole request-receive cycle (headers +
+     * body). Both default to the constants; 0 or negative disables. */
+    impl->idle_timeout_ms = HTTP_IDLE_TIMEOUT_DEFAULT_MS;
+    const char *it = getenv("CMCP_HTTP_IDLE_TIMEOUT_MS");
+    if (it && *it) {
+        char *end; long v = strtol(it, &end, 10);
+        if (end != it && *end == '\0') impl->idle_timeout_ms = (int)v;
+    }
+    impl->deadline_ms = HTTP_DEADLINE_DEFAULT_MS;
+    const char *dl = getenv("CMCP_HTTP_DEADLINE_MS");
+    if (dl && *dl) {
+        char *end; long v = strtol(dl, &end, 10);
+        if (end != dl && *end == '\0') impl->deadline_ms = (int)v;
     }
 
     /* Snapshot the SSE replay-buffer size from CMCP_HTTP_SSE_REPLAY_BUFFER
