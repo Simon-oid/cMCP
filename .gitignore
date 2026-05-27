@@ -8,6 +8,10 @@ build/
 # Source tarballs produced by `make dist` (Tier 6 axis 6.4)
 cmcp-*.tar.gz
 
+# Doxygen output (Tier 6 axis 6.3). `make docs` regenerates everything
+# under docs/api/; we don't track the generated reference site.
+docs/api/
+
 # install-smoke consumer build artefacts (compiled in temp dirs, but
 # the local Makefile drops pkgconfig-smoke here when invoked by hand).
 examples/install-smoke/pkgconfig-smoke

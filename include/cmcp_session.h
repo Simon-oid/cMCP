@@ -1,3 +1,18 @@
+/**
+ * @file cmcp_session.h
+ * @brief Multi-server primitive aggregator on top of N cMCP clients.
+ *
+ * A host that wants to talk to several MCP servers at once (the
+ * common case for agent frameworks) creates one `cmcp_client_t` per
+ * server, hands them all to a `cmcp_session_t`, and then uses the
+ * session for all subsequent calls. The session fans out
+ * `tools/list` / `resources/list` / `prompts/list` to every member
+ * in parallel and merges the results; `tool_call`, `resource_read`,
+ * and `prompt_get` route to the right backend either by qualified
+ * name (`<server>:<tool>` for tools) or by an explicit `(server,
+ * uri|name)` pair (for resources and prompts, since URIs already
+ * contain colons).
+ */
 #ifndef CMCP_SESSION_H
 #define CMCP_SESSION_H
 

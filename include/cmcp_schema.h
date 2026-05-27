@@ -1,3 +1,15 @@
+/**
+ * @file cmcp_schema.h
+ * @brief JSON Schema *subset* validator for tool inputs.
+ *
+ * cMCP's `tools/call` handler validates the incoming `arguments`
+ * object against the tool's declared `inputSchema` before dispatch;
+ * the validator implemented here is the subset supported in v0.x.
+ * See `docs/schema-subset.md` for the keyword set and `docs/schema-
+ * conformance.md` (post-6.7) for the eventual full-Ajv-equivalent
+ * surface. Failures surface to the peer as JSON-RPC error -32602
+ * with structured `{path, keyword, message}` data.
+ */
 #ifndef CMCP_SCHEMA_H
 #define CMCP_SCHEMA_H
 

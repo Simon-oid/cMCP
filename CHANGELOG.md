@@ -381,6 +381,70 @@ rules so each invocation re-renders against the active `PREFIX`. The
 install-smoke gate caught it on its first run — vindicating the
 "install-smoke as gate, not just demo" framing.
 
+### 6.3 API reference, SemVer policy, release tagging
+
+First written contract for cMCP's public surface. Documents which
+headers callers can rely on across releases, which symbols can change
+in any patch, and how the package version `CMCP_VERSION` relates to
+the wire-protocol version `CMCP_PROTOCOL_VERSION` (independent
+timelines). Companion deliverables: a generated API reference via
+Doxygen and the retro-tag plan for `v0.1.0`…`v0.4.1`.
+
+#### `docs/SEMVER.md`
+
+The policy. TL;DR: MAJOR for any public-surface break, MINOR for
+strict additions, PATCH for invisible bug fixes. Public surface =
+exactly the 9 headers under `include/`. CMake compatibility encoded
+as `SameMinorVersion` while pre-1.0; flips to `SameMajorVersion` at
+`1.0.0`. Retro-tag commands at the bottom of the file.
+
+#### `make docs` + `Doxyfile`
+
+Doxygen build of the public headers + tracked markdown
+(`README.md`, `docs/*.md`, `CHANGELOG.md`, `conformance/README.md`)
+into a browsable HTML reference under `docs/api/html/`. Tuned for C:
+typedef-of-struct hidden, `EXTRACT_ALL = YES` so declarations show up
+even before per-function `/** */` doc comments land,
+`JAVADOC_AUTOBRIEF = YES` so a one-line lead-in becomes the brief.
+Warning log at `docs/api/doxygen.log`. The remaining 8 warnings are
+expected — cross-refs to `TODO.md` / `CLAUDE.md`, which are
+gitignored on purpose.
+
+#### Header pass
+
+- Every public header (`include/cmcp.h`, `cmcp_json.h`, `cmcp_types.h`,
+  `cmcp_transport.h`, `cmcp_http_parser.h`, `cmcp_schema.h`,
+  `cmcp_server.h`, `cmcp_client.h`, `cmcp_session.h`) opens with a
+  `@file` block summarising what's in it.
+- `cmcp.h` and `cmcp_json.h` (which had no prior doc comments) got
+  `/** */` briefs on every public declaration: error codes,
+  constructors / accessors / parse-emit / lifecycle groups.
+- The headers that already carried long prose comments (server,
+  client, transport, session, types) kept them as-is — Doxygen
+  surfaces the declarations via `EXTRACT_ALL`; converting the prose
+  blocks to `/** */` is incremental work that can land over time
+  without churn-for-churn's-sake commits.
+
+#### `.github/workflows/docs.yml`
+
+- Build job: installs `doxygen`, runs `make docs`, tails the last 80
+  lines of `doxygen.log`, uploads `docs/api/html/` as `docs-html`
+  artifact on every push + PR.
+- Deploy job: on `push` to `main`, also uploads the Pages artifact
+  and calls `actions/deploy-pages@v4`. `concurrency: pages` so a
+  later push always wins over an in-flight older one.
+- Pages is opt-in at the repo level (Settings → Pages → Source:
+  GitHub Actions). Until enabled, the deploy step exits cleanly with
+  a "Pages not configured" notice.
+
+#### Retro-tagging
+
+Annotated tags `v0.1.0` through `v0.4.1` ship with the SEMVER doc as
+maintainer-run commands rather than auto-applied. Tag operations are
+hard to undo once pushed; the user runs them on `main`, then
+`git push --tags` once. Going forward (post-policy), every release
+section in CHANGELOG ships with its tag at release time.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at

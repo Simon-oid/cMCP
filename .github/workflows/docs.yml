@@ -1,0 +1,85 @@
+name: docs
+
+# Build the Doxygen API reference (Tier 6 axis 6.3) and:
+#   - upload it as a CI artifact (always, on push + PR + manual)
+#   - deploy it to GitHub Pages (push to main only)
+#
+# The Pages job runs in a separate stage so a PR run can preview the
+# artifact without publishing it. Pages is opt-in at the repo level:
+# Settings -> Pages -> Source: GitHub Actions. Until enabled the
+# deploy step exits cleanly with a "Pages not configured" notice.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Pages deployments are single-writer; cancel any in-flight run when
+# a newer push lands so we never publish a stale commit on top of a
+# fresher one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: doxygen build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen
+
+      - name: make docs
+        run: make docs
+
+      # Surface the warning log alongside the HTML so a reviewer can
+      # see what Doxygen complained about even when the build is "OK".
+      - name: Show doxygen warning log (last 80 lines)
+        if: always()
+        run: |
+          if [ -f docs/api/doxygen.log ]; then
+              tail -n 80 docs/api/doxygen.log
+          else
+              echo "no doxygen.log produced"
+          fi
+
+      - name: Upload HTML artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-html
+          path: docs/api/html/
+
+      # Pages-specific artifact format. Only built for the deploy
+      # job below; PRs skip this step so they don't try to publish.
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/api/html/
+
+  deploy:
+    name: deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

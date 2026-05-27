@@ -1,3 +1,14 @@
+/**
+ * @file cmcp_types.h
+ * @brief JSON-RPC 2.0 message shapes, capability structs, dispatch
+ *        types. Shared between server and client.
+ *
+ * The "schema" of cMCP at the C-struct level: how a JSON-RPC
+ * request/response/notification looks in memory, what the server-
+ * and client-side capability objects carry, the JSON-RPC error-code
+ * constants. Most callers reach these through `cmcp_server.h` /
+ * `cmcp_client.h` rather than allocating these types directly.
+ */
 #ifndef CMCP_TYPES_H
 #define CMCP_TYPES_H
 

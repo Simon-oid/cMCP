@@ -571,6 +571,24 @@ dist:
 	    --output=$(DIST_NAME).tar.gz HEAD
 	@ls -lh $(DIST_NAME).tar.gz
 
+# --- API reference docs (Tier 6 axis 6.3) ---------------------------------
+# `make docs` runs Doxygen against the public headers (and the README
+# as the mainpage) to produce a browsable HTML reference under
+# docs/api/html/. Doxyfile is tuned for C: typedef-of-struct hidden,
+# EXTRACT_ALL=YES so every public declaration shows up even before
+# its inline /** */ doc comment lands. Warning log lives at
+# docs/api/doxygen.log; the target does NOT fail on undocumented
+# decls (we ship a deliberately incremental doc surface — see CHANGELOG
+# 6.3) but DOES fail on real parse errors.
+docs:
+	@command -v doxygen >/dev/null || { echo "doxygen not installed"; exit 1; }
+	@mkdir -p docs/api
+	@echo "=== doxygen: writing docs/api/html/ ==="
+	@doxygen Doxyfile
+	@echo
+	@echo "HTML: docs/api/html/index.html"
+	@echo "Warning log: docs/api/doxygen.log"
+
 # --- install-smoke: end-to-end packaging gate -----------------------------
 # Builds + installs into a throwaway temp prefix and exercises both
 # packaging surfaces (pkg-config + CMake find_package) by building a
@@ -592,11 +610,11 @@ clean:
 	      tools/filesystem-mcp/*.o examples/*.o \
 	      cmcp-*.tar.gz
 	@find . -name '*.gcno' -delete -o -name '*.gcda' -delete 2>/dev/null || true
-	@rm -rf $(COV_DIR) build/
+	@rm -rf $(COV_DIR) build/ docs/api/
 
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
-        fuzz-build fuzz-smoke \
+        fuzz-build fuzz-smoke docs \
         soak soak-churn clean crag-mcp conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

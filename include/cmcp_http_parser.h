@@ -1,3 +1,14 @@
+/**
+ * @file cmcp_http_parser.h
+ * @brief Minimal HTTP/1.1 request-line + headers parser.
+ *
+ * Extracted from `src/transport_http.c` into a standalone translation
+ * unit so the libFuzzer harness (`fuzz/fuzz_http.c`) can drive it
+ * directly without sockets. The parser deliberately does *not*
+ * understand transfer-encoding chunks or HTTP/2 — those belong to
+ * the transport layer's body-reading logic. Bounded buffers throughout;
+ * caps documented in `src/transport_http.c`.
+ */
 #ifndef CMCP_HTTP_PARSER_H
 #define CMCP_HTTP_PARSER_H
 

@@ -138,6 +138,7 @@ make install   # install libs, headers, binaries, pkg-config + CMake files under
 make uninstall # remove the install tree symmetrically
 make dist      # produce cmcp-<version>.tar.gz from HEAD via `git archive`
 make install-smoke # build, install to a temp prefix, then build a tiny external consumer via pkg-config AND CMake
+make docs      # build Doxygen API reference under docs/api/html/
 make clean
 ```
 
@@ -159,6 +160,20 @@ needs `lcov` + `genhtml` + `gcovr`; `make analyze` needs `clang-tidy`
 + `scan-build` + `cppcheck`. Each target prints which tool is missing
 and exits cleanly so the rest of the suite stays runnable on a
 minimal box.
+
+### API reference
+
+A Doxygen-generated reference for the public headers is built from
+`Doxyfile` via `make docs` and lives under `docs/api/html/`. CI builds
+it on every push (artifact `docs-html` on every run; auto-published
+to GitHub Pages on `main`).
+
+The public surface and the versioning policy that governs it are
+documented in [`docs/SEMVER.md`](docs/SEMVER.md) — including which
+headers count as "public" (everything under `include/`), which
+identifiers do not (`src/*.h`, reference-binary CLI flags), and how
+`CMCP_VERSION` relates to `CMCP_PROTOCOL_VERSION` (they move on
+independent timelines).
 
 ### Installing as a system library
 

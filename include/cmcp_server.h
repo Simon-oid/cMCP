@@ -1,3 +1,26 @@
+/**
+ * @file cmcp_server.h
+ * @brief Server API: lifecycle, tool/resource/prompt registry,
+ *        dispatch, notifications.
+ *
+ * A `cmcp_server_t` owns:
+ *
+ *   - The registries for tools, resources, and prompts.
+ *   - The dispatch loop driving the worker pool.
+ *   - The lifecycle of a single MCP session (handshake → operate →
+ *     teardown) against one transport.
+ *
+ * Capabilities (`tools`, `resources`, `prompts`) are auto-advertised
+ * when at least one matching primitive is registered. Server-initiated
+ * notifications go via `cmcp_server_notify` (generic) and the
+ * capability-gated convenience wrappers. Handlers run on a small
+ * worker-pool thread; they get a per-call `cmcp_handler_ctx_t` for
+ * cooperative cancellation, progress reporting, and (in 2025-11-25)
+ * `elicitation/create` round-trips back to the host.
+ *
+ * See `examples/echo-server.c` for a complete minimal server and
+ * `tools/filesystem-mcp/main.c` for a production-shaped one.
+ */
 #ifndef CMCP_SERVER_H
 #define CMCP_SERVER_H
 

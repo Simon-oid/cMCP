@@ -1,3 +1,25 @@
+/**
+ * @file cmcp_client.h
+ * @brief Asynchronous MCP client: handshake, list/call/read/subscribe,
+ *        cancellation, progress, sampling, roots, elicitation.
+ *
+ * The client owns a transport and a reader thread that demultiplexes
+ * responses by id against an in-flight table. Every call is async at
+ * the wire level — `cmcp_client_call_async` returns immediately with
+ * a handle, and `cmcp_client_wait` blocks for completion; many calls
+ * can be in flight concurrently and they complete in any order.
+ * `cmcp_client_request` is sync sugar over the async pair.
+ *
+ * Client-side handlers (notification routing, sampling, elicitation)
+ * run on the reader thread; they must not call back into the same
+ * client. `cmcp_client_set_roots` advertises filesystem scope to the
+ * server; `cmcp_client_cancel` issues a `notifications/cancelled` for
+ * an in-flight call.
+ *
+ * For multi-server agents see `cmcp_session.h`, which aggregates
+ * several already-handshaken clients under a single primitive
+ * surface.
+ */
 #ifndef CMCP_CLIENT_H
 #define CMCP_CLIENT_H
 

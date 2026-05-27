@@ -1,3 +1,24 @@
+/**
+ * @file cmcp_transport.h
+ * @brief Transport vtable + stdio/HTTP constructors.
+ *
+ * Plugin layer: a `cmcp_transport_t` is a `(read, write, close,
+ * optional wake)` vtable plus a void* context. cMCP ships three
+ * backends:
+ *
+ *   - **stdio** (`cmcp_transport_stdio_new` / `_new_fds`): newline-
+ *     delimited JSON over stdin/stdout (or any pre-opened fd pair).
+ *   - **HTTP server** (`cmcp_transport_http_listen`): Streamable HTTP
+ *     hand-rolled on top of `socket()` / `accept()`.
+ *   - **HTTP client** (`cmcp_transport_http_connect`): Streamable
+ *     HTTP via libcurl with a background SSE reader thread.
+ *
+ * Servers and clients borrow a transport; the *caller* still closes
+ * it. The transport layer is intentionally message-agnostic, with
+ * one principled exception in the HTTP backend (which has to peek
+ * at the JSON-RPC body to distinguish requests-needing-a-response
+ * from notifications-getting-202-Accepted).
+ */
 #ifndef CMCP_TRANSPORT_H
 #define CMCP_TRANSPORT_H
 

@@ -1,0 +1,105 @@
+# Doxyfile for cMCP — generated for `make docs` (Tier 6 axis 6.3).
+#
+# Tuned for a small C11 library: extract from the public headers under
+# include/ and the top-level README, emit a static HTML site under
+# docs/api/. No LaTeX, no graphviz dependency. EXTRACT_ALL = YES so
+# declarations without Doxygen-style comments still show up — comments
+# in the codebase are largely C-style /* */ blocks (not picked up as
+# documentation by Doxygen) and the goal of this initial site is a
+# browsable reference of the public surface, not a polished
+# tutorial. Inline /** */ doc comments grow over time as needed.
+
+PROJECT_NAME           = "cMCP"
+PROJECT_NUMBER         = "0.4.1"
+PROJECT_BRIEF          = "Model Context Protocol library in pure C11"
+OUTPUT_DIRECTORY       = docs/api
+CREATE_SUBDIRS         = NO
+ALLOW_UNICODE_NAMES    = YES
+OUTPUT_LANGUAGE        = English
+
+# Inputs — public surface (include/), the README mainpage, the docs/
+# tree (architecture / SEMVER / schema-subset / etc.), the CHANGELOG,
+# and conformance/README so existing markdown cross-refs resolve.
+# TODO.md / CLAUDE.md are gitignored on purpose (development-time
+# artefacts, not part of the public deliverable); references to them
+# in the tracked markdown remain as expected "unable to resolve"
+# warnings in docs/api/doxygen.log.
+INPUT                  = include/ docs/ README.md CHANGELOG.md \
+                         conformance/README.md
+USE_MDFILE_AS_MAINPAGE = README.md
+FILE_PATTERNS          = *.h *.md
+RECURSIVE              = NO
+EXCLUDE_PATTERNS       = */api/* */api/**
+
+# C-flavored output: hide the typedef-of-struct dance, optimize the
+# nav structure for C, surface every declaration.
+OPTIMIZE_OUTPUT_FOR_C  = YES
+TYPEDEF_HIDES_STRUCT   = YES
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = NO
+EXTRACT_LOCAL_CLASSES  = NO
+HIDE_UNDOC_MEMBERS     = NO
+HIDE_UNDOC_CLASSES     = NO
+INTERNAL_DOCS          = NO
+
+# JAVADOC_AUTOBRIEF lets a one-line /** ... */ at the top of a
+# multi-line doc block become the brief, with the rest as detail.
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = NO
+
+# Markdown enabled so README + docs/*.md render cleanly.
+MARKDOWN_SUPPORT       = YES
+TOC_INCLUDE_HEADINGS   = 3
+
+# Output: HTML only. CI artifact + Pages.
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+GENERATE_LATEX         = NO
+GENERATE_MAN           = NO
+GENERATE_XML           = NO
+
+# Make the search box useful without a separate search daemon.
+SEARCHENGINE           = YES
+SERVER_BASED_SEARCH    = NO
+
+# Source browser — let readers jump from a declaration to its
+# implementation. The actual src/ tree is NOT under INPUT (it's
+# internal per docs/SEMVER.md), so this just cross-links between
+# public-header declarations.
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+# Diagnostics: stay quiet on routine "no comment" warnings (we have
+# many; EXTRACT_ALL = YES says we want them anyway). Surface real
+# parse problems via WARN_LOG_FILE so `make docs` exits clean even
+# when there are skipped-undocumented-decl notices.
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_AS_ERROR          = NO
+WARN_LOGFILE           = docs/api/doxygen.log
+
+# No graphviz dependency for the first cut. If we want call graphs
+# later, set HAVE_DOT = YES and install graphviz in CI.
+HAVE_DOT               = NO
+
+# Quality-of-life
+SORT_MEMBER_DOCS       = NO
+SORT_BRIEF_DOCS        = NO
+SHOW_USED_FILES        = YES
+SHOW_FILES             = YES
+SHOW_NAMESPACES        = NO
+LAYOUT_FILE            =
+
+# Predefined macros the preprocessor needs to "see" — keeps Doxygen
+# from getting confused by guard macros while parsing headers.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = NO
+EXPAND_ONLY_PREDEF     = NO
+SEARCH_INCLUDES        = YES
+INCLUDE_PATH           = include
