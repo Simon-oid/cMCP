@@ -101,3 +101,23 @@ jobs:
 
       - name: make analyze
         run: make analyze
+
+  install-smoke:
+    name: make install-smoke (packaging surface gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      # cmake is the only non-default dep on top of ci's libcurl baseline.
+      # The smoke harness gates both pkg-config + CMake find_package wiring,
+      # so installing cmake here lets the script exercise both lanes; if
+      # cmake were missing, run.sh would skip the CMake half (acceptable
+      # local fallback, not what we want in CI).
+      - name: Install build + packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config cmake
+
+      - name: make install-smoke
+        run: make install-smoke

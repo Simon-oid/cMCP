@@ -134,6 +134,10 @@ make soak       # stdio soak driver (env knobs in tests/soak/run.sh)
 make crag-mcp   # build the cRAG reference server (needs sibling ../cRAG/)
 make conformance # cross-check vs the MCP TS reference impl (needs Node + network)
 make check-spec-drift # compare CMCP_PROTOCOL_VERSION vs upstream spec dirs
+make install   # install libs, headers, binaries, pkg-config + CMake files under $PREFIX (default /usr/local)
+make uninstall # remove the install tree symmetrically
+make dist      # produce cmcp-<version>.tar.gz from HEAD via `git archive`
+make install-smoke # build, install to a temp prefix, then build a tiny external consumer via pkg-config AND CMake
 make clean
 ```
 
@@ -155,6 +159,42 @@ needs `lcov` + `genhtml` + `gcovr`; `make analyze` needs `clang-tidy`
 + `scan-build` + `cppcheck`. Each target prints which tool is missing
 and exits cleanly so the rest of the suite stays runnable on a
 minimal box.
+
+### Installing as a system library
+
+cMCP follows the standard GNU install layout. By default everything
+lands under `/usr/local` (override with `PREFIX=...`; stage with
+`DESTDIR=...` for packaging):
+
+```bash
+make
+sudo make install                                # /usr/local
+make install PREFIX=$HOME/.local                 # user-local prefix
+make install DESTDIR=/tmp/stage PREFIX=/usr      # staged for packaging
+```
+
+Static libraries (`libcmcp_core.a`, `libcmcp_server.a`,
+`libcmcp_client.a`) are the default. Shared libraries are opt-in via
+`ENABLE_SHARED=1`; they ship with the standard
+`libcmcp_<x>.so.<MAJOR>` SONAME (`.so` dev-link + `.so.<MAJOR>` SONAME
+symlink + real `.so.<VERSION>` file).
+
+Three discovery surfaces are installed alongside the libs so downstream
+consumers don't have to reinvent the flags:
+
+- **pkg-config** — three `.pc` files (`cmcp-core`, `cmcp-server`,
+  `cmcp-client`) with the dependency chain encoded via `Requires:`,
+  so `pkg-config --libs cmcp-server` already pulls in core + libcurl +
+  pthread in the right link order.
+- **CMake** — `find_package(cmcp REQUIRED COMPONENTS core server client)`
+  exposes `cmcp::core` / `cmcp::server` / `cmcp::client` imported
+  targets with `INTERFACE_LINK_LIBRARIES` wired so a consumer's
+  `target_link_libraries(... cmcp::server)` resolves the full chain.
+- **`make install-smoke`** — a regression gate that installs into a
+  throwaway temp prefix and builds + runs the tiny external consumer
+  under `examples/install-smoke/` against the installed library
+  through both pkg-config and CMake. Catches packaging breakage
+  before it reaches downstream.
 
 ## Five-minute tour
 

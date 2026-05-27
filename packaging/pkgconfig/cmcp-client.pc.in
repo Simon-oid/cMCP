@@ -1,0 +1,12 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: cmcp-client
+Description: cMCP client library (async client, multi-server session aggregator)
+URL: https://github.com/Simon-oid/cMCP
+Version: @VERSION@
+Requires: cmcp-core
+Libs: -L${libdir} -lcmcp_client
+Cflags: -I${includedir}

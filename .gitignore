@@ -1,7 +1,18 @@
 *.o
 *.a
+*.so
+*.so.*
 build/
 .cache/
+
+# Source tarballs produced by `make dist` (Tier 6 axis 6.4)
+cmcp-*.tar.gz
+
+# install-smoke consumer build artefacts (compiled in temp dirs, but
+# the local Makefile drops pkgconfig-smoke here when invoked by hand).
+examples/install-smoke/pkgconfig-smoke
+examples/install-smoke/cmake-smoke
+examples/install-smoke/build/
 
 # Reference binaries
 tools/crag-mcp/crag-mcp

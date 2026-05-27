@@ -287,6 +287,100 @@ sweep.
 - `gcc-fanalyzer.yml` runs GCC's static analyzer weekly; warnings
   only, full log archived as an artifact.
 
+### 6.4 packaging & install
+
+First time cMCP can be consumed off-tree without copy-pasting headers
+or hard-coding `-I/-L` paths. Standard GNU install layout; three
+discovery surfaces installed alongside the libs (pkg-config, CMake
+find_package, the install-smoke regression gate).
+
+#### `make install` / `make uninstall`
+
+- `PREFIX` (default `/usr/local`) + `DESTDIR` (staging) supported,
+  matching the GNU conventions.
+- Public headers land flat under `$PREFIX/include/` (every header
+  already carries a `cmcp_` prefix — a subdir would add `-I` gymnastics
+  without buying namespace separation).
+- Static libs (`libcmcp_core.a` / `libcmcp_server.a` /
+  `libcmcp_client.a`) under `$PREFIX/lib/`.
+- Reference binaries (`cmcp-inspect`, `filesystem-mcp`, `cmcp-tee`)
+  under `$PREFIX/bin/`. `crag-mcp` is excluded — it's only built on
+  explicit `make crag-mcp` against an external cRAG tree.
+- `uninstall` removes the exact file set `install` created, plus best-
+  effort `rmdir` of empty `$CMAKEDIR` / `$PKGCONFDIR` (silent no-op
+  if anything else lives there — we don't own `/usr/local/lib`).
+
+#### pkg-config (`packaging/pkgconfig/*.pc.in`)
+
+Three files installed under `$PREFIX/lib/pkgconfig/`:
+
+- `cmcp-core.pc` — declares `Libs.private: -lcurl -lpthread` so
+  static-link consumers pick up the transitive symbols.
+- `cmcp-server.pc` — `Requires: cmcp-core`; pulls in core's libs +
+  cflags transitively.
+- `cmcp-client.pc` — same `Requires: cmcp-core` shape.
+
+`pkg-config --libs cmcp-server cmcp-client cmcp-core` emits the link
+flags in the right order for ld in one shot.
+
+#### CMake (`packaging/cmake/cmcp{Config,ConfigVersion}.cmake.in`)
+
+`find_package(cmcp REQUIRED COMPONENTS core server client)` produces
+imported targets `cmcp::core`, `cmcp::server`, `cmcp::client` with
+`INTERFACE_LINK_LIBRARIES` wired so a consumer's
+`target_link_libraries(... cmcp::server)` resolves the full chain
+(server → core → CURL::libcurl + Threads::Threads).
+
+Version compat is SameMinorVersion — cMCP is pre-1.0, so by SemVer any
+MINOR bump may break ABI; PATCH bumps are compatible. The version file
+emits `PACKAGE_VERSION_EXACT` and `PACKAGE_VERSION_COMPATIBLE`
+accordingly.
+
+#### Shared libraries (opt-in: `ENABLE_SHARED=1`)
+
+Static remains the default per the project's posture. With
+`ENABLE_SHARED=1`, `make all` also builds `libcmcp_<x>.so.<VERSION>`
+with `-Wl,-soname,libcmcp_<x>.so.<MAJOR>`; `make install` then drops
+the standard real-file / SONAME-symlink / dev-link triple under
+`$PREFIX/lib/`. PIC objects build to `src/*.pic.o` so the static and
+shared link targets coexist in one build tree without re-compilation.
+
+#### `make dist`
+
+Produces a reproducible source tarball `cmcp-<VERSION>.tar.gz` via
+`git archive`. Honours `.gitignore` naturally (only tracked files are
+in the tarball). VERSION extracted from `CMCP_VERSION` in
+`include/cmcp.h` (single source of truth — no separate version files
+to keep in sync).
+
+#### `make install-smoke` (regression gate)
+
+`examples/install-smoke/` ships a tiny external consumer (`smoke.c`)
+that uses the public headers + core/server/client lifecycle entry
+points. The gate:
+
+1. Builds + installs cMCP into a throwaway `$(mktemp -d)`.
+2. Builds the consumer against the install via pkg-config + `cc`.
+3. Builds the same consumer against the install via
+   `find_package(cmcp)` + CMake.
+4. Runs both and asserts they exit 0.
+
+CI wires it into `ci.yml` as the `install-smoke` job (next to
+`coverage` and `analyze`). If the install / `.pc` / `cmcpConfig.cmake`
+plumbing breaks for any reason, this fails before downstream notices.
+
+#### Bug caught during 6.4 itself
+
+The first cut had `install-pkgconfig` / `install-cmake` stage rendered
+`.pc` / `.cmake` files under `build/` with `PREFIX` baked at first-
+seen time. A second `make install PREFIX=...` with a different
+prefix silently reused the cached files — so the install-smoke
+consumer saw `prefix=/usr/local` even though it installed to
+`/tmp/...`. Fixed by inlining the sed substitution into the install
+rules so each invocation re-renders against the active `PREFIX`. The
+install-smoke gate caught it on its first run — vindicating the
+"install-smoke as gate, not just demo" framing.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at

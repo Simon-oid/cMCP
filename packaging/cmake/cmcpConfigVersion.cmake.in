@@ -1,0 +1,25 @@
+# cmcpConfigVersion.cmake — version compatibility for find_package(cmcp).
+#
+# cMCP is pre-1.0. Per the SemVer convention for 0.x releases, any
+# MINOR bump may break ABI; only PATCH bumps are guaranteed compatible.
+# Compatibility rule: SameMinorVersion — MAJOR.MINOR of installed
+# package must equal MAJOR.MINOR of the requested version, and the
+# installed PATCH must be ≥ the requested PATCH.
+
+set(PACKAGE_VERSION "@VERSION@")
+
+if(PACKAGE_FIND_VERSION)
+    string(REGEX MATCH "^[0-9]+\\.[0-9]+" _pkg_mm "${PACKAGE_VERSION}")
+    string(REGEX MATCH "^[0-9]+\\.[0-9]+" _find_mm "${PACKAGE_FIND_VERSION}")
+    if(_pkg_mm STREQUAL _find_mm
+       AND NOT PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+        set(PACKAGE_VERSION_COMPATIBLE True)
+    else()
+        set(PACKAGE_VERSION_COMPATIBLE False)
+    endif()
+    if(PACKAGE_VERSION VERSION_EQUAL PACKAGE_FIND_VERSION)
+        set(PACKAGE_VERSION_EXACT True)
+    endif()
+else()
+    set(PACKAGE_VERSION_COMPATIBLE True)
+endif()

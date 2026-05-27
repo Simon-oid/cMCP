@@ -1,0 +1,12 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: cmcp-core
+Description: cMCP core library (JSON, JSON-RPC, schema, transports)
+URL: https://github.com/Simon-oid/cMCP
+Version: @VERSION@
+Libs: -L${libdir} -lcmcp_core
+Libs.private: -lcurl -lpthread
+Cflags: -I${includedir}

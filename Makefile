@@ -386,18 +386,217 @@ fuzz-smoke: $(FUZZ_BINS)
 	    ./$$h $$corpus -max_total_time=60 -print_final_stats=0 || exit 1; \
 	done
 
+# --- Packaging & install (Tier 6 axis 6.4) --------------------------------
+# Standard GNU install layout. PREFIX is /usr/local by default; DESTDIR
+# wraps every install path (for staged builds / distro packaging).
+# Headers ship flat under $PREFIX/include — every header already carries
+# a `cmcp_` prefix, so a subdirectory would only add a -I/dance for
+# consumers without buying namespace separation.
+PREFIX     ?= /usr/local
+DESTDIR    ?=
+exec_prefix = $(PREFIX)
+BINDIR      = $(exec_prefix)/bin
+LIBDIR      = $(exec_prefix)/lib
+INCLUDEDIR  = $(PREFIX)/include
+PKGCONFDIR  = $(LIBDIR)/pkgconfig
+CMAKEDIR    = $(LIBDIR)/cmake/cmcp
+
+INSTALL         ?= install
+INSTALL_DATA    ?= $(INSTALL) -m 644
+INSTALL_PROGRAM ?= $(INSTALL) -m 755
+INSTALL_DIR     ?= $(INSTALL) -d -m 755
+
+# Single source of truth for the package version: CMCP_VERSION in
+# include/cmcp.h. Awk extracts it so we don't fork bumping the version.
+VERSION       := $(shell awk '/^#define CMCP_VERSION[ \t]/ {gsub(/"/, "", $$3); print $$3; exit}' include/cmcp.h)
+VERSION_MAJOR := $(firstword $(subst ., ,$(VERSION)))
+
+PUBLIC_HEADERS := $(wildcard include/cmcp*.h)
+
+# --- Shared libraries (opt-in via ENABLE_SHARED=1) -------------------------
+# Static is the default per the project's posture (linker-resolved,
+# no symbol-versioning headaches, no LD_LIBRARY_PATH dance). The
+# shared variant is for distro packagers; SONAME = libcmcp_<x>.so.<MAJOR>,
+# with the standard real-file / SONAME-link / dev-link triple. Builds
+# objects with -fPIC (independent of the static .o set) so the static
+# and shared link targets can coexist in one tree.
+ENABLE_SHARED ?= 0
+
+CORE_PIC_OBJ   := $(CORE_SRC:.c=.pic.o)
+SERVER_PIC_OBJ := $(SERVER_SRC:.c=.pic.o)
+CLIENT_PIC_OBJ := $(CLIENT_SRC:.c=.pic.o)
+
+CORE_SO   := libcmcp_core.so.$(VERSION)
+SERVER_SO := libcmcp_server.so.$(VERSION)
+CLIENT_SO := libcmcp_client.so.$(VERSION)
+
+CORE_SONAME   := libcmcp_core.so.$(VERSION_MAJOR)
+SERVER_SONAME := libcmcp_server.so.$(VERSION_MAJOR)
+CLIENT_SONAME := libcmcp_client.so.$(VERSION_MAJOR)
+
+src/%.pic.o: src/%.c
+	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
+
+$(CORE_SO): $(CORE_PIC_OBJ)
+	$(CC) -shared -Wl,-soname,$(CORE_SONAME) -o $@ $^ $(LDLIBS)
+	@ln -sf $(CORE_SO) $(CORE_SONAME)
+	@ln -sf $(CORE_SO) libcmcp_core.so
+
+$(SERVER_SO): $(SERVER_PIC_OBJ) $(CORE_SO)
+	$(CC) -shared -Wl,-soname,$(SERVER_SONAME) -o $@ $(SERVER_PIC_OBJ) \
+	    -L. -lcmcp_core $(LDLIBS)
+	@ln -sf $(SERVER_SO) $(SERVER_SONAME)
+	@ln -sf $(SERVER_SO) libcmcp_server.so
+
+$(CLIENT_SO): $(CLIENT_PIC_OBJ) $(CORE_SO)
+	$(CC) -shared -Wl,-soname,$(CLIENT_SONAME) -o $@ $(CLIENT_PIC_OBJ) \
+	    -L. -lcmcp_core $(LDLIBS)
+	@ln -sf $(CLIENT_SO) $(CLIENT_SONAME)
+	@ln -sf $(CLIENT_SO) libcmcp_client.so
+
+ifeq ($(ENABLE_SHARED),1)
+SHARED_LIBS := $(if $(CORE_OBJ),$(CORE_SO)) \
+               $(if $(SERVER_OBJ),$(SERVER_SO)) \
+               $(if $(CLIENT_OBJ),$(CLIENT_SO))
+all: $(SHARED_LIBS)
+endif
+
+# --- pkg-config + CMake config: template substitution ---------------------
+# Templates live in packaging/. Substitution happens inline in the
+# install-pkgconfig / install-cmake rules below — NOT as a separate
+# build-time step — so each `make install PREFIX=X` re-renders against
+# the active PREFIX. (Staging through build/ would let make cache the
+# first-seen PREFIX and silently bake the wrong prefix into a second
+# install with a different PREFIX, which is exactly what the install-
+# smoke regression gate caught the first time around.)
+PC_TEMPLATES := packaging/pkgconfig/cmcp-core.pc.in \
+                packaging/pkgconfig/cmcp-server.pc.in \
+                packaging/pkgconfig/cmcp-client.pc.in
+
+CMAKE_TEMPLATES := packaging/cmake/cmcpConfig.cmake.in \
+                   packaging/cmake/cmcpConfigVersion.cmake.in
+
+# --- Install / uninstall --------------------------------------------------
+install: install-headers install-libs install-bins install-pkgconfig install-cmake
+
+install-headers: $(PUBLIC_HEADERS)
+	$(INSTALL_DIR) "$(DESTDIR)$(INCLUDEDIR)"
+	@for h in $(PUBLIC_HEADERS); do \
+	    echo "  install $$h -> $(DESTDIR)$(INCLUDEDIR)/"; \
+	    $(INSTALL_DATA) $$h "$(DESTDIR)$(INCLUDEDIR)/"; \
+	done
+
+install-libs: $(BUILT_LIBS) $(if $(filter 1,$(ENABLE_SHARED)),$(SHARED_LIBS))
+	$(INSTALL_DIR) "$(DESTDIR)$(LIBDIR)"
+	@for l in $(BUILT_LIBS); do \
+	    echo "  install $$l -> $(DESTDIR)$(LIBDIR)/"; \
+	    $(INSTALL_DATA) $$l "$(DESTDIR)$(LIBDIR)/"; \
+	done
+ifeq ($(ENABLE_SHARED),1)
+	@for so in $(SHARED_LIBS); do \
+	    base=$$(echo $$so | sed -E 's/\.so\.[0-9][0-9.]*$$/.so/'); \
+	    soname=$$(echo $$so | sed -E 's/(\.so\.[0-9]+).*$$/\1/'); \
+	    echo "  install $$so + soname + dev-link -> $(DESTDIR)$(LIBDIR)/"; \
+	    $(INSTALL_PROGRAM) $$so "$(DESTDIR)$(LIBDIR)/"; \
+	    ln -sf $$so "$(DESTDIR)$(LIBDIR)/$$soname"; \
+	    ln -sf $$so "$(DESTDIR)$(LIBDIR)/$$base"; \
+	done
+endif
+
+install-bins:
+	$(INSTALL_DIR) "$(DESTDIR)$(BINDIR)"
+	@for b in $(INSPECT_BIN) $(FS_MCP_BIN) $(TEE_BIN); do \
+	    if [ -x "$$b" ]; then \
+	        echo "  install $$b -> $(DESTDIR)$(BINDIR)/"; \
+	        $(INSTALL_PROGRAM) $$b "$(DESTDIR)$(BINDIR)/"; \
+	    fi; \
+	done
+
+install-pkgconfig: $(PC_TEMPLATES)
+	$(INSTALL_DIR) "$(DESTDIR)$(PKGCONFDIR)"
+	@for tmpl in $(PC_TEMPLATES); do \
+	    name=$$(basename $$tmpl .in); \
+	    dest="$(DESTDIR)$(PKGCONFDIR)/$$name"; \
+	    echo "  render $$tmpl -> $$dest"; \
+	    sed -e 's|@PREFIX@|$(PREFIX)|g' \
+	        -e 's|@VERSION@|$(VERSION)|g' \
+	        "$$tmpl" > "$$dest"; \
+	    chmod 644 "$$dest"; \
+	done
+
+install-cmake: $(CMAKE_TEMPLATES)
+	$(INSTALL_DIR) "$(DESTDIR)$(CMAKEDIR)"
+	@for tmpl in $(CMAKE_TEMPLATES); do \
+	    name=$$(basename $$tmpl .in); \
+	    dest="$(DESTDIR)$(CMAKEDIR)/$$name"; \
+	    echo "  render $$tmpl -> $$dest"; \
+	    sed -e 's|@PREFIX@|$(PREFIX)|g' \
+	        -e 's|@VERSION@|$(VERSION)|g' \
+	        "$$tmpl" > "$$dest"; \
+	    chmod 644 "$$dest"; \
+	done
+
+# Uninstall removes the exact file set install would create. Empty
+# directories left behind are best-effort rmdir'd (silently no-op if
+# something else lives in them — we don't own /usr/local/lib).
+uninstall:
+	@for h in $(PUBLIC_HEADERS); do \
+	    rm -f "$(DESTDIR)$(INCLUDEDIR)/$$(basename $$h)"; \
+	done
+	@for l in $(notdir $(BUILT_LIBS)); do rm -f "$(DESTDIR)$(LIBDIR)/$$l"; done
+	@rm -f "$(DESTDIR)$(LIBDIR)/libcmcp_core.so"* \
+	       "$(DESTDIR)$(LIBDIR)/libcmcp_server.so"* \
+	       "$(DESTDIR)$(LIBDIR)/libcmcp_client.so"*
+	@rm -f "$(DESTDIR)$(BINDIR)/cmcp-inspect" \
+	       "$(DESTDIR)$(BINDIR)/filesystem-mcp" \
+	       "$(DESTDIR)$(BINDIR)/cmcp-tee"
+	@rm -f "$(DESTDIR)$(PKGCONFDIR)/cmcp-core.pc" \
+	       "$(DESTDIR)$(PKGCONFDIR)/cmcp-server.pc" \
+	       "$(DESTDIR)$(PKGCONFDIR)/cmcp-client.pc"
+	@rm -f "$(DESTDIR)$(CMAKEDIR)/cmcpConfig.cmake" \
+	       "$(DESTDIR)$(CMAKEDIR)/cmcpConfigVersion.cmake"
+	@-rmdir "$(DESTDIR)$(CMAKEDIR)" 2>/dev/null || true
+	@-rmdir "$(DESTDIR)$(PKGCONFDIR)" 2>/dev/null || true
+
+# --- Source distribution tarball ------------------------------------------
+# `make dist` produces cmcp-$(VERSION).tar.gz from HEAD. git archive
+# naturally respects .gitignore (only tracked files end up in the
+# tarball) and is reproducible across machines with the same HEAD.
+DIST_NAME := cmcp-$(VERSION)
+dist:
+	@command -v git >/dev/null || { echo "git not found"; exit 1; }
+	@test -d .git    || { echo "make dist requires a git checkout"; exit 1; }
+	@echo "=== dist: $(DIST_NAME).tar.gz from HEAD ==="
+	git archive --prefix=$(DIST_NAME)/ --format=tar.gz \
+	    --output=$(DIST_NAME).tar.gz HEAD
+	@ls -lh $(DIST_NAME).tar.gz
+
+# --- install-smoke: end-to-end packaging gate -----------------------------
+# Builds + installs into a throwaway temp prefix and exercises both
+# packaging surfaces (pkg-config + CMake find_package) by building a
+# tiny external consumer against the installed library. Pure regression
+# gate: if the install / .pc / cmcpConfig.cmake plumbing breaks, this
+# fails before any downstream notices.
+install-smoke: all
+	@./examples/install-smoke/run.sh
+
 clean:
 	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
+	      $(CORE_PIC_OBJ) $(SERVER_PIC_OBJ) $(CLIENT_PIC_OBJ) \
 	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
+	      libcmcp_core.so* libcmcp_server.so* libcmcp_client.so* \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
 	      $(FUZZ_BINS) $(SOAK_BIN) \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
-	      tools/filesystem-mcp/*.o examples/*.o
+	      tools/filesystem-mcp/*.o examples/*.o \
+	      cmcp-*.tar.gz
 	@find . -name '*.gcno' -delete -o -name '*.gcda' -delete 2>/dev/null || true
-	@rm -rf $(COV_DIR)
+	@rm -rf $(COV_DIR) build/
 
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
         fuzz-build fuzz-smoke \
-        soak soak-churn clean crag-mcp conformance replay check-spec-drift
+        soak soak-churn clean crag-mcp conformance replay check-spec-drift \
+        install install-headers install-libs install-bins \
+        install-pkgconfig install-cmake uninstall dist install-smoke
