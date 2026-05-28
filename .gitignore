@@ -59,6 +59,14 @@ fuzz/corpus_*/*
 tests/soak/soak_driver
 tests/soak/*.csv
 
+# Bench tree (Tier 6 axis 6.6.1): sources, README, run.sh ARE tracked;
+# compiled binaries and the per-run results.csv are not (numbers vary
+# by machine, kernel, and build flags).
+bench/bench_server_inline
+bench/bench_server_pool
+bench/bench_http
+bench/results.csv
+
 # Coverage artifacts (Tier 6 axis 6.2.1). The Makefile target regenerates
 # everything under coverage/ on demand; gcov drops .gcno alongside the
 # .o it instrumented and .gcda alongside the binary that ran it.

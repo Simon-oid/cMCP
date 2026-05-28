@@ -170,6 +170,24 @@ soak: $(SOAK_BIN) examples/echo-server
 soak-churn: $(SOAK_BIN) examples/echo-server
 	@SOAK_CHURN=1 ./$(SOAK_DIR)/run.sh
 
+# --- Performance baselines (Tier 6 axis 6.6.1) ----------------------------
+# Opt-in: in-process micro-benches over stdio and HTTP that emit CSV rows
+# with p50/p95/p99/p999/mean latency + throughput. `make bench` runs all
+# of them and concatenates output into bench/results.csv via run.sh.
+# Methodology + interpretation lives in docs/perf-baselines.md.
+BENCH_DIR  := bench
+BENCH_BINS := $(BENCH_DIR)/bench_server_inline \
+              $(BENCH_DIR)/bench_server_pool \
+              $(BENCH_DIR)/bench_http
+
+$(BENCH_DIR)/bench_%: $(BENCH_DIR)/bench_%.c $(BENCH_DIR)/bench_util.h $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+bench-build: $(BENCH_BINS)
+
+bench: $(BENCH_BINS)
+	@./$(BENCH_DIR)/run.sh
+
 # test_fs_server spawns the built filesystem-mcp binary as a child, so
 # it depends on that binary in addition to the libs. This specific rule
 # overrides the generic tests/% pattern below.
@@ -605,7 +623,8 @@ clean:
 	      libcmcp_core.so* libcmcp_server.so* libcmcp_client.so* \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
-	      $(FUZZ_BINS) $(SOAK_BIN) \
+	      $(FUZZ_BINS) $(SOAK_BIN) $(BENCH_BINS) \
+	      $(BENCH_DIR)/results.csv \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o \
 	      cmcp-*.tar.gz
@@ -615,6 +634,6 @@ clean:
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
         fuzz-build fuzz-smoke docs \
-        soak soak-churn clean crag-mcp conformance replay check-spec-drift \
+        soak soak-churn bench bench-build clean crag-mcp conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

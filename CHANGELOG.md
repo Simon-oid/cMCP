@@ -842,6 +842,140 @@ the new env knob and the scrub utility.
 Axis 6.5 (security hardening) is now closed; the only B-row caveats
 remaining are spec-out-of-scope (mTLS handled by terminator, etc.).
 
+### 6.6.1 bench tree (cMCP-only baselines)
+
+First-pass performance baselines. Three in-process micro-benches +
+a CSV-emitting orchestrator + a methodology document. Cross-SDK
+comparison, profiling baselines, and the HTTP soak harness split
+into follow-up sub-commits 6.6.2 / 6.6.3 / 6.6.4 to keep this one
+self-contained.
+
+#### `bench/` tree
+
+```
+bench/
+├── bench_util.h               header-only: monotonic clock, lat hist, CSV row
+├── bench_server_inline.c      stdio inline-tool throughput + latency
+├── bench_server_pool.c        stdio async fan-out → worker-pool concurrency
+├── bench_http.c               HTTP-transport variant of the inline bench
+├── run.sh                     orchestrator → bench/results.csv + stdout summary
+└── README.md
+```
+
+Each bench binary spawns an in-process server (pipe pair for stdio,
+loopback ephemeral port for HTTP), runs handshake + warmup + a fixed
+measurement window, then emits exactly one CSV row to stdout with
+schema:
+
+```
+bench,iterations,wall_ms,throughput_per_s,
+min_us,p50_us,p95_us,p99_us,p999_us,max_us,mean_us,extra
+```
+
+`run.sh` runs all three (pinned to CPU 0 via `taskset` when
+available), concatenates rows into `bench/results.csv`, and prints
+a column-aligned summary. The `extra` column carries free-form
+key=value pairs (e.g. `workers=4 sleep_ms=50`) so the row stays
+self-describing without growing more columns.
+
+#### Why in-process
+
+Subprocess fork/exec is paid once at session start in real
+deployments. Steady-state per-call latency is what consumers care
+about. In-process measurement gives a tighter, more reproducible
+number; the stdio transport's per-call cost (newline-delimited JSON
+over a pipe pair) is identical whether the server is in a thread
+or a child process.
+
+The pool bench specifically needs in-process because we want to
+control `CMCP_WORKERS` from the bench launcher; doing that across
+fork+exec is brittle.
+
+#### Defaults + env knobs
+
+| Bench | Default N | Warmup | Other knobs |
+|---|---|---|---|
+| `bench_server_inline` | 50000 | 1000 | — |
+| `bench_server_pool`   | 64    | n/a  | `CMCP_BENCH_SLEEP_MS` (50ms), `CMCP_WORKERS` (4) |
+| `bench_http`          | 5000  | 1000 | — |
+
+HTTP iteration count is deliberately smaller — the transport is
+slower than stdio and we don't need 50k samples to reach a stable
+p99.
+
+#### Methodology
+
+`docs/perf-baselines.md` covers:
+
+1. What each bench measures and why those iteration counts.
+2. Warmup is real (1000 discarded calls) so the worker pool, libcurl
+   keep-alive, and kernel state have all settled.
+3. Quantiles via `qsort` over the full sample buffer — tractable up
+   to ~200k samples; we run 50k.
+4. Build flags must be `-O2 -g` (the default); never bench an
+   ASan or coverage build.
+5. Single-run numbers, no confidence intervals. Sources of variance
+   on a typical Linux box (scheduler, NUMA, cache effects) tend to
+   swamp formal stats anyway. The baseline is "is cMCP in the right
+   order of magnitude," not a stats paper.
+
+#### Build system + gitignore
+
+- `make bench-build` compiles the three binaries.
+- `make bench` builds + runs + writes `bench/results.csv`.
+- `make clean` removes the binaries and the CSV.
+- `.gitignore` adds the three compiled binaries and `results.csv`.
+- The Makefile bench rule is fenced behind its own pattern so it
+  doesn't collide with the `tests/%` pattern.
+
+#### Out of scope for 6.6.1
+
+- **Comparison vs TS/Py reference SDKs** (Phase 6.6.2). Needs an
+  external workload script and apples-to-apples calibration.
+- **`perf record` + `heaptrack` flamegraphs** (Phase 6.6.3). Needs
+  decisions on what to commit (SVGs are large; raw data isn't
+  portable).
+- **HTTP soak harness** (Phase 6.6.4). Variant of the existing
+  `tests/soak/` driver going through `cmcp_transport_http_connect`
+  instead of stdio.
+- **`bench_session_fanout`** (Phase 6.6.x). The N-server session
+  aggregator throughput bench. Punted because the session API has
+  enough nuance (per-server async + paginated list fan-in) that
+  it's better as its own commit.
+- **Regression gate.** Tier 7 posture if ever; for now, the
+  baselines are reference numbers, not CI tripwires.
+
+#### What the first numbers tell us (on a Ryzen 5800X)
+
+| bench                  | throughput     | p50 µs | p99 µs |
+|------------------------|---------------:|-------:|-------:|
+| `server_inline_stdio`  | 48,813 calls/s |     20 |     24 |
+| `server_pool_stdio`    | 80 calls/s     |451,893 |802,600 |
+| `server_inline_http`   | 5,378 calls/s  |    185 |    238 |
+
+The two ratios that matter:
+
+1. **stdio vs HTTP throughput ≈ 9×.** The cost of one fresh TCP +
+   libcurl handshake per call. `cmcp_transport_http_connect`
+   currently creates a new easy handle per POST; the headroom is
+   what's available to recover with connection pooling.
+2. **Pool concurrency factor = 4.** Throughput tracks
+   `workers/sleep_s` to the digit: `4/0.05 = 80 calls/s` measured.
+   The pool multiplexes as advertised.
+
+#### Discovered issues (filed for follow-up)
+
+`bench_http` saturates the 6.5.2 accept-rate gate within ~2 seconds
+of starting — it's a peer-flood defense, not a self-cap, so the
+bench sets `CMCP_HTTP_ACCEPT_RATE=0` at startup unless the user has
+explicitly overridden the var. While debugging this, surfaced a
+real client-side defect: when the server replies `503` to a POST,
+the libcurl client path doesn't surface this to
+`cmcp_client_request` — the call hangs waiting for a JSON-RPC
+response. Tracked for a follow-up; not blocking 6.6.1.
+
+No test-suite assertion delta in this commit.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at
