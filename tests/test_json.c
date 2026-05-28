@@ -184,6 +184,81 @@ static void test_parse_garbage(void) {
     TEST_ASSERT(cmcp_json_parse_cstr("1 trailing") == NULL); /* trailing garbage */
 }
 
+/* Tier 6 axis 6.5.3: parser DoS caps. */
+
+/* Build a string of `depth` nested `[`, an inner `0`, and matching `]`.
+ * Returns a heap buffer the caller must free. */
+static char *build_nested_array(size_t depth) {
+    char *buf = malloc(depth * 2 + 2);
+    if (!buf) return NULL;
+    for (size_t i = 0; i < depth; i++) buf[i] = '[';
+    buf[depth] = '0';
+    for (size_t i = 0; i < depth; i++) buf[depth + 1 + i] = ']';
+    buf[depth * 2 + 1] = '\0';
+    return buf;
+}
+
+static void test_parse_depth_within_limit_accepted(void) {
+    /* Default cap is 64; 32 levels must parse fine. */
+    char *buf = build_nested_array(32);
+    TEST_ASSERT(buf != NULL);
+    cmcp_json_t *v = cmcp_json_parse_cstr(buf);
+    TEST_ASSERT(v != NULL);
+    cmcp_json_free(v);
+    free(buf);
+}
+
+static void test_parse_depth_exceeds_limit_rejected(void) {
+    /* Default cap is 64; 128 levels must be rejected. The bound exists
+     * to prevent stack exhaustion from a hostile peer. */
+    char *buf = build_nested_array(128);
+    TEST_ASSERT(buf != NULL);
+    cmcp_json_t *v = cmcp_json_parse_cstr(buf);
+    TEST_ASSERT(v == NULL);
+    free(buf);
+}
+
+static void test_parse_elements_within_limit_accepted(void) {
+    /* Default cap is 65536; 1000-element array must parse. */
+    size_t n = 1000;
+    size_t cap = n * 2 + 4;
+    char *buf = malloc(cap);
+    TEST_ASSERT(buf != NULL);
+    size_t pos = 0;
+    buf[pos++] = '[';
+    for (size_t i = 0; i < n; i++) {
+        if (i) buf[pos++] = ',';
+        buf[pos++] = '0';
+    }
+    buf[pos++] = ']';
+    buf[pos] = '\0';
+    cmcp_json_t *v = cmcp_json_parse_cstr(buf);
+    TEST_ASSERT(v != NULL);
+    TEST_ASSERT((size_t)cmcp_json_array_len(v) == n);
+    cmcp_json_free(v);
+    free(buf);
+}
+
+static void test_parse_elements_exceeds_limit_rejected(void) {
+    /* Default cap is 65536; build a 70000-element array and assert
+     * reject. ~140KB string, dwarfed by other test fixtures. */
+    size_t n = 70000;
+    size_t cap = n * 2 + 4;
+    char *buf = malloc(cap);
+    TEST_ASSERT(buf != NULL);
+    size_t pos = 0;
+    buf[pos++] = '[';
+    for (size_t i = 0; i < n; i++) {
+        if (i) buf[pos++] = ',';
+        buf[pos++] = '0';
+    }
+    buf[pos++] = ']';
+    buf[pos] = '\0';
+    cmcp_json_t *v = cmcp_json_parse_cstr(buf);
+    TEST_ASSERT(v == NULL);
+    free(buf);
+}
+
 /* === emit: round-trip ================================================== */
 
 static void test_emit_primitives(void) {
@@ -377,6 +452,10 @@ int main(void) {
     TEST_RUN(test_parse_nested);
     TEST_RUN(test_parse_whitespace);
     TEST_RUN(test_parse_garbage);
+    TEST_RUN(test_parse_depth_within_limit_accepted);
+    TEST_RUN(test_parse_depth_exceeds_limit_rejected);
+    TEST_RUN(test_parse_elements_within_limit_accepted);
+    TEST_RUN(test_parse_elements_exceeds_limit_rejected);
     TEST_RUN(test_emit_primitives);
     TEST_RUN(test_emit_string_escapes);
     TEST_RUN(test_emit_string_control_char);

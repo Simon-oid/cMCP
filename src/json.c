@@ -3,7 +3,44 @@
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#include <pthread.h>
 #include "cmcp_json.h"
+
+/* ===========================================================================
+ * Parser DoS caps (Tier 6 axis 6.5.3)
+ * ===========================================================================
+ *
+ * The parser is recursive descent over arbitrary peer-controlled bytes.
+ * Without bounds, a hostile peer can craft `{{{...{1}...}}}` (stack
+ * exhaustion via deep recursion) or `[1,1,1,...]` (memory blowup via
+ * huge container). Two env-tunable caps, snapshotted once via
+ * pthread_once and read by every parse call after that — zero
+ * per-call getenv() cost on the hot path.
+ *
+ *   CMCP_JSON_MAX_DEPTH     default 64    (<=0 disables)
+ *   CMCP_JSON_MAX_ELEMENTS  default 65536 (<=0 disables)
+ *
+ * On trip the parser returns NULL (caller surfaces CMCP_EPARSE → -32700).
+ */
+#define CMCP_JSON_MAX_DEPTH_DEFAULT     64
+#define CMCP_JSON_MAX_ELEMENTS_DEFAULT  65536
+
+static int g_json_max_depth    = CMCP_JSON_MAX_DEPTH_DEFAULT;
+static int g_json_max_elements = CMCP_JSON_MAX_ELEMENTS_DEFAULT;
+static pthread_once_t g_json_caps_once = PTHREAD_ONCE_INIT;
+
+static void json_caps_init(void) {
+    const char *d = getenv("CMCP_JSON_MAX_DEPTH");
+    if (d && *d) {
+        char *end; long v = strtol(d, &end, 10);
+        if (end != d && *end == '\0') g_json_max_depth = (int)v;
+    }
+    const char *e = getenv("CMCP_JSON_MAX_ELEMENTS");
+    if (e && *e) {
+        char *end; long v = strtol(e, &end, 10);
+        if (end != e && *end == '\0') g_json_max_elements = (int)v;
+    }
+}
 
 /* ===========================================================================
  * Utility: UTF-8 emission for parsed \uXXXX escapes
@@ -378,6 +415,9 @@ typedef struct {
     const char *src;
     size_t      pos;
     size_t      len;
+    int         depth;          /* current recursion depth */
+    int         max_depth;      /* snapshot of g_json_max_depth; <=0 disables */
+    int         max_elements;   /* snapshot of g_json_max_elements; <=0 disables */
 } parser_t;
 
 static cmcp_json_t *parse_value(parser_t *p);
@@ -552,57 +592,75 @@ static cmcp_json_t *parse_number(parser_t *p) {
 
 static cmcp_json_t *parse_array(parser_t *p) {
     if (eat(p, '[') < 0) return NULL;
+    if (p->max_depth > 0 && p->depth >= p->max_depth) return NULL;
+    p->depth++;
     cmcp_json_t *arr = cmcp_json_new_array();
-    if (!arr) return NULL;
+    if (!arr) { p->depth--; return NULL; }
     skip_ws(p);
-    if (peek(p) == ']') { p->pos++; return arr; }
+    if (peek(p) == ']') { p->pos++; p->depth--; return arr; }
+    int n = 0;
     for (;;) {
         skip_ws(p);
         cmcp_json_t *child = parse_value(p);
-        if (!child) { cmcp_json_free(arr); return NULL; }
+        if (!child) { cmcp_json_free(arr); p->depth--; return NULL; }
         if (cmcp_json_array_append(arr, child) < 0) {
             cmcp_json_free(child);
             cmcp_json_free(arr);
+            p->depth--;
             return NULL;
+        }
+        n++;
+        if (p->max_elements > 0 && n > p->max_elements) {
+            cmcp_json_free(arr); p->depth--; return NULL;
         }
         skip_ws(p);
         int c = peek(p);
         if (c == ',') { p->pos++; continue; }
-        if (c == ']') { p->pos++; return arr; }
+        if (c == ']') { p->pos++; p->depth--; return arr; }
         cmcp_json_free(arr);
+        p->depth--;
         return NULL;
     }
 }
 
 static cmcp_json_t *parse_object(parser_t *p) {
     if (eat(p, '{') < 0) return NULL;
+    if (p->max_depth > 0 && p->depth >= p->max_depth) return NULL;
+    p->depth++;
     cmcp_json_t *obj = cmcp_json_new_object();
-    if (!obj) return NULL;
+    if (!obj) { p->depth--; return NULL; }
     skip_ws(p);
-    if (peek(p) == '}') { p->pos++; return obj; }
+    if (peek(p) == '}') { p->pos++; p->depth--; return obj; }
+    int n = 0;
     for (;;) {
         skip_ws(p);
-        if (eat(p, '"') < 0) { cmcp_json_free(obj); return NULL; }
+        if (eat(p, '"') < 0) { cmcp_json_free(obj); p->depth--; return NULL; }
         char *key = NULL;
         size_t key_len = 0;
         if (parse_string_body(p, &key, &key_len) < 0) {
-            cmcp_json_free(obj); return NULL;
+            cmcp_json_free(obj); p->depth--; return NULL;
         }
         skip_ws(p);
-        if (eat(p, ':') < 0) { free(key); cmcp_json_free(obj); return NULL; }
+        if (eat(p, ':') < 0) { free(key); cmcp_json_free(obj); p->depth--; return NULL; }
         skip_ws(p);
         cmcp_json_t *child = parse_value(p);
-        if (!child) { free(key); cmcp_json_free(obj); return NULL; }
+        if (!child) { free(key); cmcp_json_free(obj); p->depth--; return NULL; }
         if (cmcp_json_object_set_n(obj, key, key_len, child) < 0) {
             free(key); cmcp_json_free(child); cmcp_json_free(obj);
+            p->depth--;
             return NULL;
         }
         free(key);
+        n++;
+        if (p->max_elements > 0 && n > p->max_elements) {
+            cmcp_json_free(obj); p->depth--; return NULL;
+        }
         skip_ws(p);
         int c = peek(p);
         if (c == ',') { p->pos++; continue; }
-        if (c == '}') { p->pos++; return obj; }
+        if (c == '}') { p->pos++; p->depth--; return obj; }
         cmcp_json_free(obj);
+        p->depth--;
         return NULL;
     }
 }
@@ -628,7 +686,13 @@ static cmcp_json_t *parse_value(parser_t *p) {
 
 cmcp_json_t *cmcp_json_parse(const char *text, size_t len) {
     if (!text) return NULL;
-    parser_t p = { .src = text, .pos = 0, .len = len };
+    pthread_once(&g_json_caps_once, json_caps_init);
+    parser_t p = {
+        .src = text, .pos = 0, .len = len,
+        .depth = 0,
+        .max_depth    = g_json_max_depth,
+        .max_elements = g_json_max_elements,
+    };
     cmcp_json_t *v = parse_value(&p);
     if (!v) return NULL;
     skip_ws(&p);

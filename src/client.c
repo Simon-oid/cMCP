@@ -861,10 +861,10 @@ int cmcp_client_call_async(cmcp_client_t *c, const char *method,
     if (!p) { cmcp_json_free(params); return CMCP_ENOMEM; }
 
     long long id = cmcp_rpc_pending_register(c->pending, p);
-    if (id == 0) {
+    if (id <= 0) {
         pending_completion_free(p);
         cmcp_json_free(params);
-        return CMCP_ENOMEM;
+        return (id < 0) ? CMCP_EAGAIN : CMCP_ENOMEM;
     }
     p->id = id;
     list_link(c, p);
@@ -1022,10 +1022,10 @@ int cmcp_client_call_async_progress(cmcp_client_t *c, const char *method,
     p->progress_ud        = userdata;
 
     long long id = cmcp_rpc_pending_register(c->pending, p);
-    if (id == 0) {
+    if (id <= 0) {
         pending_completion_free(p);
         cmcp_json_free(params);
-        return CMCP_ENOMEM;
+        return (id < 0) ? CMCP_EAGAIN : CMCP_ENOMEM;
     }
     p->id = id;
     list_link(c, p);

@@ -484,6 +484,12 @@ int cmcp_rpc_make_error(cmcp_rpc_message_t *m, const cmcp_id_t *id,
 #define PENDING_INIT_CAP   16
 #define PENDING_TOMBSTONE  ((long long)-1)
 
+/* In-flight cap (Tier 6 axis 6.5.3). Bounds the number of concurrent
+ * unresolved registrations so a peer that never replies can't drive
+ * the hash table to arbitrary size. 0 = unbounded; default 1024
+ * (env: CMCP_RPC_MAX_INFLIGHT, snapshotted at table construction). */
+#define CMCP_RPC_MAX_INFLIGHT_DEFAULT 1024
+
 typedef struct {
     long long id;        /* 0 = empty, -1 = tombstone, else live */
     void     *userdata;
@@ -491,10 +497,11 @@ typedef struct {
 
 struct cmcp_rpc_pending {
     pending_slot_t *slots;
-    size_t          cap;     /* power of two */
-    size_t          len;     /* live entries */
-    size_t          tomb;    /* tombstones */
-    long long       next_id; /* monotonic */
+    size_t          cap;          /* power of two */
+    size_t          len;          /* live entries */
+    size_t          tomb;         /* tombstones */
+    long long       next_id;      /* monotonic */
+    size_t          max_inflight; /* 0 = unbounded */
     pthread_mutex_t mu;
 };
 
@@ -528,6 +535,13 @@ cmcp_rpc_pending_t *cmcp_rpc_pending_new(void) {
     if (!t->slots) { free(t); return NULL; }
     t->cap = PENDING_INIT_CAP;
     t->next_id = 1;
+    /* Snapshot env once at construction; setter overrides after. */
+    t->max_inflight = CMCP_RPC_MAX_INFLIGHT_DEFAULT;
+    const char *mi = getenv("CMCP_RPC_MAX_INFLIGHT");
+    if (mi && *mi) {
+        char *end; long v = strtol(mi, &end, 10);
+        if (end != mi && *end == '\0' && v >= 0) t->max_inflight = (size_t)v;
+    }
     if (pthread_mutex_init(&t->mu, NULL) != 0) {
         free(t->slots); free(t);
         return NULL;
@@ -545,6 +559,11 @@ void cmcp_rpc_pending_free(cmcp_rpc_pending_t *t) {
 long long cmcp_rpc_pending_register(cmcp_rpc_pending_t *t, void *userdata) {
     if (!t) return 0;
     pthread_mutex_lock(&t->mu);
+
+    if (t->max_inflight > 0 && t->len >= t->max_inflight) {
+        pthread_mutex_unlock(&t->mu);
+        return -1;  /* CMCP_EAGAIN — caller surfaces capacity error */
+    }
 
     if ((t->len + t->tomb) * 4 >= t->cap * 3) {
         size_t new_cap = (t->len * 2 >= t->cap) ? t->cap * 2 : t->cap;
@@ -598,6 +617,21 @@ size_t cmcp_rpc_pending_count(cmcp_rpc_pending_t *t) {
     if (!t) return 0;
     pthread_mutex_lock(&t->mu);
     size_t n = t->len;
+    pthread_mutex_unlock(&t->mu);
+    return n;
+}
+
+void cmcp_rpc_pending_set_max_inflight(cmcp_rpc_pending_t *t, size_t cap) {
+    if (!t) return;
+    pthread_mutex_lock(&t->mu);
+    t->max_inflight = cap;
+    pthread_mutex_unlock(&t->mu);
+}
+
+size_t cmcp_rpc_pending_max_inflight(cmcp_rpc_pending_t *t) {
+    if (!t) return 0;
+    pthread_mutex_lock(&t->mu);
+    size_t n = t->max_inflight;
     pthread_mutex_unlock(&t->mu);
     return n;
 }

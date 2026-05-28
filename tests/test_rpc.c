@@ -465,6 +465,47 @@ static void test_pending_resize(void) {
     cmcp_rpc_pending_free(t);
 }
 
+/* Tier 6 axis 6.5.3: in-flight cap. */
+static void test_pending_max_inflight_caps(void) {
+    cmcp_rpc_pending_t *t = cmcp_rpc_pending_new();
+    TEST_ASSERT(t != NULL);
+
+    /* Set a tiny cap and verify register returns -1 (EAGAIN) once
+     * the cap is reached. Then take one and verify the next register
+     * succeeds again (cap is on outstanding, not total). */
+    cmcp_rpc_pending_set_max_inflight(t, 3);
+    TEST_ASSERT(cmcp_rpc_pending_max_inflight(t) == 3);
+
+    int s[5] = {0};
+    long long ids[3];
+    ids[0] = cmcp_rpc_pending_register(t, &s[0]); TEST_ASSERT(ids[0] > 0);
+    ids[1] = cmcp_rpc_pending_register(t, &s[1]); TEST_ASSERT(ids[1] > 0);
+    ids[2] = cmcp_rpc_pending_register(t, &s[2]); TEST_ASSERT(ids[2] > 0);
+
+    /* At cap. Surplus must return -1. */
+    long long fail1 = cmcp_rpc_pending_register(t, &s[3]);
+    TEST_ASSERT(fail1 == -1);
+    long long fail2 = cmcp_rpc_pending_register(t, &s[4]);
+    TEST_ASSERT(fail2 == -1);
+    TEST_ASSERT(cmcp_rpc_pending_count(t) == 3);
+
+    /* Take one, then a new register works. */
+    void *got = NULL;
+    TEST_ASSERT(cmcp_rpc_pending_take(t, ids[0], &got) == 1);
+    long long ok = cmcp_rpc_pending_register(t, &s[3]);
+    TEST_ASSERT(ok > 0);
+
+    /* 0 disables the cap. */
+    cmcp_rpc_pending_set_max_inflight(t, 0);
+    TEST_ASSERT(cmcp_rpc_pending_max_inflight(t) == 0);
+    for (int i = 0; i < 50; i++) {
+        long long id = cmcp_rpc_pending_register(t, &s[0]);
+        TEST_ASSERT(id > 0);
+    }
+
+    cmcp_rpc_pending_free(t);
+}
+
 /* ====================================================================== */
 /* Dispatch                                                                */
 /* ====================================================================== */
@@ -608,6 +649,7 @@ int main(void) {
     TEST_RUN(test_pending_register_take);
     TEST_RUN(test_pending_unknown_id);
     TEST_RUN(test_pending_resize);
+    TEST_RUN(test_pending_max_inflight_caps);
 
     TEST_RUN(test_dispatch_request);
     TEST_RUN(test_dispatch_method_not_found);

@@ -43,6 +43,7 @@ typedef enum {
     CMCP_ESCHEMA        = -10, /**< Tool input failed schema validation. */
     CMCP_ENOTFOUND      = -11, /**< Named primitive (tool/resource/prompt) not registered. */
     CMCP_EHANDLER       = -12, /**< Handler returned a non-success result. */
+    CMCP_EAGAIN         = -13, /**< Capacity/rate cap reached; retry later. */
 } cmcp_err_t;
 
 /**

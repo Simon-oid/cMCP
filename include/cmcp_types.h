@@ -203,7 +203,9 @@ cmcp_rpc_pending_t *cmcp_rpc_pending_new(void);
 void                cmcp_rpc_pending_free(cmcp_rpc_pending_t *t);
 
 /* Reserve a fresh monotonic positive integer ID and associate it with
- * userdata. Returns the new ID, or 0 on failure. */
+ * userdata. Returns the new ID on success (always > 0). Returns 0 on
+ * allocation failure (CMCP_ENOMEM). Returns -1 if the in-flight cap
+ * is exhausted (CMCP_EAGAIN); see cmcp_rpc_pending_set_max_inflight. */
 long long cmcp_rpc_pending_register(cmcp_rpc_pending_t *t, void *userdata);
 
 /* Look up an ID and remove it. Returns 1 and writes *out_userdata on
@@ -212,6 +214,13 @@ int cmcp_rpc_pending_take(cmcp_rpc_pending_t *t, long long id,
                           void **out_userdata);
 
 size_t cmcp_rpc_pending_count(cmcp_rpc_pending_t *t);
+
+/* Configure the in-flight cap (Tier 6 axis 6.5.3). Surplus calls to
+ * register fail with id -1 (CMCP_EAGAIN). 0 = unbounded. By default
+ * the table reads CMCP_RPC_MAX_INFLIGHT (default 1024) at construction.
+ * Thread-safe. */
+void   cmcp_rpc_pending_set_max_inflight(cmcp_rpc_pending_t *t, size_t cap);
+size_t cmcp_rpc_pending_max_inflight(cmcp_rpc_pending_t *t);
 
 /* ------------------------------------------------------------------ */
 /* Dispatch                                                            */

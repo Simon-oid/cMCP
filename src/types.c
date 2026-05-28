@@ -18,6 +18,7 @@ const char *cmcp_errstr(int err) {
     case CMCP_ESCHEMA:      return "schema validation failed";
     case CMCP_ENOTFOUND:    return "not found";
     case CMCP_EHANDLER:     return "handler error";
+    case CMCP_EAGAIN:       return "capacity exceeded, retry";
     default:                return "unknown error";
     }
 }

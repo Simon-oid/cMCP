@@ -100,9 +100,9 @@ half-built responses, no use-after-free across the handoff.
 |---|--------|------|------------|
 | 2.1 | Malformed JSON-RPC frame crashes dispatch | T | 🟢 `cmcp_rpc_parse` validates the JSON-RPC 2.0 envelope; bad frames produce `-32700`/`-32600` rather than aborting. |
 | 2.2 | Request id collisions between peer and host | T | 🟢 Server only ever responds with the peer-provided id; host-initiated requests use a monotonic counter in a separate id space. |
-| 2.3 | JSON tree pathologically deep (stack exhaustion) | D | ◻️ 6.5.2 will add max JSON depth (`CMCP_RPC_MAX_DEPTH`, planned 64). Today the parser is iterative for arrays/objects but recursive for the recursive descent — measure & bound. |
-| 2.4 | JSON tree pathologically wide (memory bomb) | D | 🟡 `HTTP_MAX_BODY_BYTES` is a coarse cap. 6.5.2 will add structured caps (`CMCP_RPC_MAX_ARRAY_ITEMS`, `CMCP_RPC_MAX_OBJECT_KEYS`). |
-| 2.5 | In-flight request table exhaustion | D | ◻️ 6.5.2: cap `CMCP_RPC_MAX_INFLIGHT` (planned 1024) on the host side; surplus calls return `CMCP_EAGAIN` immediately. |
+| 2.3 | JSON tree pathologically deep (stack exhaustion) | D | 🟢 6.5.3: `CMCP_JSON_MAX_DEPTH` (default 64) bounds recursive-descent depth in `parse_object` / `parse_array`. Trip → parser returns NULL → `-32700`. Snapshotted once via `pthread_once`. |
+| 2.4 | JSON tree pathologically wide (memory bomb) | D | 🟢 6.5.3: `CMCP_JSON_MAX_ELEMENTS` (default 65536) caps both array element count and object key count per container. `HTTP_MAX_BODY_BYTES` (4 MiB) remains the outer envelope. |
+| 2.5 | In-flight request table exhaustion | D | 🟢 6.5.3: `CMCP_RPC_MAX_INFLIGHT` (default 1024) snapshotted at `cmcp_rpc_pending_new`; surplus `register` returns `-1` → `CMCP_EAGAIN` at the host caller. Run-time override via `cmcp_rpc_pending_set_max_inflight(t, cap)`; `0` disables. |
 | 2.6 | Frame straddling read buffer corrupts state | T | 🟢 Both stdio and HTTP transports are framed — stdio is newline-delimited with bounded line length; HTTP is `Content-Length`-bounded. No partial frames in the dispatch loop. |
 
 ---

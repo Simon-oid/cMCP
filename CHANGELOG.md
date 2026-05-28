@@ -588,10 +588,8 @@ the concurrent-connection cap + accept-rate limiter land in the
 next commit; the threat-model text is forward-stated and will be
 accurate once 6.5.2 ships.
 
-#### Deferred to 6.5.3 / 6.5.4
+#### Deferred to 6.5.4
 
-- Protocol-layer limits (`CMCP_RPC_MAX_DEPTH`, max array/object
-  size, max in-flight) in `src/rpc.c` (6.5.3).
 - Log redactor + `CMCP_LOG_REDACT` (6.5.4).
 - `docs/deployment-tls.md` (terminator recipes; 6.5.4).
 
@@ -658,6 +656,87 @@ Total suite: 2903 → 2910 assertions across 22 binaries. ASan clean.
 The threat-model entry `B1.5` (connection flood) is now plain 🟢
 (no caveat). Text rewritten to reflect the single-acceptor structural
 property and the new env knobs.
+
+### 6.5.3 protocol-layer parser + in-flight caps
+
+Three bounds on peer-controlled growth at the rpc layer. None of these
+were exploitable to a *crash* today (the worker queue is already
+back-pressured, JSON allocations are tracked, the pending table is
+unbounded but a peer pipelining a million requests would just be
+back-pressured by the transport), but unbounded growth invites the
+next ingenious peer.
+
+#### `CMCP_JSON_MAX_DEPTH` (`src/json.c`)
+
+The parser is recursive descent. A peer that sends `{{{...{1}...}}}`
+with 100k braces could drive the call stack into exhaustion territory.
+Now a depth counter is threaded through `parser_t` and checked at
+every `parse_object` / `parse_array` entry; default cap is **64**
+(matches typical JSON-Schema/JSON-RPC depth posture). Trip → parser
+returns NULL → caller surfaces `CMCP_EPARSE` → wire response `-32700`.
+
+#### `CMCP_JSON_MAX_ELEMENTS` (`src/json.c`)
+
+A single cap covering both array element count and object key count
+per container. Defense against `[1,1,1,...]` memory bombs. Default
+**65536** — comfortably above any legitimate MCP payload, kills the
+class. Tripped count → reject the whole parse (containers are
+discarded as the stack unwinds).
+
+Both JSON caps are snapshotted once via `pthread_once` at first parse,
+so per-parse cost is zero on the hot path; the env is read once per
+process. `<= 0` for either disables that cap.
+
+#### `CMCP_RPC_MAX_INFLIGHT` (`src/rpc.c`)
+
+`cmcp_rpc_pending_t` (the host-side request-ID table) grew unbounded.
+A buggy or hostile peer that never replies could drive the hash table
+to arbitrary size on the host side.
+
+New per-table field `max_inflight`, default **1024**, snapshotted at
+`cmcp_rpc_pending_new()` from `CMCP_RPC_MAX_INFLIGHT`. Surplus
+`cmcp_rpc_pending_register` returns `-1` (distinct from the
+allocation-failure `0`). Both `client.c` call sites translate:
+`id == 0 → CMCP_ENOMEM`, `id < 0 → CMCP_EAGAIN`.
+
+Run-time configurability:
+`cmcp_rpc_pending_set_max_inflight(t, cap)` /
+`cmcp_rpc_pending_max_inflight(t)` (additive to the public
+`cmcp_rpc_pending_*` API). `0` disables.
+
+#### New public error code
+
+`CMCP_EAGAIN = -13` added to `cmcp_err_t`. Additive — no existing
+numeric encoding changes. Per `docs/SEMVER.md` this is a MINOR-class
+addition. The `cmcp_errstr` table grows one entry: `"capacity
+exceeded, retry"`.
+
+#### Tests
+
+- `tests/test_json.c`:
+  - `test_parse_depth_within_limit_accepted` — 32-deep array passes.
+  - `test_parse_depth_exceeds_limit_rejected` — 128-deep array rejected.
+  - `test_parse_elements_within_limit_accepted` — 1000-element array
+    passes and yields `cmcp_json_array_len(v) == 1000`.
+  - `test_parse_elements_exceeds_limit_rejected` — 70000-element array
+    rejected.
+- `tests/test_rpc.c`:
+  - `test_pending_max_inflight_caps` — set cap=3, register 3 succeed,
+    next two return `-1`; take one, next register succeeds; set cap=0,
+    50 more registers succeed.
+
+Total suite: 2910 → 2980 assertions across 22 binaries. ASan/UBSan
+clean.
+
+#### Threat-table cross-ref
+
+`B2.3` (deep JSON), `B2.4` (wide JSON), `B2.5` (in-flight table) all
+flip from ◻️/🟡 to 🟢 with concrete env knobs.
+
+#### Deferred to 6.5.4
+
+- Log redactor + `CMCP_LOG_REDACT` (6.5.4).
+- `docs/deployment-tls.md` (terminator recipes; 6.5.4).
 
 ## Tier 5 (agentic readiness, 2026-05-24)
 
