@@ -300,6 +300,71 @@ int cmcp_json_is_null(const cmcp_json_t *v) {
 }
 
 /* ===========================================================================
+ * Credential redactor (Tier 6 axis 6.5.4)
+ * ===========================================================================
+ *
+ * Walks an arbitrary JSON tree and replaces values under sensitive
+ * keys with the literal string "[REDACTED]". The match is on the
+ * normalized key (lowercase, alphanumeric-only) and is a substring
+ * test against a fixed list — so `api_key`, `apiKey`, `API-Key`,
+ * `myApiKey`, `customer_secret`, `Authorization` all hit.
+ *
+ * Only key-based matching: scalar strings that *look* like tokens
+ * (long random sequences, JWTs, etc.) are not detected. Heuristic
+ * scrubbing would either miss real tokens or false-positive on
+ * legitimate payloads; key-based is the documented contract.
+ *
+ * On allocation failure during replacement, the original value stays
+ * — best-effort, never aborts.
+ */
+
+static int is_sensitive_key(const char *key, size_t key_len) {
+    if (!key || key_len == 0) return 0;
+    char norm[64];
+    size_t n = 0;
+    for (size_t i = 0; i < key_len && n < sizeof(norm) - 1; i++) {
+        char c = key[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+            norm[n++] = c;
+    }
+    norm[n] = '\0';
+    if (n == 0) return 0;
+
+    static const char *const patterns[] = {
+        "password", "passwd", "token", "secret",
+        "apikey", "authorization", "bearer", "credential",
+        NULL,
+    };
+    for (const char *const *p = patterns; *p; p++) {
+        if (strstr(norm, *p)) return 1;
+    }
+    return 0;
+}
+
+void cmcp_json_redact(cmcp_json_t *v) {
+    if (!v) return;
+    if (v->type == CMCP_JSON_ARRAY) {
+        for (size_t i = 0; i < v->arr.len; i++)
+            cmcp_json_redact(v->arr.items[i]);
+        return;
+    }
+    if (v->type != CMCP_JSON_OBJECT) return;
+    for (size_t i = 0; i < v->obj.len; i++) {
+        if (is_sensitive_key(v->obj.keys[i], v->obj.key_lens[i])) {
+            cmcp_json_t *rep = cmcp_json_new_string("[REDACTED]");
+            if (rep) {
+                cmcp_json_free(v->obj.values[i]);
+                v->obj.values[i] = rep;
+            }
+            /* Do not recurse into the replaced (or unchanged) value. */
+        } else {
+            cmcp_json_redact(v->obj.values[i]);
+        }
+    }
+}
+
+/* ===========================================================================
  * Free / clone / equal
  * ======================================================================== */
 

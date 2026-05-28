@@ -401,6 +401,82 @@ static void test_cap_not_advertised(void) {
 }
 
 /* ====================================================================== */
+/* Tier 6.5.4: secret-shaped fields in `data` are scrubbed on the wire     */
+/* ====================================================================== */
+
+/* Same shape as trig_log but the data payload contains both a benign
+ * field and a credential-shaped field. We assert the wire-side
+ * notification redacts only the credential. */
+static int trig_log_with_secret(const cmcp_json_t *args, void *userdata,
+                                  cmcp_handler_ctx_t *hctx,
+                                  cmcp_json_t **out_content, int *out_is_error) {
+    (void)args; (void)hctx;
+    log_ctx_t *c = (log_ctx_t *)userdata;
+    *out_is_error = 0;
+
+    cmcp_json_t *data = cmcp_json_new_object();
+    cmcp_json_object_set(data, "action",  cmcp_json_new_string("deploy"));
+    cmcp_json_object_set(data, "api_key", cmcp_json_new_string("sk-LIVE-12345"));
+    cmcp_json_object_set(data, "user",    cmcp_json_new_string("alice"));
+    int rc = cmcp_server_log(c->server, CMCP_LOG_LEVEL_INFO, "audit", data);
+
+    char buf[64];
+    snprintf(buf, sizeof buf, "rc=%d", rc);
+    *out_content = cmcp_tool_text_content(buf);
+    return CMCP_OK;
+}
+
+static void test_log_data_credentials_redacted(void) {
+    transport_pair_t p;
+    TEST_ASSERT(make_pair(&p) == 0);
+
+    cmcp_server_t *srv = cmcp_server_new("test", "0.1.0");
+    cmcp_server_set_capabilities(srv, &(cmcp_server_capabilities_t){
+        .logging = 1,
+    });
+    log_ctx_t lctx = { srv };
+    cmcp_server_add_tool(srv, &(cmcp_tool_t){
+        .name = "trig", .handler = trig_log_with_secret, .userdata = &lctx,
+    });
+
+    server_arg_t sa = { srv, p.server_t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sa);
+
+    notif_capture_t cap; capture_init(&cap);
+    cmcp_client_t *cli = cmcp_client_new("c", "0.0.1");
+    cmcp_client_set_notification_handler(cli, on_notification, &cap);
+    TEST_ASSERT(cmcp_client_handshake(cli, p.client_t) == CMCP_OK);
+
+    cmcp_rpc_message_t resp;
+    TEST_ASSERT(cmcp_client_request(cli, "tools/call",
+                                     call_args("trig", NULL),
+                                     &resp) == CMCP_OK);
+    cmcp_rpc_message_clear(&resp);
+    TEST_ASSERT(capture_wait_count(&cap, 1));
+
+    pthread_mutex_lock(&cap.mu);
+    notif_record_t *r = cap.head;
+    TEST_ASSERT(r && strcmp(r->method, "notifications/message") == 0);
+    const cmcp_json_t *dt = cmcp_json_object_get(r->params, "data");
+    TEST_ASSERT(dt && dt->type == CMCP_JSON_OBJECT);
+    const cmcp_json_t *act = cmcp_json_object_get(dt, "action");
+    const cmcp_json_t *key = cmcp_json_object_get(dt, "api_key");
+    const cmcp_json_t *usr = cmcp_json_object_get(dt, "user");
+    TEST_ASSERT(act && strcmp(act->str.s, "deploy")     == 0);
+    TEST_ASSERT(key && strcmp(key->str.s, "[REDACTED]") == 0);
+    TEST_ASSERT(usr && strcmp(usr->str.s, "alice")      == 0);
+    pthread_mutex_unlock(&cap.mu);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(p.client_t);
+    pthread_join(th, NULL);
+    cmcp_server_free(srv);
+    cmcp_transport_close(p.server_t);
+    capture_clear(&cap);
+}
+
+/* ====================================================================== */
 /* test 4: level name codec                                                */
 /* ====================================================================== */
 
@@ -444,5 +520,6 @@ int main(void) {
     TEST_RUN(test_set_level_filters);
     TEST_RUN(test_payload_shape);
     TEST_RUN(test_cap_not_advertised);
+    TEST_RUN(test_log_data_credentials_redacted);
     TEST_DONE();
 }

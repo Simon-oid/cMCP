@@ -733,10 +733,114 @@ clean.
 `B2.3` (deep JSON), `B2.4` (wide JSON), `B2.5` (in-flight table) all
 flip from ◻️/🟡 to 🟢 with concrete env knobs.
 
-#### Deferred to 6.5.4
+### 6.5.4 log redactor + deployment-TLS doc (closes axis 6.5)
 
-- Log redactor + `CMCP_LOG_REDACT` (6.5.4).
-- `docs/deployment-tls.md` (terminator recipes; 6.5.4).
+Two small deliverables that finish axis 6.5: a credential-shaped
+value scrubber for the MCP wire log, and the deployment-TLS document
+the threat model has been forward-referencing since 6.5.1.
+
+#### `cmcp_json_redact` (`src/json.c`, `include/cmcp_json.h`)
+
+New public utility: in-place recursive walk that replaces values
+under credential-shaped keys with the literal string `"[REDACTED]"`.
+Match logic:
+
+- Key is **normalized**: lowercase, alphanumeric only. So `api_key`,
+  `API-Key`, `apiKey`, `myApiKey`, `customer_secret`, `Authorization`,
+  `BearerToken` all match; a bare `key` does not (the normalized
+  form is "key", and the pattern list is `apikey`, not `key`).
+- Patterns matched as **substring** on the normalized key:
+  `password`, `passwd`, `token`, `secret`, `apikey`, `authorization`,
+  `bearer`, `credential`.
+- Match → replace the value with `cmcp_json_new_string("[REDACTED]")`
+  regardless of original type (so a numeric `secret: 12345` also
+  gets scrubbed).
+- No match → recurse into the value (objects/arrays walked deeply).
+
+Scalar root or `NULL` input is a safe no-op. Allocation failure
+during replacement leaves the original value in place — best-effort,
+never aborts.
+
+Heuristic value-shape detection (e.g. "looks like a JWT") is
+deliberately **not** implemented. Either it false-positives on
+legitimate payloads or it misses real tokens; key-based matching is
+the documented contract.
+
+#### Wired into `cmcp_server_log` (`src/server.c`)
+
+Snapshot `g_log_redact` once via `pthread_once` at first log call;
+defaults to on. `CMCP_LOG_REDACT=0` disables (any nonzero, or unset,
+keeps the default on). With the toggle on, `data` is run through
+`cmcp_json_redact` before being placed under `params.data` in the
+outgoing `notifications/message`. The scrub happens at the source,
+not the sink — the host on the receiving end may persist or forward
+the payload (file logs, ops pipelines), and the secret should never
+have left the process.
+
+#### `docs/deployment-tls.md`
+
+The closed-question record for "should cMCP terminate TLS?" — no,
+and here's how to deploy with a terminator. Four sections:
+
+1. **Why no built-in TLS** — TLS's own surface is a moving target;
+   real deployments use a terminator regardless; static-by-default
+   packaging conflicts with linking OpenSSL; defense-in-depth scope
+   creep. Decision closed.
+2. **nginx / caddy / HAProxy recipes** — minimal configs that handle
+   the Streamable HTTP shape (POST + long-lived SSE GET). Each
+   recipe includes SSE-specific tuning (no response buffering) and
+   `Origin` header preservation so cMCP's `CMCP_HTTP_ALLOWED_ORIGINS`
+   check sees the original peer claim.
+3. **mTLS via terminator** — `ssl_verify_client` recipe with
+   `X-Client-Cert-*` forwarding. cMCP itself does not parse these
+   headers; the host's handler logic does, treating them as
+   advisory input over the terminator's authoritative verdict.
+4. **Pre-production checklist** — bound to `127.0.0.1`,
+   `CMCP_HTTP_ALLOWED_ORIGINS` set, SSE buffering off, log redaction
+   left at default, etc.
+
+The document is referenced from `docs/threat-model.md` B1 ("Out of
+scope: mTLS") and the closing "TLS posture rationale" question;
+those references resolve cleanly now.
+
+#### Tests
+
+`tests/test_json.c`: six new direct tests on `cmcp_json_redact`:
+- `test_redact_basic_object` — single sensitive key + benign key.
+- `test_redact_key_variants` — `api_key`, `apiKey`, `API-Key`,
+  `Authorization`, `BearerToken` all hit; bare `key` and `name`
+  don't.
+- `test_redact_non_string_values` — numeric `secret` replaced;
+  numeric `count` untouched.
+- `test_redact_nested` — object inside array inside object.
+- `test_redact_no_match_left_alone` — payload with no sensitive
+  keys round-trips identically (compared via `cmcp_json_emit_stable`).
+- `test_redact_safe_on_null_and_scalar` — no-op on NULL and on a
+  string root.
+
+`tests/test_logging.c`: one integration test
+(`test_log_data_credentials_redacted`) that drives a real
+client/server pair: the tool's handler logs
+`{"action": "deploy", "api_key": "sk-LIVE-12345", "user": "alice"}`;
+the captured wire `notifications/message` shows `api_key` →
+`"[REDACTED]"` and `action` / `user` untouched.
+
+The off-switch (`CMCP_LOG_REDACT=0`) is not auto-tested: the
+`pthread_once` snapshot is per-process, so the test harness can't
+flip it between cases without spawning subprocesses. The off-path
+is a strict subset of the on-path (no transformation), so testing
+the on-path covers the harder direction.
+
+Total suite: 2980 → 3005 assertions across 22 binaries. ASan/UBSan
+clean.
+
+#### Threat-table cross-ref
+
+`B4.2` (sensitive values in wire logs) flips from ◻️ to 🟢, citing
+the new env knob and the scrub utility.
+
+Axis 6.5 (security hardening) is now closed; the only B-row caveats
+remaining are spec-out-of-scope (mTLS handled by terminator, etc.).
 
 ## Tier 5 (agentic readiness, 2026-05-24)
 

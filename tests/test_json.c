@@ -239,6 +239,116 @@ static void test_parse_elements_within_limit_accepted(void) {
     free(buf);
 }
 
+/* === Tier 6.5.4: credential redactor =================================== */
+
+static void test_redact_basic_object(void) {
+    /* Build {"name": "alice", "password": "hunter2"} and assert
+     * password gets scrubbed, name doesn't. */
+    cmcp_json_t *obj = cmcp_json_new_object();
+    cmcp_json_object_set(obj, "name",     cmcp_json_new_string("alice"));
+    cmcp_json_object_set(obj, "password", cmcp_json_new_string("hunter2"));
+
+    cmcp_json_redact(obj);
+
+    const cmcp_json_t *n = cmcp_json_object_get(obj, "name");
+    const cmcp_json_t *p = cmcp_json_object_get(obj, "password");
+    TEST_ASSERT(n && strcmp(cmcp_json_string(n), "alice")     == 0);
+    TEST_ASSERT(p && strcmp(cmcp_json_string(p), "[REDACTED]") == 0);
+    cmcp_json_free(obj);
+}
+
+static void test_redact_key_variants(void) {
+    /* Snake / camel / kebab / mixed-case all hit; "key" alone must
+     * NOT hit (matched against "apikey" substring only). */
+    cmcp_json_t *obj = cmcp_json_new_object();
+    cmcp_json_object_set(obj, "api_key",       cmcp_json_new_string("a"));
+    cmcp_json_object_set(obj, "apiKey",        cmcp_json_new_string("b"));
+    cmcp_json_object_set(obj, "API-Key",       cmcp_json_new_string("c"));
+    cmcp_json_object_set(obj, "Authorization", cmcp_json_new_string("d"));
+    cmcp_json_object_set(obj, "BearerToken",   cmcp_json_new_string("e"));
+    cmcp_json_object_set(obj, "key",           cmcp_json_new_string("f"));
+    cmcp_json_object_set(obj, "name",          cmcp_json_new_string("g"));
+
+    cmcp_json_redact(obj);
+
+    const char *r1 = cmcp_json_string(cmcp_json_object_get(obj, "api_key"));
+    const char *r2 = cmcp_json_string(cmcp_json_object_get(obj, "apiKey"));
+    const char *r3 = cmcp_json_string(cmcp_json_object_get(obj, "API-Key"));
+    const char *r4 = cmcp_json_string(cmcp_json_object_get(obj, "Authorization"));
+    const char *r5 = cmcp_json_string(cmcp_json_object_get(obj, "BearerToken"));
+    const char *r6 = cmcp_json_string(cmcp_json_object_get(obj, "key"));
+    const char *r7 = cmcp_json_string(cmcp_json_object_get(obj, "name"));
+    TEST_ASSERT(strcmp(r1, "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(r2, "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(r3, "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(r4, "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(r5, "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(r6, "f") == 0);       /* bare "key" untouched */
+    TEST_ASSERT(strcmp(r7, "g") == 0);
+    cmcp_json_free(obj);
+}
+
+static void test_redact_non_string_values(void) {
+    /* A numeric secret must also be replaced — type doesn't gate. */
+    cmcp_json_t *obj = cmcp_json_new_object();
+    cmcp_json_object_set(obj, "secret", cmcp_json_new_int(12345));
+    cmcp_json_object_set(obj, "count",  cmcp_json_new_int(7));
+    cmcp_json_redact(obj);
+
+    const cmcp_json_t *s = cmcp_json_object_get(obj, "secret");
+    const cmcp_json_t *c = cmcp_json_object_get(obj, "count");
+    TEST_ASSERT(s && s->type == CMCP_JSON_STRING &&
+                strcmp(cmcp_json_string(s), "[REDACTED]") == 0);
+    TEST_ASSERT(c && c->type == CMCP_JSON_INT &&
+                cmcp_json_int(c) == 7);
+    cmcp_json_free(obj);
+}
+
+static void test_redact_nested(void) {
+    /* Recursion: a nested object inside an array inside an object. */
+    cmcp_json_t *inner = cmcp_json_new_object();
+    cmcp_json_object_set(inner, "password", cmcp_json_new_string("p"));
+    cmcp_json_object_set(inner, "user",     cmcp_json_new_string("u"));
+    cmcp_json_t *arr = cmcp_json_new_array();
+    cmcp_json_array_append(arr, inner);
+    cmcp_json_t *outer = cmcp_json_new_object();
+    cmcp_json_object_set(outer, "users", arr);
+    cmcp_json_object_set(outer, "token", cmcp_json_new_string("xyz"));
+
+    cmcp_json_redact(outer);
+
+    const cmcp_json_t *t   = cmcp_json_object_get(outer, "token");
+    const cmcp_json_t *us  = cmcp_json_object_get(outer, "users");
+    const cmcp_json_t *u0  = cmcp_json_array_at(us, 0);
+    const cmcp_json_t *p   = cmcp_json_object_get(u0, "password");
+    const cmcp_json_t *u   = cmcp_json_object_get(u0, "user");
+    TEST_ASSERT(strcmp(cmcp_json_string(t), "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(cmcp_json_string(p), "[REDACTED]") == 0);
+    TEST_ASSERT(strcmp(cmcp_json_string(u), "u") == 0);
+    cmcp_json_free(outer);
+}
+
+static void test_redact_no_match_left_alone(void) {
+    /* A payload with no sensitive keys must round-trip identically. */
+    cmcp_json_t *obj = cmcp_json_new_object();
+    cmcp_json_object_set(obj, "id",     cmcp_json_new_int(42));
+    cmcp_json_object_set(obj, "status", cmcp_json_new_string("ok"));
+    char *before = cmcp_json_emit_stable(obj);
+    cmcp_json_redact(obj);
+    char *after  = cmcp_json_emit_stable(obj);
+    TEST_ASSERT(strcmp(before, after) == 0);
+    free(before); free(after);
+    cmcp_json_free(obj);
+}
+
+static void test_redact_safe_on_null_and_scalar(void) {
+    cmcp_json_redact(NULL);  /* must not crash */
+    cmcp_json_t *s = cmcp_json_new_string("hello");
+    cmcp_json_redact(s);     /* scalar root is no-op */
+    TEST_ASSERT(strcmp(cmcp_json_string(s), "hello") == 0);
+    cmcp_json_free(s);
+}
+
 static void test_parse_elements_exceeds_limit_rejected(void) {
     /* Default cap is 65536; build a 70000-element array and assert
      * reject. ~140KB string, dwarfed by other test fixtures. */
@@ -456,6 +566,12 @@ int main(void) {
     TEST_RUN(test_parse_depth_exceeds_limit_rejected);
     TEST_RUN(test_parse_elements_within_limit_accepted);
     TEST_RUN(test_parse_elements_exceeds_limit_rejected);
+    TEST_RUN(test_redact_basic_object);
+    TEST_RUN(test_redact_key_variants);
+    TEST_RUN(test_redact_non_string_values);
+    TEST_RUN(test_redact_nested);
+    TEST_RUN(test_redact_no_match_left_alone);
+    TEST_RUN(test_redact_safe_on_null_and_scalar);
     TEST_RUN(test_emit_primitives);
     TEST_RUN(test_emit_string_escapes);
     TEST_RUN(test_emit_string_control_char);

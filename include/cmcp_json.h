@@ -126,4 +126,24 @@ int   cmcp_json_escape(const char *in, char *out, size_t out_sz);
 char *cmcp_json_escape_dup(const char *in);
 /** @} */
 
+/**
+ * @brief In-place scrub of credential-shaped values (Tier 6 axis 6.5.4).
+ *
+ * Recursively walks `v`. For any object entry whose **key** matches a
+ * sensitive name (`password`, `passwd`, `token`, `secret`, `apikey`,
+ * `authorization`, `bearer`, `credential` — matched case-insensitively
+ * against the key with non-alphanumeric characters stripped, so
+ * `api_key`, `API-Key`, `apiKey` all hit), the value is replaced with
+ * the string `"[REDACTED]"` regardless of its original type. Other
+ * entries are unchanged and recursed into.
+ *
+ * The match is substring on the normalized key: `myApiKey` and
+ * `customer_secret` both redact.
+ *
+ * Caller retains ownership of `v`. Safe on `NULL` or scalar values
+ * (no-op). Allocation failure during replacement leaves the original
+ * value in place (best-effort, never aborts).
+ */
+void cmcp_json_redact(cmcp_json_t *v);
+
 #endif

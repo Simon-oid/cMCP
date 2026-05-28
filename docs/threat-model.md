@@ -136,7 +136,7 @@ host eventually sends on the wire.
 | # | Threat | Cat. | Mitigation |
 |---|--------|------|------------|
 | 4.1 | Handler returns a malformed result tree | T | 🟢 The library checks response shape against the JSON-RPC schema before serialising; a malformed handler return produces an internal-error response instead of corrupting the wire. |
-| 4.2 | Sensitive headers / args land in debug logs | I | ◻️ 6.5.2: log redactor scrubs values for any key matching `password\|token\|secret\|api_key\|authorization` (case-insensitive) before emit. Toggled by `CMCP_LOG_REDACT` (default `1`; `0` to disable for explicit debugging). |
+| 4.2 | Sensitive values land in MCP wire logs (`notifications/message`) | I | 🟢 6.5.4: `cmcp_server_log` scrubs `data` via `cmcp_json_redact` before emit. Matches normalized keys (lowercase, alphanumeric-only) against `password`/`passwd`/`token`/`secret`/`apikey`/`authorization`/`bearer`/`credential`; matching values become `"[REDACTED]"` regardless of original type. Toggled by `CMCP_LOG_REDACT` (default `1`; `0` to disable for explicit debugging — never set in production). |
 | 4.3 | Stack traces in error messages leak file paths | I | 🟡 Library error messages are constant strings; host-facing errors only carry `{path, keyword, message}` from the schema validator (paths are JSON Pointers into the *value*, not file paths). |
 | 4.4 | Handler output contains binary noise reaching stdout | T | 🟢 Logging goes to *stderr* only; stdout is owned by the stdio transport and never touched by `cmcp_log`. |
 

@@ -2171,6 +2171,19 @@ int cmcp_handler_elicit_url(cmcp_handler_ctx_t *hctx,
 /* Structured logging                                                       */
 /* ====================================================================== */
 
+/* Tier 6 axis 6.5.4: scrub sensitive values from outgoing wire logs.
+ * Snapshotted once via pthread_once; default on, `CMCP_LOG_REDACT=0`
+ * disables. Centralised so tests can reason about the toggle. */
+static int g_log_redact = 1;
+static pthread_once_t g_log_redact_once = PTHREAD_ONCE_INIT;
+static void log_redact_init(void) {
+    const char *r = getenv("CMCP_LOG_REDACT");
+    if (r && *r) {
+        char *end; long v = strtol(r, &end, 10);
+        if (end != r && *end == '\0') g_log_redact = (v != 0);
+    }
+}
+
 int cmcp_server_log(cmcp_server_t *s,
                      cmcp_log_level_t level,
                      const char *logger,
@@ -2187,6 +2200,13 @@ int cmcp_server_log(cmcp_server_t *s,
     cmcp_log_level_t floor = s->log_min_level;
     pthread_mutex_unlock(&s->log_mu);
     if ((int)level < (int)floor) { cmcp_json_free(data); return CMCP_OK; }
+
+    /* Scrub credential-shaped values from `data` before it leaves
+     * the process. The host on the receiving end may persist or
+     * forward this payload (file logs, ops pipelines) — redact at
+     * the source, not the sink. */
+    pthread_once(&g_log_redact_once, log_redact_init);
+    if (g_log_redact && data) cmcp_json_redact(data);
 
     cmcp_json_t *params = cmcp_json_new_object();
     if (!params) { cmcp_json_free(data); return CMCP_ENOMEM; }
