@@ -1017,6 +1017,123 @@ static void test_slowloris_deadline(void) {
 }
 
 /* ====================================================================== */
+/* Accept-rate limiter (Tier 6 axis 6.5.2)                                 */
+/* ====================================================================== */
+
+/* Open many TCP connections in quick succession and verify that the
+ * accept-rate token bucket drains: once burst capacity is exhausted,
+ * surplus connections must receive a 503 with Retry-After rather than
+ * being silently accepted (which would let a flood saturate the
+ * acceptor) or hung indefinitely.
+ *
+ * Setup: rate = 1 conn/sec, burst = 2. After 2 accepted POSTs we
+ * expect the next several connections (sent within the same ~100ms
+ * window) to be 503'd. */
+static void test_accept_rate_limit_503(void) {
+    setenv("CMCP_HTTP_ACCEPT_RATE",  "1",  1);
+    setenv("CMCP_HTTP_ACCEPT_BURST", "2",  1);
+
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_server_t *s = cmcp_server_new("rate-limit-test", "0.1.0");
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    TEST_ASSERT(t != NULL);
+
+    server_arg_t arg = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &arg);
+
+    /* Hammer the listener with N connections back to back. Each opens
+     * a fresh socket and sends a tiny invalid request line so the
+     * server replies (whether 400 from the parser or 503 from the
+     * acceptor — we just need a status to inspect). */
+    enum { N = 12 };
+    int seen_503 = 0;
+    int seen_other = 0;
+    for (int i = 0; i < N; i++) {
+        int fd = open_client(port);
+        if (fd < 0) continue;
+        const char *req = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        if (send_all(fd, req, strlen(req)) != 0) { close(fd); continue; }
+
+        char buf[256];
+        struct pollfd p = { fd, POLLIN, 0 };
+        int rv = poll(&p, 1, 1000);
+        if (rv > 0) {
+            ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                if (strstr(buf, "503") && strstr(buf, "Retry-After"))
+                    seen_503++;
+                else
+                    seen_other++;
+            }
+        }
+        close(fd);
+    }
+
+    /* With burst=2 and rate=1/sec across ~N immediate connections, at
+     * least some must have been 503'd. Exact count is timing-sensitive;
+     * we only assert that the gate fired at least once. */
+    TEST_ASSERT(seen_503 >= 1);
+    /* Sanity: not *all* connections were 503'd — the burst budget
+     * permitted at least one through. */
+    TEST_ASSERT(seen_other >= 1);
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+    unsetenv("CMCP_HTTP_ACCEPT_RATE");
+    unsetenv("CMCP_HTTP_ACCEPT_BURST");
+}
+
+/* Setting rate to 0 (or negative) disables the gate entirely: every
+ * connection should be accepted regardless of arrival rate. Mirrors
+ * the env-tunable "off switch" promised in CLAUDE.md / docs. */
+static void test_accept_rate_disabled_passes_all(void) {
+    setenv("CMCP_HTTP_ACCEPT_RATE", "0", 1);
+
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_server_t *s = cmcp_server_new("rate-off-test", "0.1.0");
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    TEST_ASSERT(t != NULL);
+
+    server_arg_t arg = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &arg);
+
+    int seen_503 = 0;
+    for (int i = 0; i < 8; i++) {
+        int fd = open_client(port);
+        if (fd < 0) continue;
+        const char *req = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        send_all(fd, req, strlen(req));
+        char buf[256];
+        struct pollfd p = { fd, POLLIN, 0 };
+        if (poll(&p, 1, 1000) > 0) {
+            ssize_t n = recv(fd, buf, sizeof buf - 1, 0);
+            if (n > 0) {
+                buf[n] = '\0';
+                if (strstr(buf, "503")) seen_503++;
+            }
+        }
+        close(fd);
+    }
+
+    TEST_ASSERT(seen_503 == 0);
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+    unsetenv("CMCP_HTTP_ACCEPT_RATE");
+}
+
+/* ====================================================================== */
 
 int main(void) {
     /* The slowloris tests intentionally write to a socket while the
@@ -1038,6 +1155,8 @@ int main(void) {
     TEST_RUN(test_close_unblocks_reader);
     TEST_RUN(test_slowloris_idle_timeout);
     TEST_RUN(test_slowloris_deadline);
+    TEST_RUN(test_accept_rate_limit_503);
+    TEST_RUN(test_accept_rate_disabled_passes_all);
 
     TEST_DONE();
 }

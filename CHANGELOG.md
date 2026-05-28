@@ -588,13 +588,76 @@ the concurrent-connection cap + accept-rate limiter land in the
 next commit; the threat-model text is forward-stated and will be
 accurate once 6.5.2 ships.
 
-#### Deferred to 6.5.2 / 6.5.3 / 6.5.4
+#### Deferred to 6.5.3 / 6.5.4
 
-- `CMCP_HTTP_MAX_CONNECTIONS` + accept-rate token bucket (6.5.2).
 - Protocol-layer limits (`CMCP_RPC_MAX_DEPTH`, max array/object
   size, max in-flight) in `src/rpc.c` (6.5.3).
 - Log redactor + `CMCP_LOG_REDACT` (6.5.4).
 - `docs/deployment-tls.md` (terminator recipes; 6.5.4).
+
+### 6.5.2 HTTP accept-rate token bucket
+
+Second HTTP-DoS defense layer: bound the rate at which fresh
+connections enter the acceptor so a connection flood can't saturate
+the listen path or exhaust file descriptors.
+
+#### Design — why a token bucket, why no `MAX_CONNECTIONS`
+
+The transport already has a structural cap on *concurrent* work: the
+acceptor is a single thread that calls `handle_one_connection()`
+inline. POST handling is serialised. The threat at this boundary is
+*arrival rate*, not concurrency depth — a flood of brief connections
+that each get a 503 and close still ties up the acceptor for the
+parse/reply cycle.
+
+A token bucket fits this exactly: a sustained allowance (`rate`,
+tokens/sec) plus a burst budget (`burst`, capacity) that lets normal
+agent workloads spike without false-positive rate-limits. Defaults
+are deliberately permissive — 100 conn/sec sustained, 200 burst
+capacity — which absorbs ordinary noise while killing trivial floods.
+Operators tighten via env.
+
+#### Per-acceptor token bucket (`src/transport_http.c`)
+
+Two new env knobs, both snapshotted at `cmcp_transport_http_listen`
+time and read only from the acceptor thread (no synchronisation):
+
+- `CMCP_HTTP_ACCEPT_RATE` (default `100`, double). Sustained
+  tokens/sec. `<= 0` disables the gate entirely.
+- `CMCP_HTTP_ACCEPT_BURST` (default `200`, double). Bucket capacity.
+  Seeded full at `acceptor_main()` start so the first burst of
+  connections after listen passes through unthrottled.
+
+Bucket math (`accept_bucket_consume`): on each `accept()` return,
+refill by `elapsed_seconds * rate` (clamped to `burst`), then try to
+consume one token. If the bucket is below 1.0, the caller sends 503
+and closes; otherwise the connection proceeds to
+`handle_one_connection`.
+
+Over-budget response (`reply_rate_limited`): `503 Service Unavailable`
+with `Retry-After: <s>` where `<s> = clamp(1/rate, 1, 60)`. The peer
+gets a definitive answer rather than a hang; the integer-second
+clamp keeps the header value sensible.
+
+#### Tests
+
+Two new cases in `tests/test_http_server.c`:
+
+- `test_accept_rate_limit_503`: configure `rate=1`, `burst=2`, open
+  12 connections back-to-back, assert at least one gets `503` with
+  `Retry-After` *and* at least one passes through (the burst budget
+  permitted some).
+- `test_accept_rate_disabled_passes_all`: configure `rate=0`,
+  hammer with 8 connections, assert zero 503s — confirms the
+  off-switch promised in CLAUDE.md / docs.
+
+Total suite: 2903 → 2910 assertions across 22 binaries. ASan clean.
+
+#### Threat-table cross-ref
+
+The threat-model entry `B1.5` (connection flood) is now plain 🟢
+(no caveat). Text rewritten to reflect the single-acceptor structural
+property and the new env knobs.
 
 ## Tier 5 (agentic readiness, 2026-05-24)
 

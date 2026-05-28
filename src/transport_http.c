@@ -81,6 +81,14 @@
 #define HTTP_IDLE_TIMEOUT_DEFAULT_MS  30000     /* per-recv wait */
 #define HTTP_DEADLINE_DEFAULT_MS      120000    /* whole request-receive wall clock */
 
+/* Accept-rate token bucket (Tier 6 axis 6.5.2). Bounds the rate at
+ * which fresh connections enter the listen-accept cycle so a connection
+ * flood can't exhaust the listen backlog or saturate the acceptor.
+ * Defaults: 100 connections per second sustained, 200 burst capacity
+ * (~ a 2-second tolerable spike). Both env-tunable; rate <= 0 disables. */
+#define HTTP_ACCEPT_RATE_DEFAULT      100.0     /* tokens per second */
+#define HTTP_ACCEPT_BURST_DEFAULT     200.0     /* max bucket capacity */
+
 /* Wake signal for SSE holder threads so close() can join them. */
 #ifndef CMCP_HTTP_WAKE_SIGNAL
 #define CMCP_HTTP_WAKE_SIGNAL  SIGUSR2
@@ -458,6 +466,14 @@ typedef struct http_impl {
      * time. Both are advisory caps; 0 (or negative) disables. */
     int                idle_timeout_ms;
     int                deadline_ms;
+
+    /* Accept-rate token bucket (Tier 6 axis 6.5.2). All four fields
+     * are touched only by the acceptor thread, so no synchronisation is
+     * needed. accept_rate <= 0 disables the bucket. */
+    double             accept_rate;        /* tokens/sec; <= 0 = disabled */
+    double             accept_burst;       /* bucket capacity */
+    double             accept_tokens;      /* current fractional balance */
+    struct timespec    accept_last_refill; /* CLOCK_MONOTONIC */
 } http_impl_t;
 
 typedef struct {
@@ -879,8 +895,58 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
 /* Acceptor                                                                 */
 /* ====================================================================== */
 
+/* Try to consume one token from the accept-rate bucket. Returns 1 on
+ * success (caller proceeds with handle_one_connection), 0 if the
+ * bucket is empty (caller sends 503). Called only from the acceptor
+ * thread, so no synchronisation. accept_rate <= 0 → always 1. */
+static int accept_bucket_consume(http_impl_t *impl) {
+    if (impl->accept_rate <= 0.0) return 1;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double elapsed_s = (double)(now.tv_sec - impl->accept_last_refill.tv_sec)
+                      + (double)(now.tv_nsec - impl->accept_last_refill.tv_nsec) / 1e9;
+    impl->accept_last_refill = now;
+
+    if (elapsed_s > 0.0) {
+        impl->accept_tokens += elapsed_s * impl->accept_rate;
+        if (impl->accept_tokens > impl->accept_burst)
+            impl->accept_tokens = impl->accept_burst;
+    }
+
+    if (impl->accept_tokens >= 1.0) {
+        impl->accept_tokens -= 1.0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Send a 503 with Retry-After in seconds and close. Used when the
+ * accept-rate bucket is empty — the peer should back off and retry.
+ * Retry-After is computed from the configured rate (1/rate, clamped
+ * to [1, 60] so it's both sensible and recognisable). */
+static void reply_rate_limited(http_impl_t *impl, int fd) {
+    int retry_s = 1;
+    if (impl->accept_rate > 0.0) {
+        double secs = 1.0 / impl->accept_rate;
+        if (secs > 60.0) secs = 60.0;
+        if (secs < 1.0)  secs = 1.0;
+        retry_s = (int)secs;
+    }
+    char extra[64];
+    snprintf(extra, sizeof extra, "Retry-After: %d\r\n", retry_s);
+    const char *msg = "accept-rate limit exceeded\n";
+    http_write_response(fd, 503, "Service Unavailable",
+                         "text/plain", extra, msg, strlen(msg));
+    close(fd);
+}
+
 static void *acceptor_main(void *arg) {
     http_impl_t *impl = (http_impl_t *)arg;
+    /* Seed the bucket: full burst capacity at start. */
+    impl->accept_tokens = impl->accept_burst;
+    clock_gettime(CLOCK_MONOTONIC, &impl->accept_last_refill);
+
     while (!atomic_load_explicit(&impl->shutting_down,
                                   memory_order_relaxed)) {
         struct pollfd p = { impl->listen_fd, POLLIN, 0 };
@@ -897,6 +963,15 @@ static void *acceptor_main(void *arg) {
             if (errno == EINTR || errno == EAGAIN) continue;
             break;
         }
+
+        /* Accept-rate gate (6.5.2). Peer's connection is already
+         * established at the kernel layer; we send a 503 and close
+         * so they see a definitive answer rather than a hang. */
+        if (!accept_bucket_consume(impl)) {
+            reply_rate_limited(impl, cfd);
+            continue;
+        }
+
         handle_one_connection(impl, cfd);
     }
     /* Wake any pending POST waiters so they can bail. */
@@ -1247,6 +1322,26 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
         char *end; long v = strtol(dl, &end, 10);
         if (end != dl && *end == '\0') impl->deadline_ms = (int)v;
     }
+
+    /* Snapshot the accept-rate token bucket (Tier 6 axis 6.5.2).
+     * Rate <= 0 disables; otherwise rate is sustained tokens/sec and
+     * burst is the bucket capacity. Both are parsed as doubles so that
+     * sub-1 rates (e.g. 0.5 conn/sec for low-traffic deployments) and
+     * fractional bursts are expressible. */
+    impl->accept_rate = HTTP_ACCEPT_RATE_DEFAULT;
+    const char *ar = getenv("CMCP_HTTP_ACCEPT_RATE");
+    if (ar && *ar) {
+        char *end; double v = strtod(ar, &end);
+        if (end != ar && *end == '\0') impl->accept_rate = v;
+    }
+    impl->accept_burst = HTTP_ACCEPT_BURST_DEFAULT;
+    const char *ab = getenv("CMCP_HTTP_ACCEPT_BURST");
+    if (ab && *ab) {
+        char *end; double v = strtod(ab, &end);
+        if (end != ab && *end == '\0' && v > 0.0) impl->accept_burst = v;
+    }
+    /* accept_tokens / accept_last_refill are seeded by acceptor_main()
+     * at thread start; leaving them zero here is intentional. */
 
     /* Snapshot the SSE replay-buffer size from CMCP_HTTP_SSE_REPLAY_BUFFER
      * (default HTTP_SSE_REPLAY_DEFAULT; clamped to HTTP_SSE_REPLAY_MAX).
