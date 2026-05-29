@@ -976,6 +976,42 @@ response. Tracked for a follow-up; not blocking 6.6.1.
 
 No test-suite assertion delta in this commit.
 
+### 6.6.x HTTP client surfaces non-success status (closes the 6.6.1 follow-up)
+
+`do_post` in `src/transport_http_client.c` used to silently discard
+any response whose status wasn't `200` — it returned `CMCP_OK` and
+pushed nothing onto the frame queue, leaving the host's pending
+`cmcp_client_request` waiting forever for a JSON-RPC body the server
+never sent. Surfaced by `bench_http` against the 6.5.2 accept-rate
+gate (returns `503 Retry-After` once the burst budget is spent).
+
+Fix: map non-success status to a return code from `write_fn`:
+
+| HTTP status            | `do_post` returns |
+|------------------------|-------------------|
+| `200` (with body)      | `CMCP_OK`, body queued |
+| `200` (empty), `202`   | `CMCP_OK`, nothing queued (notification ack shape) |
+| `503`                  | `CMCP_EAGAIN` (rate-limited; server sent `Retry-After`) |
+| other `4xx`/`5xx`      | `CMCP_EIO` |
+
+`cmcp_client_call_async` already unwinds the pending entry when
+`send_message` (the wrapper around `cmcp_transport_write`) fails, so
+the host caller observes the right error code instead of hanging.
+The HTTP error body is discarded — it's an HTTP-layer error page,
+not a JSON-RPC frame.
+
+Regression: `tests/test_http_client.c::test_post_503_surfaces_eagain`
+stands up a mock HTTP server that always replies `503 Retry-After: 1`
+to POSTs (and sinks the SSE GET so the client's reader thread doesn't
+hot-spin), then asserts `cmcp_client_handshake` returns `CMCP_EAGAIN`.
+Pre-fix, the test would have hung on the initialize POST.
+
+`docs/perf-baselines.md` updated: the "known issue" section flips
+from "filed for follow-up" to "fixed; regression test linked."
+`bench/bench_http.c` keeps the `CMCP_HTTP_ACCEPT_RATE=0` override,
+since the bench legitimately wants to run above the production
+default; the comment now notes the 503 path no longer hangs.
+
 ## Tier 5 (agentic readiness, 2026-05-24)
 
 No protocol-surface changes — `CMCP_PROTOCOL_VERSION` stayed at

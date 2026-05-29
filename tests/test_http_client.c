@@ -290,6 +290,140 @@ static void test_close_unblocks_reader(void) {
 }
 
 /* ====================================================================== */
+/* 503 surfacing — a mock server that always replies 503 to POSTs and    */
+/* sinks the GET, used to prove cmcp_client_handshake doesn't hang on an */
+/* HTTP error status. Regression for the 6.6.1-discovered defect.        */
+/* ====================================================================== */
+
+typedef struct {
+    unsigned short  port;
+    int             listen_fd;
+    pthread_mutex_t mu;
+    int             stop;
+} mock503_t;
+
+static int mock503_send_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, buf + sent, len - sent, 0);
+        if (n <= 0) return -1;
+        sent += (size_t)n;
+    }
+    return 0;
+}
+
+static void mock503_handle(int fd) {
+    /* Peek at the first byte to distinguish GET (SSE long-poll) from
+     * POST. The SSE GET goes off on its own thread inside the client
+     * transport; we answer it with a sink response so the SSE loop
+     * doesn't hot-spin. POSTs all get 503 with Retry-After. */
+    char first[8] = {0};
+    ssize_t n = recv(fd, first, sizeof first - 1, MSG_PEEK);
+    if (n <= 0) return;
+
+    /* Drain the request headers (up to a CRLF CRLF) so the peer doesn't
+     * see a half-closed connection before we reply. We don't need the
+     * body — 503 ignores it. */
+    char buf[2048];
+    size_t got = 0;
+    while (got < sizeof buf - 1) {
+        ssize_t r = recv(fd, buf + got, sizeof buf - 1 - got, 0);
+        if (r <= 0) break;
+        got += (size_t)r;
+        buf[got] = '\0';
+        if (strstr(buf, "\r\n\r\n")) break;
+    }
+
+    if (strncmp(first, "GET", 3) == 0) {
+        const char *sse =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n";
+        mock503_send_all(fd, sse, strlen(sse));
+        return;
+    }
+    const char *resp =
+        "HTTP/1.1 503 Service Unavailable\r\n"
+        "Retry-After: 1\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n\r\n";
+    mock503_send_all(fd, resp, strlen(resp));
+}
+
+static void *mock503_main(void *arg) {
+    mock503_t *m = (mock503_t *)arg;
+    for (;;) {
+        pthread_mutex_lock(&m->mu);
+        int stop = m->stop;
+        pthread_mutex_unlock(&m->mu);
+        if (stop) return NULL;
+
+        struct pollfd p = { m->listen_fd, POLLIN, 0 };
+        if (poll(&p, 1, 100) <= 0) continue;
+        int cfd = accept(m->listen_fd, NULL, NULL);
+        if (cfd < 0) continue;
+        mock503_handle(cfd);
+        close(cfd);
+    }
+}
+
+static int mock503_listen(unsigned short port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family      = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    sa.sin_port        = htons(port);
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
+        close(fd); return -1;
+    }
+    if (listen(fd, 16) != 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* Before the fix, do_post silently dropped non-200 responses and
+ * returned CMCP_OK — the body never reached the queue, and the host's
+ * pending request hung waiting for a JSON-RPC frame the server never
+ * sent. This test proves the write path now returns CMCP_EAGAIN on
+ * 503 so cmcp_client_handshake fails fast instead of hanging. */
+static void test_post_503_surfaces_eagain(void) {
+    mock503_t m;
+    memset(&m, 0, sizeof m);
+    pthread_mutex_init(&m.mu, NULL);
+    m.port = pick_port();
+    TEST_ASSERT(m.port != 0);
+    m.listen_fd = mock503_listen(m.port);
+    TEST_ASSERT(m.listen_fd >= 0);
+
+    pthread_t th;
+    TEST_ASSERT(pthread_create(&th, NULL, mock503_main, &m) == 0);
+
+    char *url = make_url(m.port);
+    cmcp_transport_t *ct = cmcp_transport_http_connect(url);
+    free(url);
+    TEST_ASSERT(ct != NULL);
+
+    cmcp_client_t *cli = cmcp_client_new("503-cli", "0.0.1");
+    int rc = cmcp_client_handshake(cli, ct);
+    /* The initialize POST gets 503. Pre-fix this hung forever; post-fix
+     * the write surfaces CMCP_EAGAIN, which the handshake propagates. */
+    TEST_ASSERT(rc != CMCP_OK);
+    TEST_ASSERT(rc == CMCP_EAGAIN);
+
+    cmcp_client_free(cli);
+    cmcp_transport_close(ct);
+    pthread_mutex_lock(&m.mu);
+    m.stop = 1;
+    pthread_mutex_unlock(&m.mu);
+    pthread_join(th, NULL);
+    close(m.listen_fd);
+    pthread_mutex_destroy(&m.mu);
+}
+
+/* ====================================================================== */
 /* Protocol-version header — a raw-socket sniffer that records whether    */
 /* the cMCP client emits MCP-Protocol-Version on the wire.                */
 /* ====================================================================== */
@@ -533,6 +667,7 @@ int main(void) {
     TEST_RUN(test_async_multi_inflight);
     TEST_RUN(test_session_id_propagates);
     TEST_RUN(test_close_unblocks_reader);
+    TEST_RUN(test_post_503_surfaces_eagain);
     TEST_RUN(test_client_sends_protocol_version);
 
     TEST_DONE();

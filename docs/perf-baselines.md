@@ -178,12 +178,14 @@ While bringing up `bench_http` we noticed two intertwined behaviors:
    `setenv("CMCP_HTTP_ACCEPT_RATE", "0", 1)` at startup *unless* the
    user has explicitly set the var.
 2. **Client hangs on 503 instead of erroring out.** When the server
-   sends `503 Service Unavailable` to a POST, the libcurl client
-   path doesn't surface this to `cmcp_client_request` — the call
-   hangs waiting for a JSON-RPC response that the server never sent.
-   This is a real defect in `transport_http_client.c`; tracked as a
-   follow-up to 6.6.x. The bench workaround above sidesteps it but
-   doesn't fix it.
+   sent `503 Service Unavailable` to a POST, the libcurl client path
+   didn't surface this to `cmcp_client_request` — the call hung
+   waiting for a JSON-RPC response that the server never sent. Fixed
+   in 6.6.x follow-up: `do_post` in `transport_http_client.c` now
+   maps `503 → CMCP_EAGAIN` and other non-success status → `CMCP_EIO`,
+   so the host's pending request resolves with a return code instead
+   of hanging. Regression test:
+   `test_post_503_surfaces_eagain` in `tests/test_http_client.c`.
 
 ## What this baseline does NOT cover
 

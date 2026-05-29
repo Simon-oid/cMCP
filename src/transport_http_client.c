@@ -247,12 +247,30 @@ static int do_post(http_client_impl_t *impl,
         latch_session_id(impl, ps.session_id_seen);
     }
 
+    /* Surface non-success HTTP status to the caller. Without this, a
+     * 503/4xx response was silently dropped — write_fn returned OK,
+     * the body never reached the queue, and the host's pending
+     * cmcp_client_request hung forever waiting for a JSON-RPC frame.
+     *
+     *   503 → EAGAIN  (rate limited; server sends Retry-After)
+     *   4xx → EIO     (request-level failure; not retriable as-is)
+     *   5xx → EIO     (server-side failure other than rate limiting)
+     *
+     * Client.c's call_async tears the pending entry down on a write
+     * error, so the host caller observes the right return code rather
+     * than a hang. The body (if any) is discarded — it's an HTTP error
+     * page, not a JSON-RPC frame. */
     int push_rc = CMCP_OK;
     if (status == 200 && ps.len > 0) {
         push_rc = queue_push(impl, ps.body, ps.len);
+    } else if (status == 200 || status == 202) {
+        /* 200 with empty body and 202 Accepted are both fine — the
+         * latter is the spec-defined notification ack with no body. */
+    } else if (status == 503) {
+        push_rc = CMCP_EAGAIN;
+    } else if (status >= 400) {
+        push_rc = CMCP_EIO;
     }
-    /* 202 Accepted (notification or response POST) carries no body,
-     * nothing to enqueue. */
     free(ps.body);
     return push_rc;
 }

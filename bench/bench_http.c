@@ -124,10 +124,11 @@ int main(void) {
      * a peer-flood defense — meaningful for an exposed server, not
      * for a single-process bench that opens a fresh TCP connection
      * per call. Without this override, the bench saturates the burst
-     * budget in <2 seconds and then either rate-limits us to 100/sec
-     * (50s for 5k calls) or hangs on a 503 reply that the client
-     * doesn't surface promptly. Override unless the user explicitly
-     * set CMCP_HTTP_ACCEPT_RATE in the environment. */
+     * budget in <2 seconds and the server starts replying 503. Since
+     * 6.6.x, the client surfaces that as CMCP_EAGAIN promptly (instead
+     * of hanging), but the bench still wants the gate disabled so it
+     * can measure steady-state throughput. Override unless the user
+     * explicitly set CMCP_HTTP_ACCEPT_RATE in the environment. */
     if (!getenv("CMCP_HTTP_ACCEPT_RATE")) {
         setenv("CMCP_HTTP_ACCEPT_RATE", "0", 1);
     }
