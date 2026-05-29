@@ -1,0 +1,11 @@
+{
+  "name": "cmcp-bench-compare",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Comparison-bench echo server using @modelcontextprotocol/sdk. Not part of the cMCP library; see bench/compare/README.md.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.23.8"
+  }
+}

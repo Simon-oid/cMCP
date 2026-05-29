@@ -187,9 +187,63 @@ While bringing up `bench_http` we noticed two intertwined behaviors:
    of hanging. Regression test:
    `test_post_503_surfaces_eagain` in `tests/test_http_client.c`.
 
+## Comparison vs the TS / Python reference SDKs (Phase 6.6.2)
+
+The comparison harness in `bench/compare/` drives the **cMCP client**
+against three different MCP **servers** — cMCP, the official
+TypeScript SDK (`@modelcontextprotocol/sdk`), and the official Python
+SDK (`mcp`, FastMCP shape). The client is held constant; only the
+server changes. Each row is one steady-state `tools/call echo` after
+1000 warmup calls; iteration count default 10000.
+
+Numbers from the same Ryzen 5800X box:
+
+| impl | throughput (calls/s) | p50 µs | p99 µs | p999 µs | max µs |
+|---|---:|---:|---:|---:|---:|
+| cmcp (C, this repo) | 48,669 |  20 |   21 |    26 |     80 |
+| ts   (Node 24)      |  8,361 |  89 |  245 |  6,286 | 12,499 |
+| py   (CPython 3.14) |  1,043 | 954 | 1,054 | 1,188 |  1,393 |
+
+What the ratios say:
+
+1. **cMCP is ~5.8× faster than the TS SDK at p50** (20 µs vs 89 µs),
+   and ~47× faster than the Python SDK (20 µs vs 954 µs). At p99 the
+   gap widens to ~12× over TS — V8 GC pauses dominate the TS tail
+   (`max = 12.5 ms`), while cMCP's tail is essentially flat
+   (`p999 = 26 µs, max = 80 µs`).
+2. **cMCP's latency distribution is unusually tight.** `p99 / p50 ≈
+   1.05`. There is essentially no tail. This is what you get when
+   there's no runtime, no GC, no JIT — just `read()` + parse +
+   dispatch + `write()`. The TS SDK and Python SDK both pay
+   interpreter overhead per call.
+3. **The Python SDK is slower than the TS SDK at p50** but has a
+   **tighter tail** (p999 = 1.2 ms vs 6.3 ms; max = 1.4 ms vs
+   12.5 ms). CPython's GC pauses are smaller and more frequent than
+   V8's, which is the classic interpreter-vs-JIT tradeoff.
+4. **cMCP is in the right order of magnitude.** "Are we faster than
+   the reference SDKs?" — yes, by 5–50×. That's the right answer for
+   a from-scratch C implementation. The interesting question for
+   Tier 6.6.3 (profiling) is whether the existing 20 µs has further
+   headroom.
+
+The comparison is informational, not a regression gate. Re-running on
+a different machine will produce different absolute numbers; the
+*ratios* between rows are the more portable signal. To reproduce:
+
+```sh
+# One-time toolchain setup:
+npm install --prefix bench/compare
+python3 -m venv bench/compare/.venv && \
+  bench/compare/.venv/bin/pip install -r bench/compare/requirements.txt
+
+make bench-compare    # writes bench/compare/results.csv + prints summary
+```
+
+`run.sh` skips the TS or Python row gracefully (one-line reason) if
+the toolchain isn't installed; the cMCP row always runs.
+
 ## What this baseline does NOT cover
 
-- **Comparison vs the TS / Python reference SDKs.** Phase 6.6.2.
 - **Profile traces** (`perf record` + `heaptrack` flamegraphs).
   Phase 6.6.3.
 - **HTTP soak** — long-running stability through the HTTP

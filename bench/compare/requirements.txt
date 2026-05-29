@@ -1,0 +1,3 @@
+# Python deps for the comparison bench. Installed by bench/compare/run.sh
+# into a local .venv (kept out of the user's system python).
+mcp>=1.5.0

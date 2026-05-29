@@ -188,6 +188,22 @@ bench-build: $(BENCH_BINS)
 bench: $(BENCH_BINS)
 	@./$(BENCH_DIR)/run.sh
 
+# --- Comparison bench (Tier 6 axis 6.6.2) --------------------------------
+# Drives the cMCP client against an arbitrary MCP server binary (cMCP,
+# TS-SDK, Python-SDK). cMCP runs unconditionally; TS/Python skip gracefully
+# in run.sh if the toolchain isn't installed. The bench_compare binary
+# itself links only cMCP — no SDK dependency at C level.
+COMPARE_DIR := $(BENCH_DIR)/compare
+COMPARE_BIN := $(COMPARE_DIR)/bench_compare
+
+$(COMPARE_BIN): $(COMPARE_DIR)/bench_compare.c $(BENCH_DIR)/bench_util.h $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+bench-compare-build: $(COMPARE_BIN) examples/echo-server
+
+bench-compare: bench-compare-build
+	@./$(COMPARE_DIR)/run.sh
+
 # test_fs_server spawns the built filesystem-mcp binary as a child, so
 # it depends on that binary in addition to the libs. This specific rule
 # overrides the generic tests/% pattern below.
@@ -623,8 +639,8 @@ clean:
 	      libcmcp_core.so* libcmcp_server.so* libcmcp_client.so* \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
-	      $(FUZZ_BINS) $(SOAK_BIN) $(BENCH_BINS) \
-	      $(BENCH_DIR)/results.csv \
+	      $(FUZZ_BINS) $(SOAK_BIN) $(BENCH_BINS) $(COMPARE_BIN) \
+	      $(BENCH_DIR)/results.csv $(COMPARE_DIR)/results.csv \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o \
 	      cmcp-*.tar.gz
@@ -634,6 +650,6 @@ clean:
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
         fuzz-build fuzz-smoke docs \
-        soak soak-churn bench bench-build clean crag-mcp conformance replay check-spec-drift \
+        soak soak-churn bench bench-build bench-compare bench-compare-build clean crag-mcp conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

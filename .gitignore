@@ -67,6 +67,18 @@ bench/bench_server_pool
 bench/bench_http
 bench/results.csv
 
+# Comparison bench (Tier 6 axis 6.6.2): the .c driver, server scripts,
+# package.json / requirements.txt / run.sh ARE tracked; the compiled
+# binary, the per-run results.csv, and the locally-installed SDK trees
+# (node_modules, .venv) are not.
+bench/compare/bench_compare
+bench/compare/results.csv
+bench/compare/node_modules/
+bench/compare/package-lock.json
+bench/compare/.venv/
+bench/compare/__pycache__/
+bench/compare/**/__pycache__/
+
 # Coverage artifacts (Tier 6 axis 6.2.1). The Makefile target regenerates
 # everything under coverage/ on demand; gcov drops .gcno alongside the
 # .o it instrumented and .gcda alongside the binary that ran it.

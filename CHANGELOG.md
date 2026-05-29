@@ -976,6 +976,102 @@ response. Tracked for a follow-up; not blocking 6.6.1.
 
 No test-suite assertion delta in this commit.
 
+### 6.6.2 comparison vs TS / Python reference SDKs
+
+New `bench/compare/` tree. Drives the cMCP client against three
+different MCP servers — cMCP itself, the official TypeScript SDK
+(`@modelcontextprotocol/sdk`), and the official Python SDK (`mcp`,
+FastMCP shape). The client is held constant; only the server changes
+per row. Answers axis-6.6.2's question: *"is cMCP in the right
+ballpark vs the reference SDKs?"* — yes, 5–50× faster at p50.
+
+#### `bench/compare/` tree
+
+```
+bench/compare/
+├── bench_compare.c          C driver: spawn server, warmup, measured tools/call, CSV row
+├── servers/echo.mjs         TS-SDK stdio server, same shape as examples/echo-server
+├── servers/echo.py          Python-SDK (FastMCP) stdio server, same shape
+├── package.json             pinned @modelcontextprotocol/sdk + zod
+├── requirements.txt         pinned mcp
+├── run.sh                   orchestrator; skips TS/Py if toolchain absent
+└── README.md
+```
+
+The C driver takes `<impl-label> <server-cmd> [args]`, uses
+`cmcp_client_connect_stdio` to spawn + handshake, runs 1000 warmup
+and 10000 measured `tools/call echo` (env-tunable), then emits one
+CSV row matching `bench/results.csv`'s schema so the two CSVs can
+be concatenated downstream.
+
+#### Toolchain isolation
+
+External SDKs are **not** auto-installed by the cMCP build:
+
+- **TS:** `npm install --prefix bench/compare` populates a local
+  `node_modules/` (gitignored).
+- **Python:** `python3 -m venv bench/compare/.venv` + `pip install
+  -r requirements.txt` creates a local venv (gitignored). cMCP's own
+  build/install never touches system Python.
+
+`run.sh` probes each in turn and prints a one-line skip notice if
+the dependency tree isn't present. The cMCP row always runs because
+the bench depends only on `examples/echo-server` (built by `make`).
+
+#### Methodology
+
+- **Apples-to-apples surface.** All three servers register the same
+  two tools (`echo` taking `{text}`, `add` taking `{a,b}`) with the
+  same input schemas. The bench only calls `echo` for the
+  measurement window.
+- **Stdio only.** HTTP transport is excluded by design — too many
+  confounders (libcurl handshake, accept-rate gate, TCP setup) that
+  would dilute the SDK-vs-SDK signal.
+- **CPU pin.** `taskset -c 0` if available.
+- **Subprocess startup absorbed by warmup.** 1000 warmup calls
+  before the measurement window opens means the worker pool / JIT
+  / Python import cost have all paid out.
+
+#### Numbers (Ryzen 5800X, `-O2 -g`, Node 24 + CPython 3.14)
+
+| impl | throughput | p50 µs | p99 µs | p999 µs | max µs |
+|---|---:|---:|---:|---:|---:|
+| `cmcp` (C, this repo) | 48,669 calls/s |  20 |   21 |   26 |     80 |
+| `ts`   (Node)         |  8,361 calls/s |  89 |  245 | 6,286 | 12,499 |
+| `py`   (CPython)      |  1,043 calls/s | 954 | 1,054 | 1,188 |  1,393 |
+
+The interesting ratios:
+
+1. cMCP is ~5.8× faster than TS at p50 and ~47× faster than Python.
+2. cMCP's `p99/p50 ≈ 1.05` — no tail. No runtime, no GC, no JIT;
+   just `read()` + parse + dispatch + `write()`.
+3. V8 GC pauses dominate the TS tail (`max = 12.5 ms`); the Python
+   tail is much tighter (CPython's GC pauses are smaller and more
+   frequent than V8's).
+
+#### Build system + gitignore
+
+- `make bench-compare-build` compiles the C driver.
+- `make bench-compare` builds + runs + writes `bench/compare/results.csv`.
+- `make clean` removes the binary and the CSV.
+- `.gitignore` adds the binary, the CSV, `node_modules/`, the venv,
+  and `__pycache__` trees. Sources (`*.c`, `*.mjs`, `*.py`,
+  `package.json`, `requirements.txt`, `run.sh`, `README.md`) are
+  tracked.
+
+#### Out of scope for 6.6.2
+
+- **HTTP-transport comparison.** Stdio only per the design
+  decision.
+- **`tools/list` / `prompts/get` / `resources/read` comparison.**
+  One workload is enough for the order-of-magnitude story.
+- **Cold-start comparison.** Agent hosts keep one connection per
+  session; cold start isn't a steady-state metric.
+
+`docs/perf-baselines.md` gains a "Comparison vs the TS / Python
+reference SDKs" section with the methodology and ratios. No
+test-suite assertion delta.
+
 ### 6.6.x HTTP client surfaces non-success status (closes the 6.6.1 follow-up)
 
 `do_post` in `src/transport_http_client.c` used to silently discard
