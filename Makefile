@@ -204,6 +204,19 @@ bench-compare-build: $(COMPARE_BIN) examples/echo-server
 bench-compare: bench-compare-build
 	@./$(COMPARE_DIR)/run.sh
 
+# --- Profile harness (Tier 6 axis 6.6.3) ---------------------------------
+# Opt-in: cpu.sh + heap.sh capture call-graph and allocation profiles of
+# bench_server_inline. Prefer perf / heaptrack; fall back to callgrind /
+# massif. Findings + before/after callgrind dumps committed under
+# bench/profile/baseline/.
+bench-profile-cpu: $(BENCH_DIR)/bench_server_inline
+	@./$(BENCH_DIR)/profile/cpu.sh
+
+bench-profile-heap: $(BENCH_DIR)/bench_server_inline
+	@./$(BENCH_DIR)/profile/heap.sh
+
+bench-profile: bench-profile-cpu bench-profile-heap
+
 # test_fs_server spawns the built filesystem-mcp binary as a child, so
 # it depends on that binary in addition to the libs. This specific rule
 # overrides the generic tests/% pattern below.
@@ -650,6 +663,7 @@ clean:
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
         fuzz-build fuzz-smoke docs \
-        soak soak-churn bench bench-build bench-compare bench-compare-build clean crag-mcp conformance replay check-spec-drift \
+        soak soak-churn bench bench-build bench-compare bench-compare-build \
+        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

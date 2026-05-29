@@ -807,8 +807,19 @@ static int emit_char(emit_t *e, char c) {
 
 static int emit_quoted(emit_t *e, const char *s, size_t n) {
     if (emit_char(e, '"') < 0) return -1;
+    /* Batch runs of "normal" characters (printable ASCII that isn't
+     * `"` or `\`) into one emit_raw call rather than emitting each
+     * one through emit_char. For typical strings the savings are
+     * substantial — profile (6.6.3) showed emit_raw single-byte
+     * calls accounting for ~13% of CPU on bench_server_inline. */
+    size_t run = 0;
     for (size_t k = 0; k < n; k++) {
         unsigned char c = (unsigned char)s[k];
+        if (c >= 0x20 && c != '"' && c != '\\') { run++; continue; }
+        if (run > 0) {
+            if (emit_raw(e, s + k - run, run) < 0) return -1;
+            run = 0;
+        }
         if (c == '"')       { if (emit_raw(e, "\\\"", 2) < 0) return -1; }
         else if (c == '\\') { if (emit_raw(e, "\\\\", 2) < 0) return -1; }
         else if (c == '\n') { if (emit_raw(e, "\\n",  2) < 0) return -1; }
@@ -816,13 +827,14 @@ static int emit_quoted(emit_t *e, const char *s, size_t n) {
         else if (c == '\t') { if (emit_raw(e, "\\t",  2) < 0) return -1; }
         else if (c == '\b') { if (emit_raw(e, "\\b",  2) < 0) return -1; }
         else if (c == '\f') { if (emit_raw(e, "\\f",  2) < 0) return -1; }
-        else if (c < 0x20) {
+        else {
             char tmp[8];
             int wn = snprintf(tmp, sizeof tmp, "\\u%04x", c);
             if (emit_raw(e, tmp, (size_t)wn) < 0) return -1;
-        } else {
-            if (emit_char(e, (char)c) < 0) return -1;
         }
+    }
+    if (run > 0) {
+        if (emit_raw(e, s + n - run, run) < 0) return -1;
     }
     return emit_char(e, '"');
 }

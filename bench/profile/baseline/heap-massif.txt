@@ -1,0 +1,1024 @@
+--------------------------------------------------------------------------------
+Command:            bench/bench_server_inline
+Massif arguments:   --pages-as-heap=no --massif-out-file=/home/platys/cMCP/bench/profile/baseline/heap-massif.out
+ms_print arguments: /home/platys/cMCP/bench/profile/baseline/heap-massif.out
+--------------------------------------------------------------------------------
+
+
+    KB
+56.34^                                                                       #
+     |                                                                       #
+     |                                                                       #
+     |                                                                       #
+     |                                                                       #
+     |          @:@:::::::::::::::::::::::::::::::::@@::@:::@::::@::::@:::::@#
+     |          @ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |          @ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |          @ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |          @ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |          @ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@@:::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+     |    :@ :::@ @:::: :: :: :::: : :: :::: :: :: :@ ::@:::@::::@::::@:::::@#
+   0 +----------------------------------------------------------------------->Mi
+     0                                                                   120.2
+
+Number of snapshots: 80
+ Detailed snapshots: [3, 7, 9, 40, 43, 48, 56, 66, 76, 79 (peak)]
+
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+  0              0                0                0             0            0
+  1      6,681,685              488              472            16            0
+  2      8,701,834           27,552           26,297         1,255            0
+  3     10,212,646           27,752           26,426         1,326            0
+95.22% (26,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->59.04% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->59.04% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->59.04% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->29.52% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->29.52% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->29.52% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->14.76% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->14.76% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->14.76% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->14.76% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->14.76% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->14.76% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->14.76% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->14.76% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->14.76% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->29.52% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->29.52% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->29.52% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->29.52% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->29.52% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->14.76% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->14.76% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->14.76% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->14.76% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->14.76% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->14.76% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->14.76% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->14.76% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->14.76% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->14.76% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->14.76% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->14.76% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->10.62% (2,946B) in 49 places, all below massif's threshold (1.00%)
+| 
+->07.26% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->07.26% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->07.26% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->07.26% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->07.26% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->04.15% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->04.15% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->04.15% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->04.15% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->04.15% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.04% (288B) 0x40025CA: main (bench_server_inline.c:132)
+|         | 
+|         ->01.04% (288B) 0x4006B2E: watchdog_start (server.c:1016)
+|         | ->01.04% (288B) 0x4006B2E: cmcp_server_run (server.c:1782)
+|         |   ->01.04% (288B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->01.04% (288B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->01.04% (288B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.04% (288B) 0x400B7C7: cmcp_client_handshake (client.c:1144)
+|           ->01.04% (288B) 0x40025ED: main (bench_server_inline.c:135)
+|             
+->06.80% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->03.40% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.70% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.70% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.70% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.70% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->03.40% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.70% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.70% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.70% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.70% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->04.35% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->04.35% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->04.35% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->04.35% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->04.35% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.73% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.73% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.73% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.61% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.61% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.61% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.61% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.61% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.59% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+| ->01.59% (440B) 0x400253C: main (bench_server_inline.c:123)
+|   
+->01.18% (328B) 0x40096BC: cmcp_client_new (client.c:577)
+| ->01.18% (328B) 0x40025DD: main (bench_server_inline.c:134)
+|   
+->01.04% (288B) 0x400D4AB: node_new (json.c:127)
+  ->01.04% (288B) 0x400D4AB: cmcp_json_new_string_n (json.c:157)
+    ->01.04% (288B) in 13 places, all below massif's threshold (1.00%)
+      
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+  4     12,649,482           26,736           25,761           975            0
+  5     14,534,699           26,736           25,761           975            0
+  6     15,935,139           26,736           25,761           975            0
+  7     17,618,549           44,816           43,239         1,577            0
+96.48% (43,239B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->36.56% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->36.56% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->36.56% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.28% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.28% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.28% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.14% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.14% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.14% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.14% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.14% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.14% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.14% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.14% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.14% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.28% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.28% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.28% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.28% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.28% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.14% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.14% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.14% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.14% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.14% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.14% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.14% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.14% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.14% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.14% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.14% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.14% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->35.70% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->35.70% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->10.74% (4,815B) in 52 places, all below massif's threshold (1.00%)
+| 
+->04.50% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.50% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.50% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.50% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.50% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.57% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.57% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.57% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.57% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.57% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.93% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.21% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.11% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.05% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.05% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.05% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.05% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.11% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.05% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.05% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.05% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.05% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.70% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.70% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.70% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.70% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.70% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.07% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.07% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.07% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.00% (448B) in 1+ places, all below ms_print's threshold (01.00%)
+
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+  8     18,991,707           43,808           42,490         1,318            0
+  9     21,415,832           43,808           42,490         1,318            0
+96.99% (42,490B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.40% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.40% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.40% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.70% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.70% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.70% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.35% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.35% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.35% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.35% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.35% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.35% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.35% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.35% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.35% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.70% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.70% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.70% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.70% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.70% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.35% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.35% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.35% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.35% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.35% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.35% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.35% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.35% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.35% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.35% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.35% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.35% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.52% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.52% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.28% (3,626B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.60% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.60% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.60% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.60% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.60% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.97% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.31% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.15% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.15% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.00% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.00% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 10     24,001,530           43,808           42,490         1,318            0
+ 11     25,940,786           43,824           42,490         1,334            0
+ 12     27,288,585           43,800           42,474         1,326            0
+ 13     29,174,135           43,744           42,442         1,302            0
+ 14     31,598,260           43,744           42,442         1,302            0
+ 15     33,214,255           43,744           42,442         1,302            0
+ 16     34,561,054           43,784           42,474         1,310            0
+ 17     36,985,073           43,744           42,442         1,302            0
+ 18     38,870,485           43,760           42,442         1,318            0
+ 19     40,217,175           43,760           42,442         1,318            0
+ 20     42,156,369           43,784           42,474         1,310            0
+ 21     44,095,622           43,800           42,474         1,326            0
+ 22     46,034,916           43,784           42,474         1,310            0
+ 23     47,974,169           43,800           42,474         1,326            0
+ 24     48,943,931           43,800           42,474         1,326            0
+ 25     50,883,207           43,784           42,474         1,310            0
+ 26     52,337,668           43,784           42,474         1,310            0
+ 27     54,761,832           43,784           42,474         1,310            0
+ 28     56,701,103           43,800           42,474         1,326            0
+ 29     57,670,635           43,784           42,474         1,310            0
+ 30     59,609,888           43,800           42,474         1,326            0
+ 31     62,033,415           43,760           42,426         1,334            0
+ 32     63,490,107           43,760           42,426         1,334            0
+ 33     65,756,350           43,760           42,426         1,334            0
+ 34     68,346,184           43,760           42,426         1,334            0
+ 35     69,641,101           43,760           42,426         1,334            0
+ 36     71,583,480           43,744           42,426         1,318            0
+ 37     74,173,314           43,744           42,426         1,318            0
+ 38     76,763,148           43,744           42,426         1,318            0
+ 39     79,352,982           43,744           42,426         1,318            0
+ 40     81,942,816           43,744           42,426         1,318            0
+96.99% (42,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.45% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.73% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.73% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.73% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.36% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.36% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.36% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.36% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.73% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.73% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.73% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.73% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.73% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.36% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.36% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.36% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.36% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.36% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.36% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.36% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.36% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.36% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.58% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.58% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.14% (3,562B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.61% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.61% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.61% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.61% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.61% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.98% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.32% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.16% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.16% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.01% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.01% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 41     84,532,650           43,744           42,426         1,318            0
+ 42     87,122,484           43,744           42,426         1,318            0
+ 43     88,417,401           43,744           42,426         1,318            0
+96.99% (42,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.45% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.73% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.73% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.73% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.36% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.36% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.36% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.36% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.73% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.73% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.73% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.73% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.73% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.36% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.36% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.36% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.36% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.36% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.36% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.36% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.36% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.36% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.58% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.58% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.14% (3,562B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.61% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.61% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.61% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.61% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.61% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.98% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.32% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.16% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.16% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.01% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.01% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 44     89,712,318           43,744           42,426         1,318            0
+ 45     91,007,235           43,744           42,426         1,318            0
+ 46     92,302,152           43,744           42,426         1,318            0
+ 47     93,597,069           43,744           42,426         1,318            0
+ 48     94,891,986           43,744           42,426         1,318            0
+96.99% (42,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.45% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.73% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.73% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.73% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.36% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.36% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.36% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.36% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.73% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.73% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.73% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.73% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.73% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.36% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.36% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.36% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.36% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.36% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.36% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.36% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.36% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.36% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.58% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.58% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.14% (3,562B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.61% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.61% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.61% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.61% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.61% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.98% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.32% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.16% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.16% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.01% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.01% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 49     96,834,373           43,760           42,426         1,334            0
+ 50     97,805,453           43,744           42,426         1,318            0
+ 51     98,776,737           43,744           42,426         1,318            0
+ 52     99,747,798           43,760           42,426         1,334            0
+ 53    100,719,124           43,760           42,426         1,334            0
+ 54    101,690,204           43,744           42,426         1,318            0
+ 55    102,661,488           43,744           42,426         1,318            0
+ 56    103,632,549           43,760           42,426         1,334            0
+96.95% (42,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.44% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.44% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.44% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.72% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.72% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.72% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.36% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.36% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.36% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.36% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.72% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.72% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.72% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.72% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.72% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.36% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.36% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.36% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.36% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.36% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.36% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.36% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.36% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.36% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.56% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.56% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.14% (3,562B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.61% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.61% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.61% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.61% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.61% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.97% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.31% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.16% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.16% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.01% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.01% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 57    104,603,875           43,760           42,426         1,334            0
+ 58    105,574,955           43,744           42,426         1,318            0
+ 59    106,546,239           43,744           42,426         1,318            0
+ 60    107,517,300           43,760           42,426         1,334            0
+ 61    108,488,626           43,760           42,426         1,334            0
+ 62    109,459,706           43,744           42,426         1,318            0
+ 63    110,430,990           43,744           42,426         1,318            0
+ 64    111,402,051           43,760           42,426         1,334            0
+ 65    112,373,377           43,760           42,426         1,334            0
+ 66    113,344,457           43,744           42,426         1,318            0
+96.99% (42,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.45% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.45% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.73% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.73% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.73% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.36% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.36% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.36% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.36% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.73% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.73% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.73% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.73% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.73% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.36% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.36% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.36% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.36% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.36% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.36% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.36% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.36% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.36% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.58% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.58% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.14% (3,562B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.61% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.61% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.61% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.61% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.61% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.98% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.32% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.16% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.16% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.01% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.01% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 67    114,315,741           43,744           42,426         1,318            0
+ 68    115,286,802           43,760           42,426         1,334            0
+ 69    116,258,128           43,760           42,426         1,334            0
+ 70    117,229,208           43,744           42,426         1,318            0
+ 71    118,200,499           43,744           42,426         1,318            0
+ 72    119,171,560           43,760           42,426         1,334            0
+ 73    120,142,886           43,760           42,426         1,334            0
+ 74    121,113,966           43,744           42,426         1,318            0
+ 75    122,085,428           43,744           42,426         1,318            0
+ 76    123,056,821           43,760           42,426         1,334            0
+96.95% (42,426B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->37.44% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->37.44% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->37.44% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->18.72% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->18.72% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->18.72% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->09.36% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->09.36% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->09.36% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->09.36% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->18.72% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->18.72% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->18.72% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->18.72% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->18.72% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->09.36% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->09.36% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->09.36% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->09.36% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->09.36% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->09.36% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->09.36% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->09.36% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->09.36% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->09.36% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->09.36% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->09.36% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->36.56% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->36.56% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->08.14% (3,562B) in 51 places, all below massif's threshold (1.00%)
+| 
+->04.61% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->04.61% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->04.61% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->04.61% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->04.61% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.63% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.63% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.63% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.63% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.63% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.97% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->04.31% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->02.16% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+| | | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+| | |   
+| | ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+| |   ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+| |     
+| ->02.16% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.08% (472B) 0x40024DC: make_pair (bench_server_inline.c:61)
+|   | ->01.08% (472B) 0x40024DC: main (bench_server_inline.c:121)
+|   |   
+|   ->01.08% (472B) 0x40024F7: make_pair (bench_server_inline.c:62)
+|     ->01.08% (472B) 0x40024F7: main (bench_server_inline.c:121)
+|       
+->02.76% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+| ->02.76% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+|   ->02.76% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->02.76% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->02.76% (1,208B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.10% (480B) 0x4B44EBA: getdelim (iogetdelim.c:111)
+| ->01.10% (480B) 0x4013433: stdio_read (transport_stdio.c:31)
+|   ->01.10% (480B) in 2 places, all below massif's threshold (1.00%)
+|     
+->01.02% (448B) 0x4006F97: inflight_register (server.c:863)
+| ->01.02% (448B) 0x4006F97: cmcp_server_run (server.c:1875)
+|   ->01.02% (448B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     ->01.02% (448B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|       ->01.02% (448B) 0x4BDF043: clone (clone.S:100)
+|         
+->01.01% (440B) 0x40033D9: cmcp_server_new (server.c:175)
+  ->01.01% (440B) 0x400253C: main (bench_server_inline.c:123)
+    
+--------------------------------------------------------------------------------
+  n        time(i)         total(B)   useful-heap(B) extra-heap(B)    stacks(B)
+--------------------------------------------------------------------------------
+ 77    124,028,147           43,760           42,426         1,334            0
+ 78    124,999,227           43,744           42,426         1,318            0
+ 79    126,053,793           57,688           56,917           771            0
+98.66% (56,917B) (heap allocation functions) malloc/new/new[], --alloc-fns, etc.
+->28.40% (16,384B) 0x4B43327: _IO_file_doallocate (filedoalloc.c:91)
+| ->28.40% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:373)
+|   ->28.40% (16,384B) 0x4B539C5: _IO_doallocbuf (genops.c:368)
+|     ->14.20% (8,192B) 0x4B513FE: _IO_file_underflow@@GLIBC_2.2.5 (fileops.c:520)
+|     | ->14.20% (8,192B) 0x4B45024: getdelim (iogetdelim.c:81)
+|     |   ->14.20% (8,192B) 0x4013433: stdio_read (transport_stdio.c:31)
+|     |     ->07.10% (4,096B) 0x4006BB0: cmcp_transport_read (cmcp_transport.h:89)
+|     |     | ->07.10% (4,096B) 0x4006BB0: cmcp_server_run (server.c:1795)
+|     |     |   ->07.10% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|     |     |     ->07.10% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |     |       ->07.10% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |     |         
+|     |     ->07.10% (4,096B) 0x4008F6C: cmcp_transport_read (cmcp_transport.h:89)
+|     |       ->07.10% (4,096B) 0x4008F6C: reader_main (client.c:504)
+|     |         ->07.10% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|     |           ->07.10% (4,096B) 0x4BDF043: clone (clone.S:100)
+|     |             
+|     ->14.20% (8,192B) 0x4B51778: _IO_file_overflow@@GLIBC_2.2.5 (fileops.c:779)
+|       ->14.20% (8,192B) 0x4B5246F: _IO_new_file_xsputn (fileops.c:1305)
+|         ->14.20% (8,192B) 0x4B5246F: _IO_file_xsputn@@GLIBC_2.2.5 (fileops.c:1258)
+|           ->14.20% (8,192B) 0x4B44BCA: fwrite (iofwrite.c:44)
+|             ->14.20% (8,192B) 0x4013360: stdio_write (transport_stdio.c:72)
+|               ->07.10% (4,096B) 0x4003074: cmcp_transport_write (cmcp_transport.h:94)
+|               | ->07.10% (4,096B) 0x4003074: send_message (server.c:1693)
+|               |   ->07.10% (4,096B) 0x4006E9C: cmcp_server_run (server.c:1900)
+|               |     ->07.10% (4,096B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|               |       ->07.10% (4,096B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|               |         ->07.10% (4,096B) 0x4BDF043: clone (clone.S:100)
+|               |           
+|               ->07.10% (4,096B) 0x4008CC8: cmcp_transport_write (cmcp_transport.h:94)
+|                 ->07.10% (4,096B) 0x4008CC8: send_message (client.c:220)
+|                   ->07.10% (4,096B) 0x400A088: cmcp_client_call_async (client.c:882)
+|                     ->07.10% (4,096B) 0x400AA36: cmcp_client_request (client.c:927)
+|                       ->07.10% (4,096B) 0x400AA36: do_initialize.constprop.0 (client.c:1076)
+|                         ->07.10% (4,096B) 0x40025ED: main (bench_server_inline.c:135)
+|                           
+->27.74% (16,000B) 0x400263D: bench_lat_init (bench_util.h:41)
+| ->27.74% (16,000B) 0x400263D: main (bench_server_inline.c:148)
+|   
+->27.74% (16,000B) 0x4B05B31: qsort_r_malloc (qsort.c:377)
+| ->27.74% (16,000B) 0x4B05B31: qsort_r (qsort.c:413)
+|   ->27.74% (16,000B) 0x400272F: bench_lat_summarize (bench_util.h:76)
+|     ->27.74% (16,000B) 0x400272F: main (bench_server_inline.c:161)
+|       
+->05.93% (3,421B) in 54 places, all below massif's threshold (1.00%)
+| 
+->03.49% (2,016B) 0x402CF7F: calloc (rtld-malloc.h:44)
+| ->03.49% (2,016B) 0x402CF7F: allocate_dtv (dl-tls.c:470)
+|   ->03.49% (2,016B) 0x402DA41: _dl_allocate_tls (dl-tls.c:722)
+|     ->03.49% (2,016B) 0x4B5AF9F: allocate_stack (allocatestack.c:568)
+|       ->03.49% (2,016B) 0x4B5AF9F: pthread_create@@GLIBC_2.34 (pthread_create.c:680)
+|         ->02.00% (1,152B) 0x40087F7: cmcp_pool_new (worker.c:84)
+|         | ->02.00% (1,152B) 0x4006A35: cmcp_server_run (server.c:1775)
+|         |   ->02.00% (1,152B) 0x4002BEF: server_main (bench_server_inline.c:78)
+|         |     ->02.00% (1,152B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+|         |       ->02.00% (1,152B) 0x4BDF043: clone (clone.S:100)
+|         |         
+|         ->01.50% (864B) in 3 places, all below massif's threshold (1.00%)
+|           
+->03.27% (1,888B) 0x4B43775: fdopen@@GLIBC_2.2.5 (iofdopen.c:122)
+| ->01.64% (944B) 0x4013539: cmcp_transport_stdio_new_fds (transport_stdio.c:127)
+| | ->01.64% (944B) in 2 places, all below massif's threshold (1.00%)
+| |   
+| ->01.64% (944B) 0x401354A: cmcp_transport_stdio_new_fds (transport_stdio.c:128)
+|   ->01.64% (944B) in 2 places, all below massif's threshold (1.00%)
+|     
+->02.09% (1,208B) 0x4008748: cmcp_pool_new (worker.c:61)
+  ->02.09% (1,208B) 0x4006A35: cmcp_server_run (server.c:1775)
+    ->02.09% (1,208B) 0x4002BEF: server_main (bench_server_inline.c:78)
+      ->02.09% (1,208B) 0x4B5A1B8: start_thread (pthread_create.c:454)
+        ->02.09% (1,208B) 0x4BDF043: clone (clone.S:100)
+          

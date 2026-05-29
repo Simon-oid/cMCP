@@ -1,0 +1,159 @@
+--------------------------------------------------------------------------------
+Profile data file '/home/platys/cMCP/bench/profile/baseline/cpu-callgrind.out' (creator: callgrind-3.25.1)
+--------------------------------------------------------------------------------
+I1 cache: 
+D1 cache: 
+LL cache: 
+Timerange: Basic block 0 - 34806738
+Trigger: Program termination
+Profiled target:  bench/bench_server_inline (PID 53123, part 1)
+Events recorded:  Ir
+Events shown:     Ir
+Event sort order: Ir
+Thresholds:       99
+Include dirs:     
+User annotated:   
+Auto-annotation:  off
+
+--------------------------------------------------------------------------------
+Ir                   
+--------------------------------------------------------------------------------
+143,273,603 (100.0%)  PROGRAM TOTALS
+
+--------------------------------------------------------------------------------
+Ir                   file:function
+--------------------------------------------------------------------------------
+15,508,375 (10.82%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:free [/usr/lib/libc.so.6]
+10,088,173 ( 7.04%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:_int_malloc [/usr/lib/libc.so.6]
+ 9,363,565 ( 6.54%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:malloc [/usr/lib/libc.so.6]
+ 7,080,213 ( 4.94%)  src/json.c:cmcp_json_object_set_n [/home/platys/cMCP/bench/bench_server_inline]
+ 7,071,045 ( 4.94%)  src/json.c:emit_raw [/home/platys/cMCP/bench/bench_server_inline]
+ 6,523,677 ( 4.55%)  src/json.c:parse_string_body.constprop.0 [/home/platys/cMCP/bench/bench_server_inline]
+ 6,182,787 ( 4.32%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__memcpy_avx_unaligned_erms [/usr/lib/libc.so.6]
+ 4,661,342 ( 3.25%)  src/json.c:cmcp_json_object_get [/home/platys/cMCP/bench/bench_server_inline]
+ 4,652,738 ( 3.25%)  src/json.c:emit_quoted.part.0 [/home/platys/cMCP/bench/bench_server_inline]
+ 4,602,510 ( 3.21%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:calloc [/usr/lib/libc.so.6]
+ 4,432,010 ( 3.09%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:_int_free_merge_chunk [/usr/lib/libc.so.6]
+ 4,068,577 ( 2.84%)  src/json.c:parse_value'2 [/home/platys/cMCP/bench/bench_server_inline]
+ 3,477,646 ( 2.43%)  /usr/src/debug/glibc/glibc/elf/dl-lookup.c:do_lookup_x [/usr/lib/ld-linux-x86-64.so.2]
+ 3,427,324 ( 2.39%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:_int_free_create_chunk [/usr/lib/libc.so.6]
+ 2,941,106 ( 2.05%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:_int_free_chunk [/usr/lib/libc.so.6]
+ 2,747,556 ( 1.92%)  src/json.c:cmcp_json_free'2 [/home/platys/cMCP/bench/bench_server_inline]
+ 2,710,014 ( 1.89%)  src/json.c:emit_value'2 [/home/platys/cMCP/bench/bench_server_inline]
+ 2,163,696 ( 1.51%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/strlen-avx2.S:__strlen_avx2 [/usr/lib/libc.so.6]
+ 2,066,537 ( 1.44%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:__libc_malloc2 [/usr/lib/libc.so.6]
+ 1,918,673 ( 1.34%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/memcmp-avx2-movbe.S:__memcmp_avx2_movbe [/usr/lib/libc.so.6]
+ 1,739,408 ( 1.21%)  src/json.c:parse_value [/home/platys/cMCP/bench/bench_server_inline]
+ 1,540,921 ( 1.08%)  src/json.c:emit_value [/home/platys/cMCP/bench/bench_server_inline]
+ 1,483,736 ( 1.04%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:_int_free_maybe_trim [/usr/lib/libc.so.6]
+ 1,300,149 ( 0.91%)  /usr/src/debug/glibc/glibc/malloc/../sysdeps/generic/calloc-clear-memory.h:calloc
+ 1,223,932 ( 0.85%)  src/json.c:cmcp_json_clone'2 [/home/platys/cMCP/bench/bench_server_inline]
+ 1,191,340 ( 0.83%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:realloc [/usr/lib/libc.so.6]
+ 1,155,805 ( 0.81%)  src/json.c:cmcp_json_new_string_n [/home/platys/cMCP/bench/bench_server_inline]
+ 1,072,587 ( 0.75%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:__libc_calloc2 [/usr/lib/libc.so.6]
+ 1,058,902 ( 0.74%)  src/json.c:cmcp_json_free [/home/platys/cMCP/bench/bench_server_inline]
+   964,427 ( 0.67%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:unlink_chunk.isra.0 [/usr/lib/libc.so.6]
+   960,599 ( 0.67%)  /usr/src/debug/glibc/glibc/nptl/pthread_mutex_unlock.c:__pthread_mutex_unlock_usercnt [/usr/lib/libc.so.6]
+   925,218 ( 0.65%)  /usr/src/debug/glibc/glibc/nptl/pthread_mutex_lock.c:pthread_mutex_lock@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+   693,499 ( 0.48%)  /usr/src/debug/glibc/glibc/elf/dl-reloc.c:_dl_relocate_object_no_relro [/usr/lib/ld-linux-x86-64.so.2]
+   640,535 ( 0.45%)  /usr/src/debug/glibc/glibc/stdlib/../stdlib/strtol_l.c:____strtol_l_internal [/usr/lib/libc.so.6]
+   625,160 ( 0.44%)  src/json.c:cmcp_json_clone [/home/platys/cMCP/bench/bench_server_inline]
+   585,580 ( 0.41%)  src/json.c:cmcp_json_object_set [/home/platys/cMCP/bench/bench_server_inline]
+   578,259 ( 0.40%)  /usr/src/debug/glibc/glibc/stdio-common/vfprintf-internal.c:__printf_buffer [/usr/lib/libc.so.6]
+   570,912 ( 0.40%)  /usr/src/debug/glibc/glibc/malloc/arena.c:free
+   528,550 ( 0.37%)  /usr/src/debug/glibc/glibc/elf/../sysdeps/generic/dl-new-hash.h:_dl_lookup_symbol_x
+   528,000 ( 0.37%)  src/schema.c:path_append.isra.0 [/home/platys/cMCP/bench/bench_server_inline]
+   523,671 ( 0.37%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/strcmp-avx2.S:__strcmp_avx2 [/usr/lib/libc.so.6]
+   486,200 ( 0.34%)  src/schema.c:validate.part.0 [/home/platys/cMCP/bench/bench_server_inline]
+   436,395 ( 0.30%)  /usr/src/debug/glibc/glibc/nptl/cancellation.c:__internal_syscall_cancel [/usr/lib/libc.so.6]
+   428,402 ( 0.30%)  /usr/src/debug/glibc/glibc/stdio-common/vfprintf-process-arg.c:__printf_buffer
+   424,885 ( 0.30%)  src/rpc.c:cmcp_rpc_from_json [/home/platys/cMCP/bench/bench_server_inline]
+   420,721 ( 0.29%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/../multiarch/strcmp-sse2.S:strcmp [/usr/lib/ld-linux-x86-64.so.2]
+   418,694 ( 0.29%)  /usr/src/debug/glibc/glibc/elf/dl-lookup.c:_dl_lookup_symbol_x [/usr/lib/ld-linux-x86-64.so.2]
+   418,451 ( 0.29%)  /usr/src/debug/glibc/glibc/libio/iogetdelim.c:getdelim [/usr/lib/libc.so.6]
+   414,070 ( 0.29%)  /usr/src/debug/glibc/glibc/nptl/pthread_cond_wait.c:pthread_cond_wait@@GLIBC_2.3.2 [/usr/lib/libc.so.6]
+   372,869 ( 0.26%)  /usr/src/debug/glibc/glibc/stdlib/qsort.c:msort_with_tmp.part.0'2 [/usr/lib/libc.so.6]
+   354,993 ( 0.25%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/memchr-avx2.S:__memchr_avx2 [/usr/lib/libc.so.6]
+   340,082 ( 0.24%)  /usr/src/debug/glibc/glibc/malloc/arena.c:__libc_malloc2
+   334,438 ( 0.23%)  src/json.c:cmcp_json_array_append [/home/platys/cMCP/bench/bench_server_inline]
+   328,002 ( 0.23%)  src/rpc.c:cmcp_rpc_to_json [/home/platys/cMCP/bench/bench_server_inline]
+   308,224 ( 0.22%)  src/rpc.c:cmcp_rpc_message_clear.part.0 [/home/platys/cMCP/bench/bench_server_inline]
+   290,669 ( 0.20%)  src/server.c:cmcp_server_run [/home/platys/cMCP/bench/bench_server_inline]
+   283,208 ( 0.20%)  /usr/src/debug/glibc/glibc/stdio-common/Xprintf_buffer_write.c:__printf_buffer_write [/usr/lib/libc.so.6]
+   272,974 ( 0.19%)  /usr/src/debug/glibc/glibc/elf/dl-lookup.c:check_match [/usr/lib/ld-linux-x86-64.so.2]
+   268,641 ( 0.19%)  /usr/src/debug/glibc/glibc/libio/iofwrite.c:fwrite [/usr/lib/libc.so.6]
+   262,700 ( 0.18%)  /usr/src/debug/glibc/glibc/stdio-common/_fitoa_word.c:_itoa_word [/usr/lib/libc.so.6]
+   258,840 ( 0.18%)  /usr/src/debug/glibc/glibc/malloc/malloc.c:_int_realloc [/usr/lib/libc.so.6]
+   253,127 ( 0.18%)  src/client.c:cmcp_client_wait [/home/platys/cMCP/bench/bench_server_inline]
+   250,800 ( 0.18%)  src/schema.c:validate.part.0'2 [/home/platys/cMCP/bench/bench_server_inline]
+   248,600 ( 0.17%)  src/server.c:handle_tools_call [/home/platys/cMCP/bench/bench_server_inline]
+   246,626 ( 0.17%)  src/transport_stdio.c:stdio_read [/home/platys/cMCP/bench/bench_server_inline]
+   242,181 ( 0.17%)  src/transport_stdio.c:stdio_write [/home/platys/cMCP/bench/bench_server_inline]
+   242,110 ( 0.17%)  src/rpc.c:cmcp_rpc_pending_take [/home/platys/cMCP/bench/bench_server_inline]
+   233,359 ( 0.16%)  src/rpc.c:cmcp_rpc_parse [/home/platys/cMCP/bench/bench_server_inline]
+   222,200 ( 0.16%)  src/schema.c:path_push_prop [/home/platys/cMCP/bench/bench_server_inline]
+   207,055 ( 0.14%)  /usr/src/debug/glibc/glibc/libio/fileops.c:_IO_file_underflow@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+   202,009 ( 0.14%)  /usr/src/debug/glibc/glibc/malloc/../sysdeps/generic/calloc-clear-memory.h:__libc_calloc2
+   201,937 ( 0.14%)  /usr/src/debug/glibc/glibc/malloc/arena.c:_int_free_maybe_trim
+   198,360 ( 0.14%)  /usr/src/debug/glibc/glibc/nptl/../sysdeps/unix/sysv/linux/x86_64/syscall_cancel.S:__syscall_cancel_arch [/usr/lib/libc.so.6]
+   198,180 ( 0.14%)  /usr/src/debug/glibc/glibc/libio/fileops.c:new_do_write [/usr/lib/libc.so.6]
+   193,803 ( 0.14%)  /usr/src/debug/glibc/glibc/libio/fileops.c:_IO_file_xsputn@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+   191,491 ( 0.13%)  src/client.c:cmcp_client_call_async [/home/platys/cMCP/bench/bench_server_inline]
+   171,760 ( 0.12%)  src/json.c:cmcp_json_parse [/home/platys/cMCP/bench/bench_server_inline]
+   171,756 ( 0.12%)  /usr/src/debug/glibc/glibc/libio/fileops.c:_IO_file_write@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+   171,717 ( 0.12%)  /usr/src/debug/glibc/glibc/libio/fputc.c:fputc [/usr/lib/libc.so.6]
+   169,518 ( 0.12%)  src/client.c:reader_main [/home/platys/cMCP/bench/bench_server_inline]
+   167,789 ( 0.12%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/strchr-avx2.S:__strchrnul_avx2 [/usr/lib/libc.so.6]
+   158,544 ( 0.11%)  /usr/src/debug/glibc/glibc/libio/iofflush.c:fflush [/usr/lib/libc.so.6]
+   154,110 ( 0.11%)  src/json.c:cmcp_json_new_string [/home/platys/cMCP/bench/bench_server_inline]
+   153,040 ( 0.11%)  bench/bench_util.h:bench_lat_cmp [/home/platys/cMCP/bench/bench_server_inline]
+   145,631 ( 0.10%)  /usr/src/debug/glibc/glibc/nptl/futex-internal.c:__futex_abstimed_wait_cancelable64 [/usr/lib/libc.so.6]
+   142,647 ( 0.10%)  src/rpc.c:cmcp_rpc_pending_register [/home/platys/cMCP/bench/bench_server_inline]
+   136,688 ( 0.10%)  src/server.c:server_handle_message [/home/platys/cMCP/bench/bench_server_inline]
+   134,953 ( 0.09%)  /usr/src/debug/glibc/glibc/elf/do-rel.h:_dl_relocate_object_no_relro
+   134,200 ( 0.09%)  src/schema.c:cmcp_schema_validate [/home/platys/cMCP/bench/bench_server_inline]
+   134,200 ( 0.09%)  src/server.c:process_work [/home/platys/cMCP/bench/bench_server_inline]
+   132,100 ( 0.09%)  src/json.c:cmcp_json_new_object [/home/platys/cMCP/bench/bench_server_inline]
+   129,800 ( 0.09%)  bench/bench_server_inline.c:do_one_call [/home/platys/cMCP/bench/bench_server_inline]
+   126,037 ( 0.09%)  /usr/src/debug/glibc/glibc/elf/../sysdeps/x86_64/dl-machine.h:_dl_relocate_object_no_relro
+   123,338 ( 0.09%)  /usr/src/debug/glibc/glibc/libio/genops.c:__underflow [/usr/lib/libc.so.6]
+   123,333 ( 0.09%)  /usr/src/debug/glibc/glibc/libio/fileops.c:_IO_file_sync@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+   121,110 ( 0.08%)  /usr/src/debug/glibc/glibc/nptl/pthread_cond_common.c:pthread_cond_broadcast@@GLIBC_2.3.2
+   116,600 ( 0.08%)  src/schema.c:type_matches.isra.0 [/home/platys/cMCP/bench/bench_server_inline]
+   114,634 ( 0.08%)  /usr/src/debug/glibc/glibc/libio/vsnprintf.c:__vsnprintf_internal [/usr/lib/libc.so.6]
+   114,634 ( 0.08%)  /usr/src/debug/glibc/glibc/stdio-common/snprintf.c:snprintf [/usr/lib/libc.so.6]
+   105,840 ( 0.07%)  /usr/src/debug/glibc/glibc/nptl/../nptl/pthread_mutex_lock.c:__pthread_mutex_cond_lock [/usr/lib/libc.so.6]
+   105,712 ( 0.07%)  /usr/src/debug/glibc/glibc/nptl/cancellation.c:__syscall_cancel [/usr/lib/libc.so.6]
+   105,702 ( 0.07%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/memmove-vec-unaligned-erms.S:__mempcpy_avx_unaligned_erms [/usr/lib/libc.so.6]
+   105,604 ( 0.07%)  src/worker.c:cmcp_pool_submit [/home/platys/cMCP/bench/bench_server_inline]
+   101,292 ( 0.07%)  /usr/src/debug/glibc/glibc/libio/libioP.h:fwrite
+    96,910 ( 0.07%)  /usr/src/debug/glibc/glibc/libio/genops.c:_IO_switch_to_get_mode [/usr/lib/libc.so.6]
+    96,855 ( 0.07%)  src/rpc.c:cmcp_rpc_message_init [/home/platys/cMCP/bench/bench_server_inline]
+    96,844 ( 0.07%)  src/rpc.c:cmcp_rpc_make_request [/home/platys/cMCP/bench/bench_server_inline]
+    96,822 ( 0.07%)  src/rpc.c:cmcp_id_copy [/home/platys/cMCP/bench/bench_server_inline]
+    93,164 ( 0.07%)  /usr/src/debug/glibc/glibc/malloc/arena.c:__libc_calloc2
+    92,517 ( 0.06%)  /usr/src/debug/glibc/glibc/nptl/pthread_mutex_unlock.c:pthread_mutex_unlock@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+    88,060 ( 0.06%)  src/json.c:cmcp_json_emit_stable [/home/platys/cMCP/bench/bench_server_inline]
+    79,380 ( 0.06%)  /usr/src/debug/glibc/glibc/stdio-common/Xprintf_buffer_done.c:__printf_buffer_done [/usr/lib/libc.so.6]
+    79,352 ( 0.06%)  src/worker.c:pool_worker [/home/platys/cMCP/bench/bench_server_inline]
+    79,272 ( 0.06%)  /usr/src/debug/glibc/glibc/libio/libioP.h:fflush
+    79,200 ( 0.06%)  src/server.c:cmcp_tool_text_content [/home/platys/cMCP/bench/bench_server_inline]
+    78,680 ( 0.05%)  /usr/src/debug/glibc/glibc/nptl/pthread_cond_signal.c:pthread_cond_signal@@GLIBC_2.3.2 [/usr/lib/libc.so.6]
+    72,721 ( 0.05%)  /usr/src/debug/glibc/glibc/time/../sysdeps/unix/sysv/linux/clock_gettime.c:clock_gettime@@GLIBC_2.17 [/usr/lib/libc.so.6]
+    68,276 ( 0.05%)  /usr/src/debug/glibc/glibc/nptl/pthread_cond_broadcast.c:pthread_cond_broadcast@@GLIBC_2.3.2 [/usr/lib/libc.so.6]
+    66,073 ( 0.05%)  /usr/src/debug/glibc/glibc/libio/libioP.h:getdelim
+    66,045 ( 0.05%)  src/rpc.c:cmcp_rpc_emit [/home/platys/cMCP/bench/bench_server_inline]
+    64,750 ( 0.05%)  /usr/src/debug/glibc/glibc/string/../sysdeps/x86_64/multiarch/memset-vec-unaligned-erms.S:__memset_avx2_unaligned_erms [/usr/lib/libc.so.6]
+    64,148 ( 0.04%)  /usr/src/debug/glibc/glibc/nptl/pthread_mutex_init.c:pthread_mutex_init@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+    61,681 ( 0.04%)  /usr/src/debug/glibc/glibc/libio/fileops.c:_IO_do_write@@GLIBC_2.2.5 [/usr/lib/libc.so.6]
+    61,655 ( 0.04%)  /usr/src/debug/glibc/glibc/nptl/pthread_cond_common.c:pthread_cond_signal@@GLIBC_2.3.2
+    61,628 ( 0.04%)  src/rpc.c:parse_id_field [/home/platys/cMCP/bench/bench_server_inline]
+    60,192 ( 0.04%)  /usr/src/debug/glibc/glibc/elf/dl-version.c:_dl_check_map_versions [/usr/lib/ld-linux-x86-64.so.2]
+    57,239 ( 0.04%)  /usr/src/debug/glibc/glibc/libio/libioP.h:fputc
+    57,226 ( 0.04%)  src/rpc.c:cmcp_rpc_make_response [/home/platys/cMCP/bench/bench_server_inline]
+    52,860 ( 0.04%)  /usr/src/debug/glibc/glibc/io/../sysdeps/unix/sysv/linux/read.c:read [/usr/lib/libc.so.6]
+    52,848 ( 0.04%)  /usr/src/debug/glibc/glibc/io/../sysdeps/unix/sysv/linux/write.c:write [/usr/lib/libc.so.6]
+    52,824 ( 0.04%)  src/json.c:cmcp_json_new_int [/home/platys/cMCP/bench/bench_server_inline]
+    48,444 ( 0.03%)  src/client.c:send_message [/home/platys/cMCP/bench/bench_server_inline]
+    48,400 ( 0.03%)  src/client.c:cmcp_client_request [/home/platys/cMCP/bench/bench_server_inline]
+

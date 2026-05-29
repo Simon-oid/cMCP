@@ -79,6 +79,19 @@ bench/compare/.venv/
 bench/compare/__pycache__/
 bench/compare/**/__pycache__/
 
+# Profile harness (Tier 6 axis 6.6.3): only the .sh scripts, README,
+# findings.md, and the human-reviewable .txt summaries are tracked.
+# Raw callgrind/massif .out, heaptrack .zst, perf .data, and SVGs are
+# all machine- and run-specific — regenerate locally with cpu.sh /
+# heap.sh rather than committing.
+bench/profile/baseline/*.out
+bench/profile/baseline/*.svg
+bench/profile/baseline/heap-heaptrack.*.zst
+bench/profile/baseline/cpu-perf.data
+bench/profile/baseline/cpu-perf.script
+bench/profile/baseline/cpu-perf.folded
+bench/profile/baseline/cpu-perf-top.txt
+
 # Coverage artifacts (Tier 6 axis 6.2.1). The Makefile target regenerates
 # everything under coverage/ on demand; gcov drops .gcno alongside the
 # .o it instrumented and .gcda alongside the binary that ran it.

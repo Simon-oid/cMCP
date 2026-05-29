@@ -242,10 +242,44 @@ make bench-compare    # writes bench/compare/results.csv + prints summary
 `run.sh` skips the TS or Python row gracefully (one-line reason) if
 the toolchain isn't installed; the cMCP row always runs.
 
+## Profile baseline (Phase 6.6.3)
+
+`bench/profile/cpu.sh` + `bench/profile/heap.sh` capture call-graph
+and allocation profiles of `bench_server_inline`. The scripts prefer
+`perf record` + FlameGraph and `heaptrack`; fall back to
+`valgrind --tool=callgrind` and `--tool=massif` (always available —
+valgrind is already a project dep).
+
+[`bench/profile/baseline/findings.md`](../bench/profile/baseline/findings.md)
+is the durable artifact. The callgrind text dumps in
+`bench/profile/baseline/` are the supporting evidence, before and
+after the one fix landed in 6.6.3.
+
+Key findings:
+
+- **~38% of CPU is in the allocator.** Working memory is tiny
+  (~57 KB peak); the cost is per-call churn — ~30 small mallocs +
+  frees per `tools/call`. Largest single lever for future axes; the
+  fix shape is a per-request arena (separate axis, not free).
+- **~36% in `src/json.c`** (parse + emit + tree manipulation). The
+  6.6.3 commit batches `emit_quoted`'s per-character writes into
+  runs — dropped total instructions 7.9% under callgrind and lifted
+  throughput from 48,813 → 50,487 calls/s on `bench_server_inline`.
+- **2% in `cmcp_json_clone` (via `rpc.c`)** — dead clone, every
+  caller throws the message away immediately after. Fix needs an
+  ownership-transferring `cmcp_rpc_emit_take`; deferred as a
+  follow-up.
+
+Updated headline number after the 6.6.3 fix:
+
+| bench                  | throughput | p50 µs | p99 µs |
+|------------------------|-----------:|-------:|-------:|
+| `server_inline_stdio` (6.6.1) | 48,813 calls/s | 20 | 24 |
+| `server_inline_stdio` (6.6.3) | 50,487 calls/s | 19 | 27 |
+
 ## What this baseline does NOT cover
 
-- **Profile traces** (`perf record` + `heaptrack` flamegraphs).
-  Phase 6.6.3.
+
 - **HTTP soak** — long-running stability through the HTTP
   transport. Phase 6.6.4.
 - **`bench_session_fanout`** — N-server session aggregator latency

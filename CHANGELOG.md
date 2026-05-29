@@ -976,6 +976,94 @@ response. Tracked for a follow-up; not blocking 6.6.1.
 
 No test-suite assertion delta in this commit.
 
+### 6.6.3 profiling baseline + JSON emitter batched write
+
+`bench/profile/` tree. Two scripts (`cpu.sh`, `heap.sh`) capture
+call-graph and allocation profiles of `bench_server_inline`. Both
+auto-detect their tooling: prefer `perf record` + FlameGraph and
+`heaptrack`; fall back to `valgrind --tool=callgrind` /
+`--tool=massif` (always available since valgrind is already a
+project dep). Findings + before/after callgrind text dumps committed
+under `bench/profile/baseline/`.
+
+#### What we measured
+
+Under callgrind, on `bench_server_inline` × 2000 calls (in-process
+pipe pair, echo tool):
+
+| bucket | share of CPU |
+|---|---:|
+| glibc allocator (malloc/free/calloc + internals) | ~38% |
+| `src/json.c` (parse + emit + tree manipulation) | ~36% |
+| libc string ops (`memcpy`, `strlen`, `memcmp`, `strcmp`) | ~9% |
+| pthread mutex lock/unlock | ~1.5% |
+| schema validator + RPC framing combined | ~1% |
+
+Heap peak ~57 KB. Working memory is tiny; the 38% in the allocator
+is per-call **churn** (~30 mallocs + frees per `tools/call`), not
+size. The biggest single lever for future axes is a per-request
+arena to convert N allocations into 1.
+
+#### The one fix landed in this commit (free win)
+
+`emit_quoted` was calling `emit_raw` once per source character.
+For typical strings (no escapes — tool names, field names, ASCII
+payloads), that meant N function calls + N×1-byte `memcpy` calls
+instead of one `memcpy` of N bytes. Batched into runs: the emitter
+now scans for stretches of "normal" printable ASCII, flushes each
+stretch in one `emit_raw` call when it hits an escape character or
+the end of the string. One file changed (`src/json.c`); semantics
+unchanged; full test suite (2700+ assertions) still green.
+
+Callgrind delta:
+
+| function | before | after |
+|---|---:|---:|
+| `emit_raw`     | 8.45% (13.15 M Ir) | 4.94% ( 7.07 M Ir) |
+| `emit_quoted`  | 4.95% ( 7.70 M Ir) | 3.25% ( 4.65 M Ir) |
+| **TOTAL**      | **155.56 M Ir**    | **143.27 M Ir (−7.9%)** |
+
+Wall-clock confirmation on `bench_server_inline`:
+
+| | calls/s | p50 µs | p99 µs |
+|---|---:|---:|---:|
+| 6.6.1 baseline (before) | 48,813 | 20 | 24 |
+| 6.6.3 (after)           | 50,487 | 19 | 27 |
+
+Wall-clock improvement is smaller than the instruction-count
+improvement (the bench is partly memory-bound — cache misses
+dominate remaining time, not instruction throughput), but the
+direction is right.
+
+#### What's deferred to future axes
+
+`bench/profile/baseline/findings.md` triages each one with its
+proposed fix shape. Headline:
+
+- **Allocator arena** — biggest single lever (~38%). Needs a
+  per-request bump-allocator + ownership-aware free path. Sized
+  for its own axis.
+- **`cmcp_rpc_emit_take`** — every caller of `send_message` clears
+  the message immediately after, so the clones inside
+  `cmcp_rpc_to_json` (~2% of CPU) are dead weight. Needs an
+  ownership-transferring emit variant + callsite sweep.
+- **HTTP-transport profile** — stdio only in 6.6.3; lands with
+  6.6.4 alongside HTTP soak.
+
+#### Build system + gitignore
+
+- `make bench-profile-cpu` / `make bench-profile-heap` run the
+  respective script. `make bench-profile` runs both.
+- `.gitignore` lists `*.svg`, `heap-heaptrack.*.zst`,
+  `cpu-perf.*` artifacts — machine- and run-specific. The
+  committed `cpu-callgrind-{before,}.{out,txt}` and
+  `heap-massif.{out,txt}` are tracked so the baseline is reviewable
+  in the repo without re-running valgrind.
+
+`docs/perf-baselines.md` gains a profile-baseline section linking
+to the findings + the updated headline number. No test-suite
+assertion delta.
+
 ### 6.6.2 comparison vs TS / Python reference SDKs
 
 New `bench/compare/` tree. Drives the cMCP client against three
