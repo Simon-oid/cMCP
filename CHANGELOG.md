@@ -4,11 +4,45 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
-## Unreleased — Tier 6 (state-of-the-art library polish)
+## v0.5.0 — Tier 6 (state-of-the-art library polish, 2026-05-29)
 
 Seven axes mapped from five quality lenses (QUALITY / PROFESSIONALISM /
 CONFORMITY / SECURITY / PERFORMANCE). Foundation-ordered execution.
 Full design in [`TODO.md`](TODO.md) under "Tier 6".
+
+### Headline
+
+- **6.1** — protocol pinned at MCP `2025-11-25` (was `2025-06-18`).
+  Spec-compliance wire changes + optional 2025-11-25 capabilities
+  (icons, EnumSchema, URL elicitation, sampling tools/toolChoice,
+  SSE polling + Last-Event-Id resumption) all landed.
+- **6.2** — code-quality measurement: `make coverage` (lcov+gcovr),
+  `make analyze` (clang-tidy + scan-build + cppcheck + CodeQL CI lane).
+- **6.3** — public API doc (`make docs` → Doxygen under `docs/api/`),
+  SemVer policy (`docs/SEMVER.md`), retro-tag script.
+- **6.4** — `make install` / `pkg-config` / CMake `find_package(cmcp)`
+  / `make uninstall` / `make dist`. External-consumer smoke test
+  (`make install-smoke`) builds against the installed library via both
+  discovery paths.
+- **6.5** — formal threat model (`docs/threat-model.md`), HTTP
+  slowloris + accept-rate + protocol-layer caps + log redactor.
+  Terminator-only TLS posture (`docs/deployment-tls.md`).
+- **6.6** — perf baselines (`bench/`), TS/Py SDK comparison
+  (`bench/compare/`), profile baseline + JSON emitter batched-write
+  fix (`bench/profile/`), HTTP soak (`make soak-http`).
+  Steady-state stdio: 50k calls/s p50=19µs p99=27µs (5.8× TS-SDK,
+  47× Python-SDK).
+- **6.7** — schema validator near-parity with Ajv: `oneOf`/`anyOf`/
+  `allOf`/`not`, `pattern`, common `format`s, `multipleOf`, `min/max
+  Items`, `min/maxProperties`, tuple `items`, `const`, `if/then/else`.
+
+Plus a handful of follow-ups discovered while building the above:
+HTTP-client 503 hang fix (6.6.x), `cmcp-inspect` ergonomics, etc.
+
+`docs/SEMVER.md` is the first post-policy release record: every
+section that follows ships with its `git tag` at release time.
+Retro-tags for `v0.1.0` … `v0.4.1` are documented (one-time
+maintainer action; see SEMVER.md `## Retro-tagging`).
 
 ### 6.1.1 protocol spec bump — pin + spec-compliance wire changes
 

@@ -196,8 +196,8 @@ git tag -a v0.2.0 -m "Tier 2: HTTP transport (Streamable HTTP, client+server)" $
 git tag -a v0.3.0 -m "Tier 3: server-side registries + filesystem-mcp + crag-mcp" $(git log --grep='Tier 3 closes\|Closes Tier 3' --format=%H | tail -1)
 # Tier 4 — agentic primitives
 git tag -a v0.4.0 -m "Tier 4: structured output, elicitation, sampling, progress, cancel" $(git log --grep='Tier 4 closes\|Closes Tier 4' --format=%H | tail -1)
-# Current pre-Tier-6 state
-git tag -a v0.4.1 -m "Tier 5: agentic readiness (fuzz, replay, soak, hostile-peer, sanitizer matrix)" HEAD
+# Tier 5 — agentic readiness (post-Tier-5 docs roll-up, before Tier 6 work began)
+git tag -a v0.4.1 -m "Tier 5: agentic readiness (fuzz, replay, soak, hostile-peer, sanitizer matrix)" a53fd8b
 git push --tags
 ```
 
@@ -205,5 +205,13 @@ git push --tags
 pushing — `git log --grep=` is a best-effort search, not a guarantee.
 If a commit doesn't match, hand-roll the SHA in.)
 
-Going forward (post-policy), every CHANGELOG release section ships
-with its tag at release time — no retro work needed.
+`v0.5.0` is the first **post-policy** release: it gets its tag at
+release time (not retro), pointing at the "cut v0.5.0" commit:
+
+```bash
+git tag -a v0.5.0 -m "Tier 6: state-of-the-art library polish" HEAD
+git push --tags
+```
+
+Going forward, every CHANGELOG release section ships with its tag at
+release time — no retro work needed.

@@ -6,8 +6,7 @@ A from-scratch implementation of the [Model Context Protocol](https://modelconte
 in pure C11. Three static link targets — core, server, client — sharing
 one JSON-RPC 2.0 pipeline. stdio and Streamable HTTP transports.
 Tracking spec revision `2025-11-25`; all optional capabilities of the
-prior `2025-06-18` revision shipped, with the 2025-11-25 wire-behavior
-changes landing in Tier 6.1 (in progress).
+prior `2025-06-18` revision shipped.
 
 No C++. No external JSON library. No third-party MCP SDK. Hand-rolled
 JSON parser, hand-rolled JSON Schema subset validator, hand-rolled
@@ -30,16 +29,53 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
-**Tier 6 in progress (state-of-the-art library polish).** Builds on
-Tier 5's agentic-readiness work (sanitisers, fuzzing, replay gate,
-playbooks, etc.). Tier 6.1 is the spec bump to `2025-11-25` — pin
-landed in `include/cmcp.h`; spec-compliance wire changes for
-input-validation-as-tool-error, HTTP Origin allow-list, and the
-optional `description` field on `Implementation` are wired here.
-Optional 2025-11-25 capabilities (icons, EnumSchema, URL elicitation,
-sampling `tools`/`toolChoice`, SSE polling) land in 6.1.2-6.1.4. See
-[`TODO.md`](TODO.md) under "Tier 6" and the design plan in
-`~/.claude/plans/eager-leaping-pike.md`.
+**v0.5 — Tier 6 done (state-of-the-art library polish, 2026-05-29).**
+Built on Tier 5's agentic-readiness foundation (sanitisers, fuzzing,
+replay gate, playbooks). Seven axes, mapped from five quality lenses
+(QUALITY / PROFESSIONALISM / CONFORMITY / SECURITY / PERFORMANCE):
+
+- **Protocol pinned at MCP `2025-11-25`.** All wire-behaviour changes
+  + optional capabilities of the new revision (icons, EnumSchema, URL
+  elicitation, sampling tools/toolChoice, SSE polling + Last-Event-Id
+  resumption) shipped.
+- **Code-quality measurement.** `make coverage` (lcov + gcovr HTML),
+  `make analyze` (clang-tidy + scan-build + cppcheck), plus a CodeQL
+  CI lane. Coverage HTML + analyzer findings published as CI artefacts
+  every push.
+- **Public API surface & SemVer.** Doxygen-built API reference under
+  `docs/api/` (`make docs` + auto-published to GitHub Pages on `main`).
+  [`docs/SEMVER.md`](docs/SEMVER.md) defines what's public, what's
+  internal, and the bump policy. `v0.5.0` is the first post-policy
+  release; pre-policy `v0.1.0`…`v0.4.1` will be retro-tagged by the
+  maintainer per the SEMVER doc.
+- **Packaging.** `make install` (GNU layout, `PREFIX` + `DESTDIR`),
+  pkg-config (`cmcp-{core,server,client}.pc`), CMake
+  `find_package(cmcp)`, `make uninstall`, `make dist`. An external
+  consumer (`examples/install-smoke/`) builds against the installed
+  library through both discovery paths in CI.
+- **Threat model & hardening.** [`docs/threat-model.md`](docs/threat-model.md)
+  (STRIDE-style pass over five trust boundaries). HTTP transport gained
+  slowloris idle/deadline budgets, accept-rate token bucket,
+  protocol-layer caps on JSON depth / object size / in-flight
+  requests, and a stderr log redactor for credential-shaped fields.
+  TLS posture: terminator-only — rationale in
+  [`docs/deployment-tls.md`](docs/deployment-tls.md).
+- **Schema validator near-parity with Ajv.** `oneOf`/`anyOf`/`allOf`/
+  `not`, `pattern` (POSIX regex), common `format`s, `multipleOf`,
+  `min/maxItems`, `uniqueItems`, `min/maxProperties`, tuple `items`,
+  `const`, `if/then/else`. Audit + outcome documented in
+  [`docs/schema-conformance.md`](docs/schema-conformance.md).
+- **Performance baselines.** `bench/` — three in-process micro-benches
+  (stdio inline / worker pool / HTTP). `bench/compare/` — same workload
+  against the TS and Python reference SDKs. `bench/profile/` —
+  callgrind / massif baselines + a JSON emitter batched-write fix that
+  trimmed total instructions 7.9%. `make soak-http` — long-running
+  stability through the HTTP transport.
+
+Steady-state stdio throughput on a Ryzen 5800X (p50 = 19 µs, p99 =
+27 µs): **50,487 `tools/call`/s** — 5.8× the TS reference SDK,
+47× the Python SDK at the same workload. Numbers + methodology in
+[`docs/perf-baselines.md`](docs/perf-baselines.md).
 
 **v0.4 + agentic-readiness hardening (Tier 5 done, 2026-05-24).** The
 protocol surface stayed at v0.4 (full `2025-06-18` conformance); on
@@ -131,6 +167,10 @@ make coverage   # rebuild with --coverage; lcov + genhtml + gcovr report under c
 make analyze    # clang-tidy + scan-build + cppcheck static-analysis matrix
 make fuzz-smoke # 60s per libFuzzer harness against the seed corpus (clang-only)
 make soak       # stdio soak driver (env knobs in tests/soak/run.sh)
+make soak-http  # HTTP soak driver — same drift criteria, HTTP transport
+make bench      # in-process micro-benches → bench/results.csv (stdio + HTTP)
+make bench-compare # cMCP vs TS/Py reference SDKs → bench/compare/results.csv
+make bench-profile # CPU + heap profile of bench_server_inline → bench/profile/baseline/
 make crag-mcp   # build the cRAG reference server (needs sibling ../cRAG/)
 make conformance # cross-check vs the MCP TS reference impl (needs Node + network)
 make check-spec-drift # compare CMCP_PROTOCOL_VERSION vs upstream spec dirs
