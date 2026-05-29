@@ -57,6 +57,8 @@ fuzz/corpus_*/*
 # Soak harness: the *.c driver and run.sh ARE tracked; the compiled
 # binary and any CSV captures are not.
 tests/soak/soak_driver
+tests/soak/soak_http_driver
+tests/soak/echo_http_server
 tests/soak/*.csv
 
 # Bench tree (Tier 6 axis 6.6.1): sources, README, run.sh ARE tracked;

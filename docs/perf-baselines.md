@@ -277,11 +277,45 @@ Updated headline number after the 6.6.3 fix:
 | `server_inline_stdio` (6.6.1) | 48,813 calls/s | 20 | 24 |
 | `server_inline_stdio` (6.6.3) | 50,487 calls/s | 19 | 27 |
 
+## HTTP soak (Phase 6.6.4)
+
+`make soak-http` (and `make soak-http-churn`) drive the cMCP client
+through the Streamable HTTP transport against a child process
+running `tests/soak/echo_http_server`. Same drift criteria as the
+stdio soak (`make soak`): RSS ≤ +15% growth, FDs strictly
+non-growing, threads equal, p99 latency ≤ 2× drift between the
+post-warmup baseline and the end sample.
+
+Closes the Tier-5 deferral: stdio soak landed in 5.6, HTTP soak was
+punted on runtime-budget grounds. The two now share `soak_common.h`
+(proc sampling, latbuf, workload, CSV schema), so a future drift in
+the metric definitions touches one file.
+
+Observed on a 30s smoke run + a 45s churn run (post-warmup, RSS in kB):
+
+| run | parent_rss | parent_fd | parent_threads | child_rss | child_fd | child_threads | p99 µs |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `soak-http` smoke      | 9164 → 9164 | 6 → 6 | 3 → 3 | 5888 → 5888 | 5 → 5 | 8 → 8 | 170–190 |
+| `soak-http-churn`      | 9320 → 9404 | 6 → 6 | 3 → 3 | 5996 → 5936 | 5 → 5 | 8 → 8 | 162–182 |
+
+(+0.9% parent RSS on churn is well under the 15% threshold; FD /
+thread counts are flat across the three child respawns.)
+
+p99 latency tracks the bench (`server_inline_http`: p99 = 238 µs at
+the steady-state burn-in of `bench_http`; soak p99 is similar). No
+new defects surfaced.
+
+The driver `setenv`s `CMCP_HTTP_ACCEPT_RATE=0` at startup unless the
+user explicitly set it — same workaround the `bench_http` micro-bench
+applies. Reason: every `tools/call` opens a fresh libcurl easy
+handle, so the test saturates the default 200-burst gate in ~2s.
+The gate has its own dedicated tests (`test_accept_rate_limit_503`);
+the soak is testing leak/stability under sustained traffic, not
+the gate itself.
+
 ## What this baseline does NOT cover
 
 
-- **HTTP soak** — long-running stability through the HTTP
-  transport. Phase 6.6.4.
 - **`bench_session_fanout`** — N-server session aggregator latency
   with concurrent fan-in. Phase 6.6.x; punted from 6.6.1.
 - **Regression gate.** Tier 7 posture if ever; for now, baselines

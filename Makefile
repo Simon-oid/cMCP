@@ -158,10 +158,19 @@ check-spec-drift:
 # for $SOAK_DURATION seconds (default 120, nightly target 21600 = 6h),
 # samples /proc metrics for both parent and child, and applies awk drift
 # criteria. Kept OUT of `make test`. See tests/soak/run.sh for env knobs.
-SOAK_DIR := tests/soak
-SOAK_BIN := $(SOAK_DIR)/soak_driver
+SOAK_DIR        := tests/soak
+SOAK_BIN        := $(SOAK_DIR)/soak_driver
+SOAK_HTTP_DRV   := $(SOAK_DIR)/soak_http_driver
+SOAK_HTTP_SRV   := $(SOAK_DIR)/echo_http_server
+SOAK_HTTP_BINS  := $(SOAK_HTTP_DRV) $(SOAK_HTTP_SRV)
 
-$(SOAK_BIN): $(SOAK_DIR)/soak_driver.c $(BUILT_LIBS)
+$(SOAK_BIN): $(SOAK_DIR)/soak_driver.c $(SOAK_DIR)/soak_common.h $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+$(SOAK_HTTP_DRV): $(SOAK_DIR)/soak_http_driver.c $(SOAK_DIR)/soak_common.h $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+$(SOAK_HTTP_SRV): $(SOAK_DIR)/echo_http_server.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
 soak: $(SOAK_BIN) examples/echo-server
@@ -169,6 +178,14 @@ soak: $(SOAK_BIN) examples/echo-server
 
 soak-churn: $(SOAK_BIN) examples/echo-server
 	@SOAK_CHURN=1 ./$(SOAK_DIR)/run.sh
+
+# HTTP soak — same drift criteria, different transport. Closes the
+# Tier-5 deferral; methodology in tests/soak/run_http.sh.
+soak-http: $(SOAK_HTTP_BINS)
+	@./$(SOAK_DIR)/run_http.sh
+
+soak-http-churn: $(SOAK_HTTP_BINS)
+	@SOAK_CHURN=1 ./$(SOAK_DIR)/run_http.sh
 
 # --- Performance baselines (Tier 6 axis 6.6.1) ----------------------------
 # Opt-in: in-process micro-benches over stdio and HTTP that emit CSV rows
@@ -652,7 +669,7 @@ clean:
 	      libcmcp_core.so* libcmcp_server.so* libcmcp_client.so* \
 	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
-	      $(FUZZ_BINS) $(SOAK_BIN) $(BENCH_BINS) $(COMPARE_BIN) \
+	      $(FUZZ_BINS) $(SOAK_BIN) $(SOAK_HTTP_BINS) $(BENCH_BINS) $(COMPARE_BIN) \
 	      $(BENCH_DIR)/results.csv $(COMPARE_DIR)/results.csv \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o \
@@ -663,7 +680,8 @@ clean:
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
         fuzz-build fuzz-smoke docs \
-        soak soak-churn bench bench-build bench-compare bench-compare-build \
+        soak soak-churn soak-http soak-http-churn \
+        bench bench-build bench-compare bench-compare-build \
         bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

@@ -976,6 +976,89 @@ response. Tracked for a follow-up; not blocking 6.6.1.
 
 No test-suite assertion delta in this commit.
 
+### 6.6.4 HTTP soak harness (closes Tier-5 deferral)
+
+Stdio soak landed in 5.6; HTTP soak was deferred on runtime-budget
+grounds. This commit closes that deferral.
+
+#### New + refactored under `tests/soak/`
+
+```
+tests/soak/
+├── soak_common.h          shared helpers (proc sampling, latbuf, workload, CSV schema)
+├── soak_driver.c          stdio variant, now uses soak_common.h
+├── soak_http_driver.c     HTTP variant
+├── echo_http_server.c     HTTP child binary spawned by the HTTP driver
+├── run.sh                 stdio orchestrator + drift check (unchanged)
+└── run_http.sh            HTTP orchestrator + drift check
+```
+
+`soak_common.h` extracts the bits that should be identical between
+the two drivers — `/proc/<pid>/{status,fd}` sampling, the 4096-entry
+latency ring buffer, the `tools/call echo` workload payload, and the
+CSV header. The drivers still own their own session lifecycle (pipe
+vs ephemeral TCP) and main loop. A future change to the drift-metric
+shape now touches one file.
+
+#### HTTP driver shape
+
+`soak_http_driver` mirrors `soak_driver` but switches transports:
+
+1. Parent picks an ephemeral 127.0.0.1 port via `bind(0)` +
+   `getsockname` + `close`.
+2. Parent `fork`+`exec`s `echo_http_server --port=<picked>`. Child
+   binds it and runs `cmcp_server_run` against
+   `cmcp_transport_http_listen`.
+3. Parent waits 50ms for the acceptor to reach `poll`, then connects
+   via `cmcp_transport_http_connect("http://127.0.0.1:<port>/mcp")`
+   and runs the same workload + sampling loop.
+
+The ephemeral-port race window (between `close()` and the child's
+`bind()`) is microseconds on loopback; not observed in practice.
+
+#### `CMCP_HTTP_ACCEPT_RATE=0` workaround (consistent with bench)
+
+Every `tools/call` opens a fresh libcurl easy handle (no connection
+pooling on the client transport yet), so the soak saturates the
+6.5.2 accept-rate gate (default 100 conn/sec, 200 burst) within
+~2s. The 6.6.x fix makes the client surface 503s as `CMCP_EAGAIN`
+promptly instead of hanging, but the soak is testing leak/stability
+under sustained traffic, not the gate (which has its own dedicated
+test `test_accept_rate_limit_503`). The driver `setenv`s
+`CMCP_HTTP_ACCEPT_RATE=0` at startup unless the user explicitly set
+the var; the child inherits this through the environment.
+
+#### Drift criteria — same shape as 5.6 stdio soak
+
+RSS ≤ +15% growth, FDs strictly non-growing, threads equal, p99
+latency ≤ 2× drift between the post-warmup baseline and the end
+sample. `run_http.sh`'s awk is byte-identical to `run.sh`'s except
+for the label.
+
+Observed on this machine (Ryzen 5800X):
+
+| run | duration | parent_rss | parent_fd | parent_threads | child_rss | child_fd | child_threads | p99 µs |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `soak-http` (smoke)       | 30s | 9164 → 9164 | 6 → 6 | 3 → 3 | 5888 → 5888 | 5 → 5 | 8 → 8 | 170–190 |
+| `soak-http-churn` (smoke) | 45s | 9320 → 9404 | 6 → 6 | 3 → 3 | 5996 → 5936 | 5 → 5 | 8 → 8 | 162–182 |
+
+(+0.9% parent RSS on churn is well under the threshold; the three
+respawns each drop and replace the child without any FD or thread
+leakage on the parent side.)
+
+#### Build system + gitignore
+
+- `make soak-http` runs `tests/soak/run_http.sh`.
+- `make soak-http-churn` runs the same with `SOAK_CHURN=1` (periodic
+  child respawn — exercises the connect/teardown path).
+- `make clean` removes both new binaries.
+- `.gitignore` adds `tests/soak/soak_http_driver` and
+  `tests/soak/echo_http_server`.
+
+`docs/perf-baselines.md` gains an "HTTP soak" section with the
+observed numbers + the deliberate `CMCP_HTTP_ACCEPT_RATE` workaround
+documented. No test-suite assertion delta.
+
 ### 6.6.3 profiling baseline + JSON emitter batched write
 
 `bench/profile/` tree. Two scripts (`cpu.sh`, `heap.sh`) capture
