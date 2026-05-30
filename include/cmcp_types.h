@@ -124,6 +124,13 @@ typedef struct {
     cmcp_json_t *data;        /* owned, may be NULL */
 } cmcp_rpc_error_t;
 
+/* Free a heap-owned cmcp_rpc_error_t (message + data + the struct
+ * itself). Safe to call with NULL. Hosts that obtained the error from
+ * cmcp_client_tool_call (CMCP_TOOL_ERR_PROTOCOL path) use this; in-
+ * tree code generally owns errors as part of a cmcp_rpc_message_t and
+ * lets cmcp_rpc_message_clear handle them. */
+void cmcp_rpc_error_free(cmcp_rpc_error_t *e);
+
 /* ------------------------------------------------------------------ */
 /* JSON-RPC message (discriminated union)                              */
 /* ------------------------------------------------------------------ */

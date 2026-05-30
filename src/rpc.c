@@ -108,7 +108,7 @@ static cmcp_rpc_error_t *rpc_error_new(int code, const char *message,
     return e;
 }
 
-static void rpc_error_free(cmcp_rpc_error_t *e) {
+void cmcp_rpc_error_free(cmcp_rpc_error_t *e) {
     if (!e) return;
     free(e->message);
     cmcp_json_free(e->data);
@@ -135,7 +135,7 @@ void cmcp_rpc_message_clear(cmcp_rpc_message_t *m) {
     free(m->method);          m->method = NULL;
     cmcp_json_free(m->params); m->params = NULL;
     cmcp_json_free(m->result); m->result = NULL;
-    rpc_error_free(m->error);  m->error  = NULL;
+    cmcp_rpc_error_free(m->error);  m->error  = NULL;
 }
 
 /* ====================================================================== */

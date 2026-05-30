@@ -1349,6 +1349,143 @@ int cmcp_client_resource_read(cmcp_client_t *c, const char *uri,
     return CMCP_OK;
 }
 
+/* Build a synthesised JSON-RPC error for the CMCP_TOOL_ERR_PROTOCOL
+ * paths where there is no wire response to draw from (caller misuse,
+ * transport failure). NULL message becomes an empty string so the
+ * caller never has to NULL-guard ->message. Returns NULL on alloc
+ * failure — caller must handle that (the helper degrades to dropping
+ * the rpc_err output entirely). */
+static cmcp_rpc_error_t *make_synth_error(int code, const char *message) {
+    cmcp_rpc_error_t *e = (cmcp_rpc_error_t *)calloc(1, sizeof *e);
+    if (!e) return NULL;
+    e->code = code;
+    e->message = xstrdup(message ? message : "");
+    if (!e->message) { free(e); return NULL; }
+    return e;
+}
+
+/* Helper: stash an error into *out_rpc_err if the caller asked for it,
+ * otherwise free it. Either way the helper meets its "exactly one
+ * populated" contract from the caller's seat. */
+static void deliver_rpc_err(cmcp_rpc_error_t *err,
+                              cmcp_rpc_error_t **out_rpc_err) {
+    if (out_rpc_err) *out_rpc_err = err;
+    else             cmcp_rpc_error_free(err);
+}
+
+cmcp_tool_outcome_t cmcp_client_tool_call(cmcp_client_t *c,
+                                            const char *name,
+                                            cmcp_json_t *args,
+                                            cmcp_json_t **out_result,
+                                            char **out_text,
+                                            cmcp_rpc_error_t **out_rpc_err) {
+    if (out_result)  *out_result  = NULL;
+    if (out_text)    *out_text    = NULL;
+    if (out_rpc_err) *out_rpc_err = NULL;
+
+    if (!c || !name) {
+        cmcp_json_free(args);
+        deliver_rpc_err(
+            make_synth_error(CMCP_RPC_INVALID_PARAMS,
+                              "cmcp_client_tool_call: NULL client or tool name"),
+            out_rpc_err);
+        return CMCP_TOOL_ERR_PROTOCOL;
+    }
+
+    /* Build params: {"name":<name>, "arguments":<args>}. NULL args
+     * becomes an empty object so the wire stays well-formed and
+     * server-side schema validation still gets to run against the
+     * tool's declared schema. */
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) {
+        cmcp_json_free(args);
+        deliver_rpc_err(
+            make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"),
+            out_rpc_err);
+        return CMCP_TOOL_ERR_PROTOCOL;
+    }
+    cmcp_json_object_set(params, "name", cmcp_json_new_string(name));
+    cmcp_json_object_set(params, "arguments",
+                          args ? args : cmcp_json_new_object());
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "tools/call", params, &resp);
+    if (rc != CMCP_OK) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "tools/call transport failed: %s",
+                 cmcp_errstr(rc));
+        deliver_rpc_err(make_synth_error(CMCP_RPC_INTERNAL_ERROR, buf),
+                         out_rpc_err);
+        return CMCP_TOOL_ERR_PROTOCOL;
+    }
+
+    /* Channel-level error: peer sent a JSON-RPC error frame. */
+    if (resp.error) {
+        cmcp_rpc_error_t *err = resp.error;
+        resp.error = NULL;                 /* detach before clear */
+        cmcp_rpc_message_clear(&resp);
+        deliver_rpc_err(err, out_rpc_err);
+        return CMCP_TOOL_ERR_PROTOCOL;
+    }
+
+    /* No result is a malformed response — treat as protocol error. */
+    if (!resp.result || resp.result->type != CMCP_JSON_OBJECT) {
+        cmcp_rpc_message_clear(&resp);
+        deliver_rpc_err(
+            make_synth_error(CMCP_RPC_INTERNAL_ERROR,
+                              "tools/call response missing result object"),
+            out_rpc_err);
+        return CMCP_TOOL_ERR_PROTOCOL;
+    }
+
+    /* Tool-level error: result.isError == true. Extract the first
+     * content[].text as the human-prose reason; empty string if the
+     * server reported isError without any text content. */
+    const cmcp_json_t *is_err = cmcp_json_object_get(resp.result, "isError");
+    if (is_err && is_err->type == CMCP_JSON_BOOL && is_err->b) {
+        const cmcp_json_t *content = cmcp_json_object_get(resp.result,
+                                                            "content");
+        const char *text = "";
+        size_t      tlen = 0;
+        if (content && content->type == CMCP_JSON_ARRAY &&
+            content->arr.len > 0) {
+            const cmcp_json_t *item = content->arr.items[0];
+            if (item && item->type == CMCP_JSON_OBJECT) {
+                const cmcp_json_t *t = cmcp_json_object_get(item, "text");
+                if (t && t->type == CMCP_JSON_STRING) {
+                    text = t->str.s;
+                    tlen = t->str.len;
+                }
+            }
+        }
+        char *buf = (char *)malloc(tlen + 1);
+        if (!buf) {
+            cmcp_rpc_message_clear(&resp);
+            deliver_rpc_err(
+                make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"),
+                out_rpc_err);
+            return CMCP_TOOL_ERR_PROTOCOL;
+        }
+        memcpy(buf, text, tlen);
+        buf[tlen] = '\0';
+        cmcp_rpc_message_clear(&resp);
+
+        if (out_text) *out_text = buf;
+        else          free(buf);
+        return CMCP_TOOL_ERR_TOOL_LEVEL;
+    }
+
+    /* Success: hand the result object out by ownership transfer. */
+    cmcp_json_t *result = resp.result;
+    resp.result = NULL;                    /* detach before clear */
+    cmcp_rpc_message_clear(&resp);
+
+    if (out_result) *out_result = result;
+    else            cmcp_json_free(result);
+    return CMCP_TOOL_OK;
+}
+
 int cmcp_client_prompt_get(cmcp_client_t *c, const char *name,
                             cmcp_json_t *args,
                             cmcp_json_t **out_messages) {

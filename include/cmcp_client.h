@@ -260,6 +260,74 @@ int cmcp_client_prompt_get(cmcp_client_t *c, const char *name,
                             cmcp_json_t *args,
                             cmcp_json_t **out_messages);
 
+/* Outcome of a cmcp_client_tool_call. The MCP `tools/call` method can
+ * fail in two distinct ways the host has to reason about separately:
+ *
+ *   - a JSON-RPC error on the channel (peer rejected the call,
+ *     transport failed mid-flight, schema rejection surfaced as
+ *     -32602, unknown tool surfaced as -32602 with structured data),
+ *   - a tool-level error (handler succeeded at the channel level but
+ *     reported a failure in result.isError + result.content[]).
+ *
+ * Hosts that try to flatten this into a single resp.error check miss
+ * the tool-level case; hosts that only check result.isError miss the
+ * protocol case. The 3-way outcome puts both into a single switch. */
+typedef enum {
+    CMCP_TOOL_OK             = 0, /* success, *out_result is owned by caller */
+    CMCP_TOOL_ERR_TOOL_LEVEL = 1, /* tool said no — *out_text is owned by caller */
+    CMCP_TOOL_ERR_PROTOCOL   = 2, /* channel said no — *out_rpc_err is owned by caller */
+} cmcp_tool_outcome_t;
+
+/* Call a tool, flatten the two-channel error model into one outcome.
+ *
+ * `args` is consumed (may be NULL — the helper sends `{}` in that case
+ * to keep the wire well-formed). On return EXACTLY ONE of *out_result
+ * / *out_text / *out_rpc_err is populated, matching the outcome enum.
+ *
+ *   CMCP_TOOL_OK              *out_result   = result object (owned;
+ *                                              free with cmcp_json_free).
+ *                                              Includes content[],
+ *                                              structuredContent (if
+ *                                              the tool produced one),
+ *                                              and isError == false.
+ *
+ *   CMCP_TOOL_ERR_TOOL_LEVEL  *out_text     = first content[].text as a
+ *                                              malloc'd NUL-terminated
+ *                                              string (owned; free with
+ *                                              free()). Empty string if
+ *                                              the server set isError
+ *                                              without any text content.
+ *
+ *   CMCP_TOOL_ERR_PROTOCOL    *out_rpc_err  = owned cmcp_rpc_error_t
+ *                                              (free with
+ *                                              cmcp_rpc_error_free).
+ *                                              Carries the wire error
+ *                                              (e.g. -32602 schema
+ *                                              rejection with
+ *                                              structured data, -32601
+ *                                              method not found,
+ *                                              -32603 internal error),
+ *                                              OR a synthesized error
+ *                                              when the failure was
+ *                                              transport-side (the
+ *                                              call never reached the
+ *                                              peer or the response
+ *                                              never came back).
+ *
+ * Any of the three out_* may be NULL — passing NULL just discards that
+ * branch of the result. Whichever pointer would have received the
+ * payload is silently freed.
+ *
+ * A NULL `c` or NULL `name` is reported as CMCP_TOOL_ERR_PROTOCOL with
+ * a synthesized -32602 error so the caller's `switch` still handles
+ * it without falling through to a default arm. */
+cmcp_tool_outcome_t cmcp_client_tool_call(cmcp_client_t *c,
+                                            const char *name,
+                                            cmcp_json_t *args,
+                                            cmcp_json_t **out_result,
+                                            char **out_text,
+                                            cmcp_rpc_error_t **out_rpc_err);
+
 /* ====================================================================== */
 /* Sampling (server → host LLM call)                                        */
 /* ====================================================================== */

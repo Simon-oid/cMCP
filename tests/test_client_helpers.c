@@ -79,6 +79,33 @@ static int noop_tool(const cmcp_json_t *arguments, void *userdata,
     return *out_content ? CMCP_OK : CMCP_ENOMEM;
 }
 
+/* echo_tool — return the supplied "message" argument back as content. */
+static int echo_tool(const cmcp_json_t *arguments, void *userdata,
+                      cmcp_handler_ctx_t *hctx,
+                      cmcp_json_t **out_content, int *out_is_error) {
+    (void)userdata; (void)hctx; (void)out_is_error;
+    const cmcp_json_t *m = arguments
+        ? cmcp_json_object_get(arguments, "message") : NULL;
+    const char *msg = (m && m->type == CMCP_JSON_STRING) ? m->str.s : "";
+    *out_content = cmcp_tool_text_content(msg);
+    return *out_content ? CMCP_OK : CMCP_ENOMEM;
+}
+
+static const char echo_schema[] =
+    "{\"type\":\"object\","
+     "\"properties\":{\"message\":{\"type\":\"string\",\"minLength\":1}},"
+     "\"required\":[\"message\"]}";
+
+/* fail_tool — always reports a tool-level error with explanatory text. */
+static int fail_tool(const cmcp_json_t *arguments, void *userdata,
+                      cmcp_handler_ctx_t *hctx,
+                      cmcp_json_t **out_content, int *out_is_error) {
+    (void)arguments; (void)userdata; (void)hctx;
+    *out_content = cmcp_tool_text_content("intentional handler failure");
+    *out_is_error = 1;
+    return *out_content ? CMCP_OK : CMCP_ENOMEM;
+}
+
 static const char tool_schema_empty[] =
     "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
 
@@ -451,6 +478,225 @@ static void test_prompt_get_unknown(void) {
 }
 
 /* ====================================================================== */
+/* test_tool_call_ok                                                        */
+/* ====================================================================== */
+
+static void test_tool_call_ok(void) {
+    cmcp_server_t *srv = cmcp_server_new("tc-ok-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "echo"; t.description = "echo back";
+    t.input_schema = echo_schema; t.handler = echo_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    cmcp_json_t *args = cmcp_json_new_object();
+    cmcp_json_object_set(args, "message", cmcp_json_new_string("hi"));
+
+    cmcp_json_t      *result  = NULL;
+    char             *text    = NULL;
+    cmcp_rpc_error_t *rpc_err = NULL;
+    cmcp_tool_outcome_t out = cmcp_client_tool_call(
+        w.cli, "echo", args, &result, &text, &rpc_err);
+
+    TEST_ASSERT(out == CMCP_TOOL_OK);
+    TEST_ASSERT(result != NULL);
+    TEST_ASSERT(text == NULL);
+    TEST_ASSERT(rpc_err == NULL);
+
+    /* Peek at the result to confirm it really carries content[0].text. */
+    const cmcp_json_t *content = cmcp_json_object_get(result, "content");
+    TEST_ASSERT(content && content->type == CMCP_JSON_ARRAY);
+    TEST_ASSERT(content->arr.len == 1);
+    const cmcp_json_t *first = content->arr.items[0];
+    const cmcp_json_t *txt = cmcp_json_object_get(first, "text");
+    TEST_ASSERT(txt && txt->type == CMCP_JSON_STRING);
+    TEST_ASSERT(strcmp(txt->str.s, "hi") == 0);
+
+    cmcp_json_free(result);
+    tear_down(&w);
+}
+
+/* ====================================================================== */
+/* test_tool_call_tool_level_error                                          */
+/* ====================================================================== */
+
+static void test_tool_call_tool_level_error(void) {
+    cmcp_server_t *srv = cmcp_server_new("tc-tle-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "fail"; t.description = "always fails";
+    t.input_schema = tool_schema_empty; t.handler = fail_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    cmcp_json_t      *result  = NULL;
+    char             *text    = NULL;
+    cmcp_rpc_error_t *rpc_err = NULL;
+    cmcp_tool_outcome_t out = cmcp_client_tool_call(
+        w.cli, "fail", NULL, &result, &text, &rpc_err);
+
+    TEST_ASSERT(out == CMCP_TOOL_ERR_TOOL_LEVEL);
+    TEST_ASSERT(result == NULL);
+    TEST_ASSERT(text != NULL);
+    TEST_ASSERT(rpc_err == NULL);
+    TEST_ASSERT(strcmp(text, "intentional handler failure") == 0);
+
+    free(text);
+    tear_down(&w);
+}
+
+/* ====================================================================== */
+/* test_tool_call_protocol_unknown_tool                                     */
+/* ====================================================================== */
+/* cMCP's server reports an unknown tool name as -32602 INVALID_PARAMS
+ * with structured `{name: "<unknown>"}` data (see test_tools.c). The
+ * helper surfaces that on the protocol channel. */
+
+static void test_tool_call_protocol_unknown_tool(void) {
+    cmcp_server_t *srv = cmcp_server_new("tc-unk-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "exists"; t.input_schema = tool_schema_empty;
+    t.handler = noop_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    cmcp_json_t      *result  = NULL;
+    char             *text    = NULL;
+    cmcp_rpc_error_t *rpc_err = NULL;
+    cmcp_tool_outcome_t out = cmcp_client_tool_call(
+        w.cli, "ghost", NULL, &result, &text, &rpc_err);
+
+    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(result == NULL);
+    TEST_ASSERT(text == NULL);
+    TEST_ASSERT(rpc_err != NULL);
+    TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
+    TEST_ASSERT(rpc_err->message != NULL);
+    /* Structured data carries {name: "ghost"} — confirms the error
+     * reached the helper unmodified. */
+    TEST_ASSERT(rpc_err->data && rpc_err->data->type == CMCP_JSON_OBJECT);
+    const cmcp_json_t *nm = cmcp_json_object_get(rpc_err->data, "name");
+    TEST_ASSERT(nm && nm->type == CMCP_JSON_STRING);
+    TEST_ASSERT(strcmp(nm->str.s, "ghost") == 0);
+
+    cmcp_rpc_error_free(rpc_err);
+    tear_down(&w);
+}
+
+/* ====================================================================== */
+/* test_tool_call_protocol_schema_violation                                 */
+/* ====================================================================== */
+/* Arguments that fail the tool's input_schema. cMCP's server surfaces
+ * this as -32602 with `{path, keyword, message}` structured data — the
+ * shape D1 finding F2 called out as the structured channel.
+ *
+ * NOTE: this also locks in the documentation-fix scope of A3 — the
+ * playbook claims this path is -32602 and the dogfood doc confirms
+ * cMCP's server hands it back here. */
+
+static void test_tool_call_protocol_schema_violation(void) {
+    cmcp_server_t *srv = cmcp_server_new("tc-sv-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "echo"; t.input_schema = echo_schema; t.handler = echo_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    /* Empty string violates minLength: 1. */
+    cmcp_json_t *args = cmcp_json_new_object();
+    cmcp_json_object_set(args, "message", cmcp_json_new_string(""));
+
+    cmcp_json_t      *result  = NULL;
+    char             *text    = NULL;
+    cmcp_rpc_error_t *rpc_err = NULL;
+    cmcp_tool_outcome_t out = cmcp_client_tool_call(
+        w.cli, "echo", args, &result, &text, &rpc_err);
+
+    /* cMCP may surface schema rejection on either channel — the spec
+     * (2025-11-25) prefers tool-level isError:true. We accept either
+     * since A3's doc fix follows whatever cMCP actually does. */
+    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL ||
+                 out == CMCP_TOOL_ERR_TOOL_LEVEL);
+    TEST_ASSERT(result == NULL);
+
+    if (out == CMCP_TOOL_ERR_PROTOCOL) {
+        TEST_ASSERT(rpc_err != NULL);
+        TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
+        cmcp_rpc_error_free(rpc_err);
+    } else {
+        TEST_ASSERT(text != NULL);
+        free(text);
+    }
+    tear_down(&w);
+}
+
+/* ====================================================================== */
+/* test_tool_call_null_args                                                 */
+/* ====================================================================== */
+/* args=NULL must not crash; helper sends `{}` so the wire stays
+ * well-formed and the schema validator sees an empty-but-present
+ * arguments object. */
+
+static void test_tool_call_null_args(void) {
+    cmcp_server_t *srv = cmcp_server_new("tc-null-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "ping"; t.input_schema = tool_schema_empty;
+    t.handler = noop_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    cmcp_json_t *result = NULL;
+    cmcp_tool_outcome_t out = cmcp_client_tool_call(
+        w.cli, "ping", NULL, &result, NULL, NULL);
+    TEST_ASSERT(out == CMCP_TOOL_OK);
+    TEST_ASSERT(result != NULL);
+    cmcp_json_free(result);
+
+    tear_down(&w);
+}
+
+/* ====================================================================== */
+/* test_tool_call_protocol_synth_error                                      */
+/* ====================================================================== */
+/* NULL client / NULL name must not crash; helper returns
+ * CMCP_TOOL_ERR_PROTOCOL with a synthesised -32602 so the host's
+ * switch handles it without falling through. args must still be
+ * consumed (no leak). */
+
+static void test_tool_call_protocol_synth_error(void) {
+    cmcp_json_t      *result  = NULL;
+    char             *text    = NULL;
+    cmcp_rpc_error_t *rpc_err = NULL;
+
+    cmcp_tool_outcome_t out = cmcp_client_tool_call(
+        NULL, "x",
+        cmcp_json_new_object()  /* must be consumed */,
+        &result, &text, &rpc_err);
+
+    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(result == NULL);
+    TEST_ASSERT(text == NULL);
+    TEST_ASSERT(rpc_err != NULL);
+    TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
+    cmcp_rpc_error_free(rpc_err);
+
+    /* Same but with NULL out_rpc_err — synth error must be silently
+     * freed, not leaked. */
+    out = cmcp_client_tool_call(NULL, "x",
+                                  cmcp_json_new_object(),
+                                  NULL, NULL, NULL);
+    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
+}
+
+/* ====================================================================== */
 /* test_einval — every helper rejects NULL inputs                           */
 /* ====================================================================== */
 
@@ -482,6 +728,12 @@ int main(void) {
     TEST_RUN(test_resource_read_blob);
     TEST_RUN(test_prompt_get_basic);
     TEST_RUN(test_prompt_get_unknown);
+    TEST_RUN(test_tool_call_ok);
+    TEST_RUN(test_tool_call_tool_level_error);
+    TEST_RUN(test_tool_call_protocol_unknown_tool);
+    TEST_RUN(test_tool_call_protocol_schema_violation);
+    TEST_RUN(test_tool_call_null_args);
+    TEST_RUN(test_tool_call_protocol_synth_error);
     TEST_RUN(test_einval);
     TEST_DONE();
 }
