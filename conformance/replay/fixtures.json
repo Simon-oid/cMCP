@@ -75,6 +75,44 @@
       ]
     },
     {
+      "name": "crag-mcp/dogfood/session-2026-05-30",
+      "_note": [
+        "End-to-end butlerbot-shaped session captured under cmcp-tee.",
+        "Driven by tools/dogfood-crag-host/ after the v0.6.0 O1 rewrite,",
+        "so the wire shape is what the A1/A2 client helpers produce.",
+        "13 RPC calls: initialize, notif/initialized, tools/list,",
+        "resources/read, 6x tools/call (3 sync + 3 sequential fan), 2x",
+        "schema-rejection tools/call (empty query, k=999 -> result-channel",
+        "isError per MCP 2025-11-25), 1x tools/call against an unknown",
+        "tool (-32602). DB is an empty file at replay time so the",
+        "embed-then-cosine-search path runs but every result is",
+        "'(no matching chunks)' - which is stable, hence reproducible.",
+        "Embed backend pinned to ollama + mxbai-embed-large; the",
+        "fixture skips if the ollama binary is not on PATH."
+      ],
+      "fixture": "conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl",
+      "server": "tools/crag-mcp/crag-mcp",
+      "args": ["--db", "/tmp/cmcp-replay-dogfood.db"],
+      "env": {
+        "CRAG_EMBED_BACKEND": "ollama",
+        "CRAG_EMBED_MODEL": "mxbai-embed-large",
+        "CMCP_WORKERS": "1"
+      },
+      "setup": [
+        "rm -f /tmp/cmcp-replay-dogfood.db",
+        "touch /tmp/cmcp-replay-dogfood.db"
+      ],
+      "teardown": ["rm -f /tmp/cmcp-replay-dogfood.db"],
+      "output_masks": [
+        {"kind": "regex", "path": "/result/contents/0/text",
+         "pattern": "db:\\s+\\S+", "replacement": "db:     <masked>"}
+      ],
+      "prerequisites": [
+        {"kind": "file", "path": "tools/crag-mcp/crag-mcp"},
+        {"kind": "cmd",  "name": "ollama"}
+      ]
+    },
+    {
       "name": "crag-mcp/stats_resource_read",
       "fixture": "conformance/fixtures/crag-mcp/stats_resource_read.jsonl",
       "server": "tools/crag-mcp/crag-mcp",
