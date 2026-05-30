@@ -109,6 +109,18 @@ $(CRAG_MCP_BIN): $(CRAG_MCP_SRC) $(BUILT_LIBS)
 	    $(CRAG_DIR)/third_party/sqlite3.o \
 	    $(LDFLAGS) $(LDLIBS) -lm -ldl
 
+# dogfood-crag-host: opt-in target. The council's D1 verdict (2026-05-30)
+# called for a real butlerbot-shaped host harness driving crag-mcp end-to-end
+# under cmcp-tee, so we capture how the public client API actually feels
+# from the host author's seat. Not part of make all; output is the
+# findings doc, not the binary.
+DOGFOOD_CRAG_HOST_BIN := tools/dogfood-crag-host/dogfood-crag-host
+
+dogfood-crag-host: $(DOGFOOD_CRAG_HOST_BIN)
+
+$(DOGFOOD_CRAG_HOST_BIN): tools/dogfood-crag-host/main.c $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
 # --- Conformance harness ---------------------------------------------------
 # Opt-in: exercises cMCP against the MCP TypeScript reference implementation,
 # in both wire roles. Needs Node + npm + network (first run installs the
@@ -702,6 +714,6 @@ clean:
         fuzz-build fuzz-smoke docs \
         soak soak-churn soak-http soak-http-churn \
         bench bench-build bench-compare bench-compare-build \
-        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp conformance schema-conformance replay check-spec-drift \
+        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp dogfood-crag-host conformance schema-conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

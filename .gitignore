@@ -23,6 +23,7 @@ tools/crag-mcp/crag-mcp
 tools/cmcp-inspect/cmcp-inspect
 tools/filesystem-mcp/filesystem-mcp
 tools/cmcp-tee/cmcp-tee
+tools/dogfood-crag-host/dogfood-crag-host
 
 # Example binaries
 examples/echo-server
