@@ -217,5 +217,17 @@ git tag -a v0.5.0 -m "Tier 6: state-of-the-art library polish" HEAD
 git push --tags
 ```
 
+`v0.6.0` is the first **host-driven cut** — sized by the dogfood
+findings F1–F4 against a real consumer (`tools/crag-mcp/` driven by
+`tools/dogfood-crag-host/`) rather than by a spec axis. The tag is
+applied at release time against the "cut v0.6.0" commit (the
+paperwork roll-up that lands `CHANGELOG`, `README`, `cmcp.h`
+`CMCP_VERSION` bump, and this file):
+
+```bash
+git tag -a v0.6.0 -m "v0.6.0: first host-driven cut (A1/A2/A3 + dogfood replay)" HEAD
+git push --tags
+```
+
 Going forward, every CHANGELOG release section ships with its tag at
 release time — no retro work needed.

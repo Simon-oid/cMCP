@@ -29,6 +29,54 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
+**v0.6 — first host-driven cut (2026-05-30).** Sized by a real
+host's pain, not the spec. After Tier 6 closed at v0.5.0, the
+in-tree `tools/dogfood-crag-host/` was run as a butlerbot-shaped
+host against `tools/crag-mcp/` end-to-end under `tools/cmcp-tee/`.
+Four ergonomics findings (F1–F4) in the public client surface
+fell out. v0.6.0 is the additive closure of those findings, the
+rewritten dogfood harness that proves they hold, and a new
+replay-gated wire fixture capturing the post-fix shape. No
+protocol bump, no struct layout change, no removals — SemVer-minor.
+
+- **A1 — single-client typed helpers** on `cmcp_client_t`:
+  `tools_list` / `resources_list` / `prompts_list` /
+  `resource_read` / `prompt_get`. Returns the same
+  `cmcp_session_*_t` typedefs the multi-server aggregator uses,
+  with `.server`/`.qualified` NULL on single-client records.
+  Host code talking to one server no longer hand-walks
+  `cmcp_json_object_get("tools")` or wraps a single client in a
+  session.
+- **A2 — `cmcp_client_tool_call` + 3-way outcome enum.** Collapses
+  the JSON-RPC `response.error` vs `result.isError +
+  content[].text` two-channel error model into a single switch
+  with three outcomes (`CMCP_TOOL_OK` / `CMCP_TOOL_ERR_TOOL_LEVEL`
+  / `CMCP_TOOL_ERR_PROTOCOL`). Caller owns the populated branch;
+  `cmcp_rpc_error_free` is now public.
+- **A3 — doc tightenings.** `struct cmcp_json` gains a `@warning`
+  block directing host code to the typed accessors (the struct
+  layout is **not** SemVer-stable while the accessors are). The
+  crag-mcp + echo-server playbooks updated to the MCP 2025-11-25
+  Minor-5 convention: `tools/call` input-schema rejection surfaces
+  on the result channel as `isError:true + content[].text`, not
+  as JSON-RPC `-32602`.
+- **Dogfood harness rewrite + replay gate.** `tools/dogfood-crag-host/`
+  now uses only A1/A2 — zero direct `cmcp_json_object_get`, zero
+  direct `cmcp_rpc_message_t`, one switch per `tools/call`. The
+  captured wire lands as a permanent regression bank at
+  `conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl`,
+  registered in `make replay`.
+
+Two v0.7-candidate findings surfaced by the rewrite itself —
+`cmcp_client_tool_call_async` + a typed wait (to keep parallel
+fan-out in the flattened model), and `cmcp_client_tool_call_text`
+(to flatten `content[].text` on the OK path too) — are filed for
+v0.7. Tier 7's always-on quality posture (perf-regression CI gate,
+nightly fuzz, nightly soak, coverage delta, schema-corpus growth)
+remains the v0.7 tier.
+
+The Tier 6 quality bar that v0.6.0 is built on:
+
 **v0.5 — Tier 6 done (state-of-the-art library polish, 2026-05-29).**
 Built on Tier 5's agentic-readiness foundation (sanitisers, fuzzing,
 replay gate, playbooks). Seven axes, mapped from five quality lenses

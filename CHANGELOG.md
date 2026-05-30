@@ -4,6 +4,118 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## v0.6.0 — first host-driven cut (2026-05-30)
+
+The first release sized by **a real host's pain**, not the spec. After
+Tier 6 closed (v0.5.0, 2026-05-29) the council met to decide what
+v0.6.0 should target. The verdict from D1 — running
+`tools/dogfood-crag-host/` as a butlerbot-shaped host against the
+in-tree `tools/crag-mcp/` — surfaced four ergonomics findings
+(F1–F4) in the public client surface. v0.6.0 ships the additive
+closure of those findings, the rewritten dogfood harness that
+proves they hold, and a permanent replay-gated wire fixture
+capturing the new shape. No protocol bump, no struct layout
+change, no removals — SemVer-minor. Full origin in
+[`docs/dogfood-cragmcp.md`](docs/dogfood-cragmcp.md); release
+contract in [`docs/v0.6.0-acceptance.md`](docs/v0.6.0-acceptance.md).
+
+### Headline
+
+- **A1 (closes F1)** — single-client typed helpers on
+  `cmcp_client_t`:
+  - `cmcp_client_tools_list`     → `cmcp_session_tool_t[]`
+  - `cmcp_client_resources_list` → `cmcp_session_resource_t[]`
+  - `cmcp_client_prompts_list`   → `cmcp_session_prompt_t[]`
+  - `cmcp_client_resource_read`  → owned text payload
+                                   (blob bodies surface as
+                                   `CMCP_EUNSUPPORTED`)
+  - `cmcp_client_prompt_get`     → owned `cmcp_json_t` messages
+                                   array
+  Pagination via `nextCursor` is consumed automatically. Records
+  reuse the `cmcp_session_*_t` typedefs already in
+  `include/cmcp_session.h`; on single-client records the
+  `.server` and `.qualified` fields are NULL by contract. Host
+  code that talks to one server no longer has to hand-walk
+  `cmcp_json_object_get("tools")` or wrap a single client in a
+  session aggregator just to get a typed shape.
+- **A2 (closes F2)** — `cmcp_client_tool_call` flattener +
+  `cmcp_tool_outcome_t` 3-way enum:
+  - `CMCP_TOOL_OK`              → `*out_result`  (owned `cmcp_json_t`)
+  - `CMCP_TOOL_ERR_TOOL_LEVEL`  → `*out_text`    (owned C string)
+  - `CMCP_TOOL_ERR_PROTOCOL`    → `*out_rpc_err` (owned
+                                                  `cmcp_rpc_error_t`)
+  Collapses the two-channel error model (JSON-RPC `response.error`
+  vs `result.isError + content[].text`) that the dogfood harness
+  mis-read on its first run into a single switch with three
+  outcomes. Caller may pass NULL for any out_*; helper silently
+  frees that branch. `args` is consumed in every code path,
+  NULL is upgraded to `{}` so the wire stays well-formed. To
+  make `CMCP_TOOL_ERR_PROTOCOL` ownership real,
+  `cmcp_rpc_error_free` is now public.
+- **A3 (closes F3 + F4)** — doc tightenings:
+  - `include/cmcp_json.h`'s `struct cmcp_json` gains a `@warning`
+    block directing host code to the five typed accessor
+    families (`cmcp_json_string`, `_int`, `_bool`,
+    `_array_at`, `_object_get` + sizes). States explicitly that
+    the struct layout is **not** SemVer-stable while the
+    accessors are.
+  - `conformance/playbooks/crag-mcp.md` T5 and
+    `conformance/playbooks/echo-server.md` T9 updated to the MCP
+    `2025-11-25` Minor-5 convention: input-schema rejection on
+    `tools/call` surfaces as `result.isError:true +
+    content[].text` (the result channel, so the model can
+    self-correct), **not** as JSON-RPC `-32602`. The pre-2025-11-25
+    `-32602` shape becomes the "Watch for" regression signal.
+- **O1** — `tools/dogfood-crag-host/` rewritten to use ONLY the
+  A1/A2 helpers. Zero direct `cmcp_json_object_get` calls; zero
+  direct `cmcp_rpc_message_t` declarations; every `tools/call`
+  site is a single switch on `cmcp_tool_outcome_t`. Two new
+  v0.7-candidate findings surfaced by the rewrite itself:
+  (a) `cmcp_client_tool_call_async` + a typed
+  `cmcp_client_tool_wait` to keep parallel fan-out in the
+  flattened model (A1/A2 are sync-only; the rewrite degraded
+  step 5 from async-parallel to sequential fan to avoid
+  re-importing the two-channel error model); (b)
+  `cmcp_client_tool_call_text` to flatten `content[].text` on
+  the OK path too.
+- **O3** — new replay-gated fixture
+  `conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl`
+  captured under `tools/cmcp-tee/` from the rewritten harness
+  against an empty DB. Registered in
+  `conformance/replay/fixtures.json` with regex masking of the
+  `db:` line in `crag://stats` (only env-variable field) and
+  `CMCP_WORKERS=1` pinned so burst-pumped input matches the
+  captured sequential interleaving. Prereqs: `tools/crag-mcp/crag-mcp`
+  on disk + `ollama` on PATH (skips cleanly on hosts without
+  ollama, e.g. CI).
+
+### Quality matrix (all green)
+
+| Gate | Command | State |
+|---|---|---|
+| Unit tests | `make test` | 23 binaries / 2922+ assertions pass |
+| Valgrind | `make valgrind` | leak-clean |
+| ASan/UBSan | `make test-asan` | clean |
+| TSan | `make test-tsan` | clean |
+| Replay | `make replay` | 6 passed, 1 skipped (CRAG_TEST_DB), 0 failed |
+| Schema conformance | `make schema-conformance` | 83/83 cMCP vs Ajv agreement |
+| Fuzz smoke | `make fuzz-smoke` | no crashes (60s/harness × 4) |
+| Conformance | `make conformance` | green vs TS reference SDK |
+
+### Out of scope (deliberate, for v0.7)
+
+- F5 (JSON helper naming consistency `cmcp_json_new_string` vs
+  `cmcp_json_object_set`) — paper cut, rename is an ABI break.
+- F6 (server-concurrency capability flag) — spec-level
+  conversation, not a vendor-prefixed extension.
+- Tier 7 axes (perf-regression CI gate, nightly fuzz, nightly
+  soak, coverage delta, schema-conformance corpus 83 → 500+).
+  All five remain filed in `TODO.md` as the v0.7 tier.
+- The two v0.7-candidate findings surfaced by O1
+  (`cmcp_client_tool_call_async` + typed wait;
+  `cmcp_client_tool_call_text` content shortcut) — recorded in
+  the dogfood log for future tiering.
+
 ## v0.5.0 — Tier 6 (state-of-the-art library polish, 2026-05-29)
 
 Seven axes mapped from five quality lenses (QUALITY / PROFESSIONALISM /

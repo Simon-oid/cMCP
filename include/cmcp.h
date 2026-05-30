@@ -12,9 +12,9 @@
 #ifndef CMCP_H
 #define CMCP_H
 
-/** Package version of this cMCP build (e.g. "0.5.0"). Independent of
+/** Package version of this cMCP build (e.g. "0.6.0"). Independent of
  *  `CMCP_PROTOCOL_VERSION` — see docs/SEMVER.md. */
-#define CMCP_VERSION       "0.5.0"
+#define CMCP_VERSION       "0.6.0"
 
 /** MCP wire-protocol revision this cMCP build speaks (e.g.
  *  "2025-11-25"). Pinned per release; the handshake captures whatever
