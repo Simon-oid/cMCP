@@ -184,26 +184,30 @@ release:
 ## Retro-tagging (one-time, maintainer)
 
 Pre-policy releases `0.1.0` through `0.4.1` shipped without git tags.
-To attach annotated tags pointing at the "Closes Tier N" commits, the
-maintainer runs once:
+To attach annotated tags pointing at the closing commit for each tier,
+the maintainer runs once:
 
 ```bash
-# Tier 1 — protocol & stdio
-git tag -a v0.1.0 -m "Tier 1: protocol layer + stdio transport" $(git log --grep='Tier 1 closes\|Closes Tier 1' --format=%H | tail -1)
-# Tier 2 — HTTP transport (client+server)
-git tag -a v0.2.0 -m "Tier 2: HTTP transport (Streamable HTTP, client+server)" $(git log --grep='Tier 2 closes\|Closes Tier 2' --format=%H | tail -1)
-# Tier 3 — server registries + reference servers
-git tag -a v0.3.0 -m "Tier 3: server-side registries + filesystem-mcp + crag-mcp" $(git log --grep='Tier 3 closes\|Closes Tier 3' --format=%H | tail -1)
-# Tier 4 — agentic primitives
-git tag -a v0.4.0 -m "Tier 4: structured output, elicitation, sampling, progress, cancel" $(git log --grep='Tier 4 closes\|Closes Tier 4' --format=%H | tail -1)
+# Tier 1 — protocol & stdio (closes at phase 1.9)
+git tag -a v0.1.0 -m "Tier 1: protocol layer + stdio transport" 8889388
+# Tier 2 — HTTP transport (closes at phase 2.6, "closes tier 2")
+git tag -a v0.2.0 -m "Tier 2: HTTP transport (Streamable HTTP, client+server)" 425fd4d
+# Tier 3 — server registries + reference servers (closes at phase 3.2+3.4+3.5)
+git tag -a v0.3.0 -m "Tier 3: server-side registries + filesystem-mcp + crag-mcp" 722cf07
+# Tier 4 — agentic primitives (0.4.0 cut commit: README+CHANGELOG roll-up)
+git tag -a v0.4.0 -m "Tier 4: structured output, elicitation, sampling, progress, cancel" 4087110
 # Tier 5 — agentic readiness (post-Tier-5 docs roll-up, before Tier 6 work began)
 git tag -a v0.4.1 -m "Tier 5: agentic readiness (fuzz, replay, soak, hostile-peer, sanitizer matrix)" a53fd8b
-git push --tags
+git push origin v0.1.0 v0.2.0 v0.3.0 v0.4.0 v0.4.1
 ```
 
-(Verify each `tail -1` resolves to the actual commit you want before
-pushing — `git log --grep=` is a best-effort search, not a guarantee.
-If a commit doesn't match, hand-roll the SHA in.)
+Each SHA above was verified against the matching `CHANGELOG.md` release
+date: the commit's author-date matches the date stamped on the
+release section, and no later commit changes anything user-visible
+between the tag point and the next release. If the history is ever
+rewritten such that one of these SHAs no longer exists, regenerate
+the list from `git log --oneline --reverse` rather than re-running a
+grep-based search.
 
 `v0.5.0` is the first **post-policy** release: it gets its tag at
 release time (not retro), pointing at the "cut v0.5.0" commit:
