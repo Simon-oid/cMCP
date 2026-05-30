@@ -126,11 +126,30 @@ response shape needs to advertise actual k returned vs requested.
 
 > Search the index using an empty query string.
 
-**Expected:** `-32602` schema error (the query schema should have
-`minLength:1`).
+**Expected:** the `tools/call` response is a successful JSON-RPC
+result whose body carries `isError:true` plus a `content` array of
+one text item naming the failed keyword. Per MCP 2025-11-25 (Minor
+5), `tools/call` argument-schema rejection is a *tool-execution*
+error, not a JSON-RPC protocol error — so it surfaces on the
+result channel (so the model can self-correct), NOT as `-32602` on
+the error channel. The query schema should carry `minLength:1`.
+
+Canonical wire shape (the captured echo-server fixture has the same
+shape — see `conformance/fixtures/echo-server/add_schema_type_mismatch.jsonl`):
+
+```json
+{"jsonrpc":"2.0","id":N,"result":{
+  "isError":true,
+  "content":[{"type":"text",
+              "text":"Invalid arguments for tool 'crag_search': ... (path: /query, keyword: minLength)"}]
+}}
+```
 
 **Watch for:** server happily runs an empty query → schema needs
-strengthening. Also a good fuzz-corpus seed.
+strengthening. Also a good fuzz-corpus seed. Server returns
+`-32602` on the error channel instead of `isError:true` on the
+result channel → the server is still emitting the pre-2025-11-25
+shape; bump the protocol version handling.
 
 ---
 

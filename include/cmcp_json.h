@@ -33,7 +33,23 @@ typedef enum {
 
 /** @brief Opaque-by-convention JSON tree node. Treat as opaque except
  *  via the accessor functions below; struct layout is exposed for
- *  efficient construction in hot paths only. */
+ *  efficient construction in hot paths only.
+ *
+ *  @warning Host code MUST go through the typed accessors:
+ *           - cmcp_json_string()      / cmcp_json_string_len()
+ *           - cmcp_json_int()         / cmcp_json_double()
+ *           - cmcp_json_bool()
+ *           - cmcp_json_array_at()    / cmcp_json_array_len()
+ *           - cmcp_json_object_get()  / cmcp_json_object_len()
+ *           Do not read the `union` members (`b`, `i`, `d`, `str.s`,
+ *           `arr.items`, `obj.keys`, ...) directly from outside the
+ *           library. The struct layout is published only so the
+ *           library's own hot paths can stack-build and pun cheaply;
+ *           it is NOT part of the SemVer-stable public surface and
+ *           may grow new tags, reorder fields, or change union shape
+ *           in a minor release. The accessors are. Code that pokes
+ *           the union will silently break on those bumps; code that
+ *           uses the accessors will not. */
 typedef struct cmcp_json cmcp_json_t;
 
 struct cmcp_json {

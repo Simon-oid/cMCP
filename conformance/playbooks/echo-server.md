@@ -137,27 +137,38 @@ short-circuit the zero path.
 
 > Try to use the add tool with a="hello" and b="world".
 
-**Expected:** server returns `-32602` with a structured `data` object
-naming the `type` keyword that failed; model surfaces the failure to
-the user instead of retrying blindly.
+**Expected:** server returns a successful JSON-RPC `result` whose
+body carries `isError:true` and a `content` array of one text item
+that names the failed schema keyword (`path: /a, keyword: type`).
+Per MCP 2025-11-25 (Minor 5), `tools/call` argument-schema rejection
+is a *tool-execution* error, not a JSON-RPC protocol error — it
+surfaces on the result channel so the model can read the message
+and self-correct. `-32602` on the error channel is reserved for
+structural protocol failures (missing `name`, unknown tool, bad
+`params` shape), NOT input-schema violations.
 
-**Watch for:** model retries the same call ≥3 times → either the error
-message doesn't say "must be integer", or the host doesn't relay
-structured error data to the model. Both are fixable. Note which.
+**Watch for:** model retries the same call ≥3 times → either the
+error text doesn't say "must be integer", or the host doesn't relay
+the result-channel `content[].text` to the model. Both are fixable.
+Note which.
 
 **Known host quirk (Claude Code):** Claude Code's MCP client both (a)
 pre-validates `tools/call` arguments against the advertised schema
-and short-circuits with a generic `-32602` *before sending*, and (b)
-when the server itself returns `-32602`, only surfaces `error.message`
-to the assistant — `error.data` is dropped. Net effect: running T9
-in-band tells you nothing about cMCP's error-data quality. To verify
-the *server*'s error shape, run via shell and inspect the wire
-transcript directly. Captured canonical shapes:
+and short-circuits with a generic `-32602` *before sending*, even
+though the server itself would have answered on the result channel,
+and (b) when the server returns `isError:true`, surfaces the
+`content[].text` to the assistant verbatim (no structured-data
+channel is involved). Net effect: running T9 in-band hides the
+server's actual reply shape behind the host's pre-validator. To
+verify the *server*'s wire shape, run via shell and inspect the
+wire transcript directly. Captured canonical shapes:
 
 - `conformance/fixtures/echo-server/add_schema_type_mismatch.jsonl`
 - `conformance/fixtures/echo-server/add_schema_missing_required.jsonl`
 
-Both show `data: {keyword, path, message}` populated correctly.
+Both show
+`result: {isError:true, content:[{type:"text", text:"Invalid arguments ... (path: /X, keyword: Y)"}]}`
+on the result channel.
 
 ---
 
