@@ -46,8 +46,9 @@ replay gate, playbooks). Seven axes, mapped from five quality lenses
   `docs/api/` (`make docs` + auto-published to GitHub Pages on `main`).
   [`docs/SEMVER.md`](docs/SEMVER.md) defines what's public, what's
   internal, and the bump policy. `v0.5.0` is the first post-policy
-  release; pre-policy `v0.1.0`…`v0.4.1` will be retro-tagged by the
-  maintainer per the SEMVER doc.
+  release. The pre-policy `v0.1.0`…`v0.4.1` series was retro-tagged
+  on release-cut day against the closing commit for each tier (the
+  SHAs are pinned in `docs/SEMVER.md`).
 - **Packaging.** `make install` (GNU layout, `PREFIX` + `DESTDIR`),
   pkg-config (`cmcp-{core,server,client}.pc`), CMake
   `find_package(cmcp)`, `make uninstall`, `make dist`. An external
