@@ -7,15 +7,25 @@
  * NOT a test — a use. Every "wait, the library should…" moment is a
  * finding for docs/dogfood-cragmcp.md.
  *
- * The harness intentionally exercises the patterns butlerbot will
- * use:
+ * v0.6.0 rewrite (O1, 2026-05-30): the harness now uses ONLY the
+ * typed helpers from A1 + A2. Zero direct cmcp_json_object_get,
+ * zero direct cmcp_rpc_message_t. Step 6 (error paths) is a single
+ * switch (cmcp_client_tool_call(...)) per call site. The original
+ * F1 (client-api-ergonomics) and F2 (error-model-bifurcation)
+ * findings are retired here — they reappear as ✓-closed markers so
+ * the wire log of a dogfood run still records what the new surface
+ * looks like in action.
+ *
+ * Pattern coverage (still the butlerbot shape):
  *   1. handshake + capability inspection (read server identity)
- *   2. list tools, walk the inputSchema for one of them
- *   3. read crag://stats as ambient context (resources path)
- *   4. run 3 sync searches, instrumented latency per call
- *   5. run 3 async searches in parallel, wait in any order
- *   6. error path: empty query (schema bound), oversized k
- *   7. tear down cleanly
+ *   2. cmcp_client_tools_list -> walk typed records
+ *   3. cmcp_client_resource_read -> ambient context (crag://stats)
+ *   4. 3 sync cmcp_client_tool_call -> 3-way outcome switch
+ *   5. (was parallel async) sequential fan — A1/A2 are sync-only;
+ *      see new finding for the async-typed gap
+ *   6. error paths: empty query, k=999 -> one switch per site
+ *   7. unknown-tool: one switch -> CMCP_TOOL_ERR_PROTOCOL
+ *   8. tear down cleanly
  *
  * Every step logs "expect" / "got" / "finding" lines to stderr.
  *
@@ -36,7 +46,8 @@
 #include "cmcp.h"
 #include "cmcp_client.h"
 #include "cmcp_json.h"
-#include "cmcp_types.h"
+#include "cmcp_session.h"   /* typed record shapes (cmcp_session_tool_t etc.) */
+#include "cmcp_types.h"     /* cmcp_rpc_error_t + cmcp_rpc_error_free */
 
 #include <errno.h>
 #include <stdio.h>
@@ -62,51 +73,69 @@ static int g_findings = 0;
     fprintf(stderr, "  >>> FINDING #%d (%s): %s\n", g_findings, label, body); \
 } while (0)
 
+#define CLOSED(label, body) \
+    fprintf(stderr, "  >>> CLOSED (%s): %s\n", label, body)
+
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
 }
 
-/* ---------- helpers ---------------------------------------------------- */
-
-/* Build {"name": <name>, "arguments": <args_obj>}. args_obj is consumed. */
-static cmcp_json_t *call_params(const char *name, cmcp_json_t *args_obj) {
-    cmcp_json_t *p = cmcp_json_new_object();
-    cmcp_json_object_set(p, "name", cmcp_json_new_string(name));
-    cmcp_json_object_set(p, "arguments", args_obj);
-    return p;
-}
-
-/* Print the first text content item from a tools/call result, or "<no
- * text content>" if there isn't one. Returns 1 if the result is a
- * tool-level error (isError:true), 0 otherwise. */
-static int print_result_text(const cmcp_json_t *result, const char *label) {
-    const cmcp_json_t *is_err  = cmcp_json_object_get(result, "isError");
-    const cmcp_json_t *content = cmcp_json_object_get(result, "content");
-    int err = (is_err && cmcp_json_bool(is_err));
-    if (!content || content->type != CMCP_JSON_ARRAY || content->arr.len == 0) {
-        fprintf(stderr, "  %s: <no content>\n", label);
-        return err;
-    }
-    const cmcp_json_t *item = cmcp_json_array_at(content, 0);
-    const cmcp_json_t *text = cmcp_json_object_get(item, "text");
-    const char *s = cmcp_json_string(text);
-    size_t n = cmcp_json_string_len(text);
-    if (s) {
-        char buf[120];
+/* ---------- one-call-per-site tool_call helper printer -----------------
+ *
+ * Wraps cmcp_client_tool_call's 3-way switch into a "what should the host
+ * log?" decision. The harness uses this for every step 4 / 6 / 7 call
+ * site so the host's error handling is a single switch per call rather
+ * than two branches (response.error vs result.isError) the original
+ * harness had to write by hand. */
+static void log_tool_outcome(double dt_ms,
+                              const char *site,
+                              cmcp_tool_outcome_t outcome,
+                              cmcp_json_t *result_json,
+                              char *text,
+                              cmcp_rpc_error_t *rpc_err) {
+    switch (outcome) {
+    case CMCP_TOOL_OK: {
+        /* The OK channel still hands the host a raw cmcp_json_t — the
+         * host wants the first content[].text for display, but A1/A2
+         * don't have a flattener for the success path. emit_stable
+         * shows the whole shape; the v0.7 finding below pencils a
+         * cmcp_client_tool_call_text shortcut. */
+        char *s = cmcp_json_emit_stable(result_json);
+        size_t n = s ? strlen(s) : 0;
+        char buf[160];
         size_t take = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
-        memcpy(buf, s, take);
+        if (s) memcpy(buf, s, take);
         buf[take] = 0;
-        for (size_t i = 0; i < take; i++)
-            if (buf[i] == '\n') buf[i] = ' ';
-        fprintf(stderr, "  %s: \"%s%s\" (%zu items)\n",
-                label, buf, n > take ? "..." : "",
-                cmcp_json_array_len(content));
-    } else {
-        fprintf(stderr, "  %s: <first item has no text>\n", label);
+        for (size_t i = 0; i < take; i++) if (buf[i] == '\n') buf[i] = ' ';
+        fprintf(stderr, "  %s %.1fms: OK %s%s\n",
+                site, dt_ms, buf, n > take ? "..." : "");
+        free(s);
+        cmcp_json_free(result_json);
+        break;
     }
-    return err;
+    case CMCP_TOOL_ERR_TOOL_LEVEL: {
+        char buf[160];
+        size_t n = text ? strlen(text) : 0;
+        size_t take = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
+        if (text) memcpy(buf, text, take);
+        buf[take] = 0;
+        for (size_t i = 0; i < take; i++) if (buf[i] == '\n') buf[i] = ' ';
+        fprintf(stderr, "  %s %.1fms: TOOL_ERR \"%s%s\"\n",
+                site, dt_ms, buf, n > take ? "..." : "");
+        free(text);
+        break;
+    }
+    case CMCP_TOOL_ERR_PROTOCOL: {
+        fprintf(stderr, "  %s %.1fms: PROTOCOL code=%d msg=\"%s\"\n",
+                site, dt_ms,
+                rpc_err ? rpc_err->code : 0,
+                (rpc_err && rpc_err->message) ? rpc_err->message : "(null)");
+        cmcp_rpc_error_free(rpc_err);
+        break;
+    }
+    }
 }
 
 /* ---------- the session ----------------------------------------------- */
@@ -115,8 +144,9 @@ static int run_session(const char *server_path,
                         const char *db_path,
                         const char *tee_log,
                         const char *tee_path) {
-    /* The harness deliberately uses only the public client surface. If
-     * the API forces awkward shapes, those are findings. */
+    /* The harness deliberately uses only the A1/A2 public client
+     * surface. Anywhere the surface forces an awkward shape, that is
+     * a finding. */
 
     cmcp_client_t *cli = cmcp_client_new("dogfood-crag-host", "0.1.0");
     if (!cli) {
@@ -159,213 +189,182 @@ static int run_session(const char *server_path,
         cmcp_client_server_version(cli)  ? cmcp_client_server_version(cli)  : "(null)",
         cmcp_client_server_protocol(cli) ? cmcp_client_server_protocol(cli) : "(null)");
 
-    /* --- step 2: tools/list ------------------------------------------ */
-    STEP("tools/list and inspect inputSchema for crag_search");
-    EXPECT("a typed helper that returns an array of {name, description, schema}");
+    /* --- step 2: tools/list via cmcp_client_tools_list --------------- */
+    STEP("cmcp_client_tools_list (A1) and inspect typed records");
+    EXPECT("CMCP_OK + array of cmcp_session_tool_t with name/description/input_schema");
 
-    cmcp_rpc_message_t resp;
-    memset(&resp, 0, sizeof(resp));
-    rc = cmcp_client_request(cli, "tools/list", NULL, &resp);
-    if (rc != CMCP_OK || resp.error) {
-        fprintf(stderr, "FATAL: tools/list rc=%d error=%p\n", rc, (void *)resp.error);
-        cmcp_rpc_message_clear(&resp);
+    cmcp_session_tool_t *tools = NULL;
+    size_t tools_n = 0;
+    rc = cmcp_client_tools_list(cli, &tools, &tools_n);
+    if (rc != CMCP_OK) {
+        fprintf(stderr, "FATAL: cmcp_client_tools_list rc=%d\n", rc);
         cmcp_client_free(cli);
         return 1;
     }
-    const cmcp_json_t *tools_arr = cmcp_json_object_get(resp.result, "tools");
-    size_t tools_n = cmcp_json_array_len(tools_arr);
-    if (tools_n == 0) {
-        fprintf(stderr, "FATAL: tools/list result has no \"tools\" array or it is empty\n");
-        cmcp_rpc_message_clear(&resp);
-        cmcp_client_free(cli);
-        return 1;
+    GOT("%zu tools, typed records — no raw JSON walking", tools_n);
+    for (size_t i = 0; i < tools_n; i++) {
+        fprintf(stderr, "    [%zu] name=\"%s\" desc=%s schema=%s server=%s qualified=%s\n",
+                i,
+                tools[i].name ? tools[i].name : "(null)",
+                tools[i].description ? "<present>" : "<null>",
+                tools[i].input_schema ? "<present>" : "<null>",
+                tools[i].server ? tools[i].server : "<null (single-client)>",
+                tools[i].qualified ? tools[i].qualified : "<null (single-client)>");
     }
-    GOT("walked %zu tools by hand via cmcp_json_object_get(\"tools\")", tools_n);
-    FINDING("client-api-ergonomics",
-            "single-client tools/list returns raw JSON; the host walks "
-            "cmcp_json_object_get(\"tools\"), then per-tool "
-            "cmcp_json_object_get(\"name\"/\"description\"/\"inputSchema\"). "
-            "cmcp_session.h exposes a typed cmcp_session_tools_list returning "
-            "cmcp_session_tool_t[] — but only via the session aggregator. A "
-            "host talking to ONE server must either drop to raw JSON or wrap "
-            "one server in a session. Mirror the session helpers onto "
-            "cmcp_client_t (cmcp_client_tools_list, cmcp_client_resources_list, "
-            "cmcp_client_prompts_list).");
-    cmcp_rpc_message_clear(&resp);
+    CLOSED("F1 client-api-ergonomics-tools",
+           "A1 cmcp_client_tools_list closes the host-side hand-walk gap "
+           "for tools/list. .server/.qualified are NULL on single-client "
+           "records (documented).");
+    cmcp_session_tools_free(tools, tools_n);
 
-    /* --- step 3: resources/read crag://stats ------------------------ */
-    STEP("resources/read crag://stats (ambient-context pattern)");
-    EXPECT("a one-call helper returning the resource's text directly");
+    /* --- step 3: cmcp_client_resource_read -------------------------- */
+    STEP("cmcp_client_resource_read(\"crag://stats\") (A1, ambient-context pattern)");
+    EXPECT("CMCP_OK + owned text payload; no resp.result walking");
 
-    cmcp_json_t *rparams = cmcp_json_new_object();
-    cmcp_json_object_set(rparams, "uri", cmcp_json_new_string("crag://stats"));
-    memset(&resp, 0, sizeof(resp));
-    rc = cmcp_client_request(cli, "resources/read", rparams, &resp);
-    if (rc != CMCP_OK || resp.error) {
-        fprintf(stderr, "FATAL: resources/read rc=%d\n", rc);
-        cmcp_rpc_message_clear(&resp);
-        cmcp_client_free(cli);
-        return 1;
+    char *stats_text = NULL;
+    size_t stats_n = 0;
+    rc = cmcp_client_resource_read(cli, "crag://stats", &stats_text, &stats_n);
+    if (rc != CMCP_OK) {
+        fprintf(stderr, "  resource_read rc=%d (CMCP_ENOTFOUND/EUNSUPPORTED/EPROTOCOL paths covered by the helper)\n", rc);
+    } else if (stats_text) {
+        char buf[160];
+        size_t take = stats_n < sizeof(buf) - 1 ? stats_n : sizeof(buf) - 1;
+        memcpy(buf, stats_text, take);
+        buf[take] = 0;
+        for (size_t i = 0; i < take; i++) if (buf[i] == '\n') buf[i] = ' ';
+        GOT("stats text %zu bytes (preview): \"%s%s\"",
+            stats_n, buf, stats_n > take ? "..." : "");
     }
-    const cmcp_json_t *contents = cmcp_json_object_get(resp.result, "contents");
-    if (cmcp_json_array_len(contents) > 0) {
-        const cmcp_json_t *text =
-            cmcp_json_object_get(cmcp_json_array_at(contents, 0), "text");
-        const char *s = cmcp_json_string(text);
-        size_t n = cmcp_json_string_len(text);
-        if (s) {
-            char buf[160];
-            size_t take = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
-            memcpy(buf, s, take);
-            buf[take] = 0;
-            for (size_t i = 0; i < take; i++) if (buf[i] == '\n') buf[i] = ' ';
-            GOT("stats text (preview): \"%s%s\"", buf, n > take ? "..." : "");
-        }
-    }
-    FINDING("client-api-ergonomics",
-            "same shape: resources/read returns {contents:[{type,text|blob,...}]} "
-            "and the host hand-walks contents[0].text. Add "
-            "cmcp_client_resource_read(uri, out_text_or_blob).");
-    cmcp_rpc_message_clear(&resp);
+    CLOSED("F1 client-api-ergonomics-resources",
+           "A1 cmcp_client_resource_read closes the host-side hand-walk "
+           "gap for resources/read. Blob bodies surface as CMCP_EUNSUPPORTED, "
+           "so the host opts in to text-only without walking type tags.");
+    free(stats_text);
 
-    /* --- step 4: 3 sync searches ------------------------------------ */
-    STEP("3 sync crag_search calls, varying query, default k");
+    /* --- step 4: 3 sync crag_search via cmcp_client_tool_call ------- */
+    STEP("3 sync cmcp_client_tool_call (A2) — one 3-way switch per site");
 
     const char *queries[3] = {"schema validator", "HTTP transport", "fuzzing harness"};
     for (int i = 0; i < 3; i++) {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(queries[i]));
-        memset(&resp, 0, sizeof(resp));
+
+        cmcp_json_t      *result_json = NULL;
+        char             *err_text    = NULL;
+        cmcp_rpc_error_t *rpc_err     = NULL;
+        char site[64];
+        snprintf(site, sizeof(site), "search[%d] \"%s\"", i, queries[i]);
+
         double q0 = now_ms();
-        rc = cmcp_client_request(cli, "tools/call", call_params("crag_search", args), &resp);
+        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
+            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
         double q1 = now_ms();
-        if (rc != CMCP_OK) {
-            fprintf(stderr, "  search[%d]: rc=%d\n", i, rc);
-            cmcp_rpc_message_clear(&resp);
-            continue;
-        }
-        if (resp.error) {
-            fprintf(stderr, "  search[%d]: RPC error %d %s\n", i,
-                    resp.error->code,
-                    resp.error->message ? resp.error->message : "");
-            cmcp_rpc_message_clear(&resp);
-            continue;
-        }
-        char label[64];
-        snprintf(label, sizeof(label), "search[%d] %6.1fms \"%s\"",
-                 i, q1 - q0, queries[i]);
-        print_result_text(resp.result, label);
-        cmcp_rpc_message_clear(&resp);
+        log_tool_outcome(q1 - q0, site, outcome, result_json, err_text, rpc_err);
     }
 
-    /* --- step 5: 3 async searches in parallel ----------------------- */
-    STEP("3 async crag_search calls in parallel; wait in any order");
-    EXPECT("3 IDs, each completable independently, total time ~= max(single)");
+    /* --- step 5: was async-parallel; A1/A2 are sync-only ------------ */
+    STEP("sequential fan of 3 cmcp_client_tool_call (was async-parallel)");
+    EXPECT("3 sync calls; total time is sum, not max(single)");
 
-    long long ids[3];
-    double s0 = now_ms();
     const char *async_q[3] = {"json layer", "client async API", "transport vtable"};
+    double s0 = now_ms();
     for (int i = 0; i < 3; i++) {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(async_q[i]));
-        rc = cmcp_client_call_async(cli, "tools/call",
-                                    call_params("crag_search", args), &ids[i]);
-        if (rc != CMCP_OK) {
-            fprintf(stderr, "  call_async[%d] rc=%d\n", i, rc);
-            ids[i] = -1;
-        }
-    }
 
-    /* Reverse-order wait. */
-    for (int i = 2; i >= 0; i--) {
-        if (ids[i] < 0) continue;
-        memset(&resp, 0, sizeof(resp));
-        rc = cmcp_client_wait(cli, ids[i], &resp);
-        double sN = now_ms();
-        if (rc != CMCP_OK) {
-            fprintf(stderr, "  wait[%d] rc=%d\n", i, rc);
-            cmcp_rpc_message_clear(&resp);
-            continue;
-        }
-        char label[64];
-        snprintf(label, sizeof(label), "async[%d] (id=%lld) @+%6.1fms \"%s\"",
-                 i, ids[i], sN - s0, async_q[i]);
-        print_result_text(resp.result, label);
-        cmcp_rpc_message_clear(&resp);
+        cmcp_json_t      *result_json = NULL;
+        char             *err_text    = NULL;
+        cmcp_rpc_error_t *rpc_err     = NULL;
+        char site[64];
+        snprintf(site, sizeof(site), "fan[%d] @+%.1fms \"%s\"",
+                 i, now_ms() - s0, async_q[i]);
+
+        double q0 = now_ms();
+        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
+            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        double q1 = now_ms();
+        log_tool_outcome(q1 - q0, site, outcome, result_json, err_text, rpc_err);
     }
+    FINDING("v0.7-async-typed-tool-call",
+            "A1/A2 are sync-only. The async surface (cmcp_client_call_async + "
+            "cmcp_client_wait) still hands raw cmcp_rpc_message_t to the host, "
+            "so the rewrite cannot use it without re-importing the two-channel "
+            "error model A2 eliminated. v0.7 candidate: cmcp_client_tool_call_async("
+            "name, args, &id) returning a long long, paired with cmcp_client_tool_wait("
+            "id, &result, &text, &rpc_err) that yields the same 3-way outcome as A2. "
+            "Parallel fan-out then stays in the flattened model.");
 
     /* --- step 6: schema-rejection error paths ----------------------- */
-    STEP("error paths: empty query (minLength) and k=999 (maximum)");
-    EXPECT("tool-level isError:true with informative content text "
-           "(per MCP 2025-11-25 convention; NOT JSON-RPC -32602)");
+    STEP("error paths: empty query (minLength), k=999 (maximum) — one switch per site");
+    EXPECT("CMCP_TOOL_ERR_TOOL_LEVEL with informative text "
+           "(MCP 2025-11-25 routes input-schema rejection to the result channel)");
 
     {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(""));
-        memset(&resp, 0, sizeof(resp));
-        rc = cmcp_client_request(cli, "tools/call",
-                                 call_params("crag_search", args), &resp);
-        if (resp.error) {
-            fprintf(stderr, "  empty query → JSON-RPC error code=%d msg=\"%s\"\n",
-                    resp.error->code,
-                    resp.error->message ? resp.error->message : "(null)");
-        } else {
-            int is_err = print_result_text(resp.result, "empty query");
-            if (!is_err)
-                FINDING("schema-error-shape",
-                        "empty query was ACCEPTED (neither JSON-RPC error nor tool isError) — "
-                        "schema bound missing or validator broken");
-        }
-        cmcp_rpc_message_clear(&resp);
+        cmcp_json_t      *result_json = NULL;
+        char             *err_text    = NULL;
+        cmcp_rpc_error_t *rpc_err     = NULL;
+        double q0 = now_ms();
+        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
+            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        double q1 = now_ms();
+        log_tool_outcome(q1 - q0, "empty-query", outcome,
+                         result_json, err_text, rpc_err);
+        if (outcome == CMCP_TOOL_OK)
+            FINDING("schema-error-shape",
+                    "empty query was ACCEPTED — schema bound missing or validator broken");
     }
     {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string("anything"));
         cmcp_json_object_set(args, "k",     cmcp_json_new_int(999));
-        memset(&resp, 0, sizeof(resp));
-        rc = cmcp_client_request(cli, "tools/call",
-                                 call_params("crag_search", args), &resp);
-        if (resp.error) {
-            fprintf(stderr, "  k=999 → JSON-RPC error code=%d msg=\"%s\"\n",
-                    resp.error->code,
-                    resp.error->message ? resp.error->message : "(null)");
-        } else {
-            int is_err = print_result_text(resp.result, "k=999");
-            if (!is_err)
-                FINDING("schema-k-bound",
-                        "k=999 was ACCEPTED (neither JSON-RPC error nor tool isError) — "
-                        "schema bound missing or validator broken");
-        }
-        cmcp_rpc_message_clear(&resp);
+        cmcp_json_t      *result_json = NULL;
+        char             *err_text    = NULL;
+        cmcp_rpc_error_t *rpc_err     = NULL;
+        double q0 = now_ms();
+        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
+            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        double q1 = now_ms();
+        log_tool_outcome(q1 - q0, "k=999", outcome,
+                         result_json, err_text, rpc_err);
+        if (outcome == CMCP_TOOL_OK)
+            FINDING("schema-k-bound",
+                    "k=999 was ACCEPTED — schema bound missing or validator broken");
     }
+    CLOSED("F2 error-model-bifurcation",
+           "A2 cmcp_client_tool_call collapses the response.error / result.isError "
+           "two-channel model into a single 3-way switch. Step 6 has zero "
+           "two-branch error reads.");
 
-    FINDING("error-model-bifurcation",
-            "a tools/call can fail two ways the host must distinguish: (a) "
-            "JSON-RPC error in response.error (transport/method/protocol "
-            "errors), (b) tool-level error in result.isError=true + "
-            "result.content[].text (handler-reported errors, including "
-            "schema rejections per 2025-11-25). No client helper flattens "
-            "both into a single success/error path. cmcp_client_tool_call("
-            "name, args, &text, &is_error, &json_rpc_error) would.");
-
-    /* --- step 7: unknown tool name --------------------------------- */
-    STEP("error path: unknown tool name");
-    EXPECT("tool-level error or -32602; SOME signal that tells the host \"that name does not exist\"");
+    /* --- step 7: unknown tool name ---------------------------------- */
+    STEP("error path: unknown tool name — one switch");
+    EXPECT("CMCP_TOOL_ERR_PROTOCOL with -32602 + {name} structured data");
 
     {
         cmcp_json_t *args = cmcp_json_new_object();
-        memset(&resp, 0, sizeof(resp));
-        rc = cmcp_client_request(cli, "tools/call",
-                                 call_params("crag_doesnt_exist", args), &resp);
-        if (resp.error) {
-            GOT("unknown tool → code=%d msg=\"%s\"",
-                resp.error->code,
-                resp.error->message ? resp.error->message : "(null)");
-        } else {
-            print_result_text(resp.result, "unknown tool result");
-        }
-        cmcp_rpc_message_clear(&resp);
+        cmcp_json_t      *result_json = NULL;
+        char             *err_text    = NULL;
+        cmcp_rpc_error_t *rpc_err     = NULL;
+        double q0 = now_ms();
+        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
+            cli, "crag_doesnt_exist", args, &result_json, &err_text, &rpc_err);
+        double q1 = now_ms();
+        log_tool_outcome(q1 - q0, "unknown-tool", outcome,
+                         result_json, err_text, rpc_err);
     }
+
+    /* Bonus finding (the OK-path content shortcut). cmcp_client_tool_call's
+     * OK channel returns raw cmcp_json_t — the host still has to walk the
+     * result to extract content[].text for display, even though A2 already
+     * extracts it on the TOOL_LEVEL path. */
+    FINDING("v0.7-tool-call-text-shortcut",
+            "cmcp_client_tool_call OK path returns raw cmcp_json_t — the host "
+            "wants content[0].text but the helper only extracts it for the "
+            "TOOL_LEVEL path. v0.7 candidate: cmcp_client_tool_call_text(name, "
+            "args, &text) flattens both content[].text outcomes (success or "
+            "tool error) into a single string, keeping CMCP_TOOL_ERR_PROTOCOL "
+            "as the only out-of-band channel.");
 
     /* --- teardown --------------------------------------------------- */
     STEP("client free (asks child to exit, reaps)");
