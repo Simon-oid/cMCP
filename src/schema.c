@@ -2,12 +2,29 @@
 #include "cmcp_schema.h"
 #include "cmcp_json.h"
 
+#include <ctype.h>
 #include <regex.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ====================================================================== */
+/* Validation context                                                       */
+/* ====================================================================== */
+/* Threaded through every validate() call so $ref can resolve against
+ * the root schema and so deep recursion (real or attacker-induced via
+ * a ref cycle) can be bounded. The depth bound is the same defense the
+ * JSON parser applies — see CMCP_JSON_MAX_DEPTH in CLAUDE.md. */
+
+typedef struct {
+    const cmcp_json_t *root;      /* root schema (for `#/$defs/x` paths) */
+    int                depth;     /* current validate() recursion depth */
+    int                max_depth; /* abort with -32602-shape error past this */
+} validate_ctx_t;
+
+#define CMCP_SCHEMA_MAX_DEPTH 64
 
 /* ====================================================================== */
 /* Path buffer (RFC 6901 JSON Pointer)                                     */
@@ -190,15 +207,17 @@ cmcp_json_t *cmcp_schema_error_to_json(const cmcp_schema_error_t *e) {
 /* Recursive validation                                                    */
 /* ====================================================================== */
 
-static int validate(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int validate(validate_ctx_t *ctx,
+                     const cmcp_json_t *schema, const cmcp_json_t *value,
                      path_buf_t *path, cmcp_schema_error_t *err);
 
 /* Speculative validation: same as validate(), but never populates
  * err. Used by combinators that probe N subschemas and only surface
  * the *substantive* failure (or success) at the top level. */
-static int validate_quiet(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int validate_quiet(validate_ctx_t *ctx,
+                          const cmcp_json_t *schema, const cmcp_json_t *value,
                           path_buf_t *path) {
-    return validate(schema, value, path, NULL);
+    return validate(ctx, schema, value, path, NULL);
 }
 
 /* `type` keyword: string OR array of strings. */
@@ -380,7 +399,8 @@ static int key_covered(const cmcp_json_t *schema, const char *key) {
     return 0;
 }
 
-static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int check_object(validate_ctx_t *ctx,
+                         const cmcp_json_t *schema, const cmcp_json_t *value,
                          path_buf_t *path, cmcp_schema_error_t *err) {
     if (value->type != CMCP_JSON_OBJECT) return CMCP_OK;
 
@@ -421,7 +441,7 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
             cmcp_json_t *key_node = cmcp_json_new_string(value->obj.keys[i]);
             if (!key_node) return CMCP_ENOMEM;
             size_t saved = path_push_prop(path, value->obj.keys[i]);
-            int rc = validate(pn, key_node, path, err);
+            int rc = validate(ctx, pn, key_node, path, err);
             path_pop(path, saved);
             cmcp_json_free(key_node);
             if (rc != CMCP_OK) {
@@ -460,7 +480,7 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
 
         if (sub) {
             size_t saved = path_push_prop(path, key);
-            int rc = validate(sub, child, path, err);
+            int rc = validate(ctx, sub, child, path, err);
             path_pop(path, saved);
             if (rc != CMCP_OK) return rc;
         }
@@ -480,7 +500,7 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
                     matched_pp = 1;
                     const cmcp_json_t *ps = pp->obj.values[j];
                     size_t saved = path_push_prop(path, key);
-                    int rc = validate(ps, child, path, err);
+                    int rc = validate(ctx, ps, child, path, err);
                     path_pop(path, saved);
                     if (rc != CMCP_OK) return rc;
                 }
@@ -499,7 +519,7 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
         }
         if (!covered && addl_is_subschema && !addl_false) {
             size_t saved = path_push_prop(path, key);
-            int rc = validate(addl, child, path, err);
+            int rc = validate(ctx, addl, child, path, err);
             path_pop(path, saved);
             if (rc != CMCP_OK) return rc;
         }
@@ -512,7 +532,8 @@ static int check_object(const cmcp_json_t *schema, const cmcp_json_t *value,
 /* Array keywords                                                          */
 /* ====================================================================== */
 
-static int check_array(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int check_array(validate_ctx_t *ctx,
+                        const cmcp_json_t *schema, const cmcp_json_t *value,
                         path_buf_t *path, cmcp_schema_error_t *err) {
     if (value->type != CMCP_JSON_ARRAY) return CMCP_OK;
 
@@ -555,7 +576,7 @@ static int check_array(const cmcp_json_t *schema, const cmcp_json_t *value,
                           ? prefix_len : value->arr.len;
         for (size_t i = 0; i < bound; i++) {
             size_t saved = path_push_idx(path, i);
-            int rc = validate(tuple->arr.items[i], value->arr.items[i],
+            int rc = validate(ctx, tuple->arr.items[i], value->arr.items[i],
                               path, err);
             path_pop(path, saved);
             if (rc != CMCP_OK) return rc;
@@ -595,7 +616,7 @@ static int check_array(const cmcp_json_t *schema, const cmcp_json_t *value,
     if (rest) {
         for (size_t i = prefix_len; i < value->arr.len; i++) {
             size_t saved = path_push_idx(path, i);
-            int rc = validate(rest, value->arr.items[i], path, err);
+            int rc = validate(ctx, rest, value->arr.items[i], path, err);
             path_pop(path, saved);
             if (rc != CMCP_OK) return rc;
         }
@@ -607,13 +628,14 @@ static int check_array(const cmcp_json_t *schema, const cmcp_json_t *value,
 /* Combinators: allOf / anyOf / oneOf / not                                */
 /* ====================================================================== */
 
-static int check_combinators(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int check_combinators(validate_ctx_t *ctx,
+                              const cmcp_json_t *schema, const cmcp_json_t *value,
                               path_buf_t *path, cmcp_schema_error_t *err) {
     /* allOf — every subschema must pass. The first failure surfaces. */
     const cmcp_json_t *allof = cmcp_json_object_get(schema, "allOf");
     if (allof && allof->type == CMCP_JSON_ARRAY) {
         for (size_t i = 0; i < allof->arr.len; i++) {
-            int rc = validate(allof->arr.items[i], value, path, err);
+            int rc = validate(ctx, allof->arr.items[i], value, path, err);
             if (rc != CMCP_OK) return rc;
         }
     }
@@ -624,7 +646,7 @@ static int check_combinators(const cmcp_json_t *schema, const cmcp_json_t *value
     if (anyof && anyof->type == CMCP_JSON_ARRAY) {
         int found = 0;
         for (size_t i = 0; i < anyof->arr.len; i++) {
-            if (validate_quiet(anyof->arr.items[i], value, path) == CMCP_OK) {
+            if (validate_quiet(ctx, anyof->arr.items[i], value, path) == CMCP_OK) {
                 found = 1;
                 break;
             }
@@ -638,7 +660,7 @@ static int check_combinators(const cmcp_json_t *schema, const cmcp_json_t *value
     if (oneof && oneof->type == CMCP_JSON_ARRAY) {
         size_t hits = 0;
         for (size_t i = 0; i < oneof->arr.len && hits < 2; i++) {
-            if (validate_quiet(oneof->arr.items[i], value, path) == CMCP_OK)
+            if (validate_quiet(ctx, oneof->arr.items[i], value, path) == CMCP_OK)
                 hits++;
         }
         if (hits == 0)
@@ -650,7 +672,7 @@ static int check_combinators(const cmcp_json_t *schema, const cmcp_json_t *value
     /* not — subschema must NOT pass. */
     const cmcp_json_t *neg = cmcp_json_object_get(schema, "not");
     if (neg) {
-        if (validate_quiet(neg, value, path) == CMCP_OK)
+        if (validate_quiet(ctx, neg, value, path) == CMCP_OK)
             return fail(err, path, "not", "value matched a forbidden subschema");
     }
 
@@ -659,17 +681,208 @@ static int check_combinators(const cmcp_json_t *schema, const cmcp_json_t *value
 
 /* if / then / else conditional. `if` is evaluated in schema-only mode
  * — its failure is silent and only steers the branch selection. */
-static int check_conditional(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int check_conditional(validate_ctx_t *ctx,
+                              const cmcp_json_t *schema, const cmcp_json_t *value,
                               path_buf_t *path, cmcp_schema_error_t *err) {
     const cmcp_json_t *if_sch   = cmcp_json_object_get(schema, "if");
     if (!if_sch) return CMCP_OK;
     const cmcp_json_t *then_sch = cmcp_json_object_get(schema, "then");
     const cmcp_json_t *else_sch = cmcp_json_object_get(schema, "else");
-    int if_matched = validate_quiet(if_sch, value, path) == CMCP_OK;
+    int if_matched = validate_quiet(ctx, if_sch, value, path) == CMCP_OK;
     if (if_matched && then_sch)
-        return validate(then_sch, value, path, err);
+        return validate(ctx, then_sch, value, path, err);
     if (!if_matched && else_sch)
-        return validate(else_sch, value, path, err);
+        return validate(ctx, else_sch, value, path, err);
+    return CMCP_OK;
+}
+
+/* ====================================================================== */
+/* $ref resolver                                                           */
+/* ====================================================================== */
+/* Supports JSON Pointer references rooted at `#` (the root schema):
+ *   "#"                   → root
+ *   "#/$defs/Foo"         → root.$defs.Foo
+ *   "#/definitions/Foo"   → root.definitions.Foo  (draft-07 alias)
+ * Per RFC 6901 the tokens unescape `~0` → `~` and `~1` → `/`. Remote
+ * refs (`http://...#`) and refs into a non-root document are
+ * deliberately not supported — MCP `inputSchema` is self-contained.
+ *
+ * Returns NULL on any failure (malformed pointer, missing key, wrong
+ * shape); callers translate that into a fail(). */
+
+static const cmcp_json_t *resolve_json_pointer(const cmcp_json_t *root,
+                                                 const char *ref) {
+    if (!root || !ref || ref[0] != '#') return NULL;
+    if (ref[1] == '\0') return root;
+    if (ref[1] != '/')  return NULL;
+
+    const cmcp_json_t *node = root;
+    const char *p = ref + 1;        /* sits on the first '/' */
+    while (*p == '/') {
+        p++;
+        /* Unescape one segment into a stack-friendly buffer. Schema
+         * key names are bounded in practice; cap at 256 to bound the
+         * stack frame and refuse pathological inputs. */
+        char seg[256];
+        size_t slen = 0;
+        while (*p && *p != '/') {
+            if (slen + 1 >= sizeof seg) return NULL;
+            char c = *p++;
+            if (c == '~') {
+                if      (*p == '0') { seg[slen++] = '~'; p++; }
+                else if (*p == '1') { seg[slen++] = '/'; p++; }
+                else return NULL;
+            } else {
+                seg[slen++] = c;
+            }
+        }
+        seg[slen] = '\0';
+        if (!node || node->type != CMCP_JSON_OBJECT) return NULL;
+        node = cmcp_json_object_get(node, seg);
+        if (!node) return NULL;
+    }
+    return node;
+}
+
+static int check_ref(validate_ctx_t *ctx,
+                      const cmcp_json_t *schema, const cmcp_json_t *value,
+                      path_buf_t *path, cmcp_schema_error_t *err,
+                      int *consumed) {
+    *consumed = 0;
+    const cmcp_json_t *ref = cmcp_json_object_get(schema, "$ref");
+    if (!ref || ref->type != CMCP_JSON_STRING) return CMCP_OK;
+    *consumed = 1;
+
+    const cmcp_json_t *target = resolve_json_pointer(ctx->root, ref->str.s);
+    if (!target)
+        return fail(err, path, "$ref", "could not resolve %s", ref->str.s);
+
+    /* Per draft-2020-12, sibling keywords next to $ref are valid and
+     * should be honoured. We treat the target like another schema in
+     * an implicit allOf — validate against it, then fall back to
+     * check the siblings in the caller. The combinator path already
+     * walks every keyword on the local schema, so all we need to do
+     * here is run the target through validate() and report its rc. */
+    return validate(ctx, target, value, path, err);
+}
+
+/* ====================================================================== */
+/* `format` keyword (date-time, email, uri, uuid)                          */
+/* ====================================================================== */
+/* These are best-effort lexical validators chosen to match what Ajv
+ * accepts/rejects for the common formats. They are not full
+ * RFC validators: see docs/schema-conformance.md for the trade-off.
+ * Unknown `format` values are an *annotation* per the spec — we
+ * accept them silently rather than failing the schema. */
+
+static int is_2digit(const char *s) {
+    return isdigit((unsigned char)s[0]) && isdigit((unsigned char)s[1]);
+}
+
+static int is_4digit(const char *s) {
+    return is_2digit(s) && is_2digit(s + 2);
+}
+
+static int format_date_time(const char *s) {
+    /* RFC 3339 date-time: 1985-04-12T23:20:50.52Z (or +offset).
+     * Shape: YYYY-MM-DDTHH:MM:SS[.frac][Z|±HH:MM]. We don't validate
+     * day-in-month bounds; Ajv's default mode does, but for MCP
+     * tool-input use the cheap shape check matches the agent
+     * round-trip in practice. */
+    size_t n = strlen(s);
+    if (n < 20) return 0;
+    if (!is_4digit(s) || s[4] != '-' || !is_2digit(s + 5) || s[7] != '-' ||
+        !is_2digit(s + 8) || (s[10] != 'T' && s[10] != 't') ||
+        !is_2digit(s + 11) || s[13] != ':' || !is_2digit(s + 14) ||
+        s[16] != ':' || !is_2digit(s + 17))
+        return 0;
+    size_t i = 19;
+    if (s[i] == '.') {
+        i++;
+        size_t frac_start = i;
+        while (i < n && isdigit((unsigned char)s[i])) i++;
+        if (i == frac_start) return 0;
+    }
+    if (i == n) return 0;
+    if (s[i] == 'Z' || s[i] == 'z') return s[i + 1] == '\0';
+    if (s[i] == '+' || s[i] == '-') {
+        if (n - i != 6) return 0;
+        return is_2digit(s + i + 1) && s[i + 3] == ':' &&
+               is_2digit(s + i + 4);
+    }
+    return 0;
+}
+
+static int format_email(const char *s) {
+    /* Cheap mailbox check: one `@`, non-empty local + domain, no
+     * spaces or control chars. Matches Ajv's "fast" mode. */
+    const char *at = strchr(s, '@');
+    if (!at || at == s || at[1] == '\0' || strchr(at + 1, '@')) return 0;
+    /* Domain must contain at least one dot, no leading/trailing dot,
+     * no consecutive dots. */
+    const char *domain = at + 1;
+    const char *dot = strchr(domain, '.');
+    if (!dot || dot == domain || domain[strlen(domain) - 1] == '.') return 0;
+    for (const char *p = domain; *p; p++) {
+        if (*p == '.' && p[1] == '.') return 0;
+    }
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c <= ' ' || c == 127) return 0;
+    }
+    return 1;
+}
+
+static int format_uri(const char *s) {
+    /* RFC 3986 URI: scheme ":" hier-part. The scheme must be
+     * ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) and there must be
+     * something after the colon. */
+    const char *p = s;
+    if (!isalpha((unsigned char)*p)) return 0;
+    p++;
+    while (*p && (isalnum((unsigned char)*p) ||
+                  *p == '+' || *p == '-' || *p == '.')) p++;
+    if (*p != ':' || p[1] == '\0') return 0;
+    /* Reject embedded whitespace/controls. */
+    for (const char *q = s; *q; q++) {
+        unsigned char c = (unsigned char)*q;
+        if (c <= ' ' || c == 127) return 0;
+    }
+    return 1;
+}
+
+static int format_uuid(const char *s) {
+    /* 8-4-4-4-12 lowercase or uppercase hex with hyphens. Total 36. */
+    if (strlen(s) != 36) return 0;
+    static const int dashes[] = { 8, 13, 18, 23, -1 };
+    for (int i = 0; i < 36; i++) {
+        int is_dash = 0;
+        for (int k = 0; dashes[k] >= 0; k++) {
+            if (dashes[k] == i) { is_dash = 1; break; }
+        }
+        if (is_dash) { if (s[i] != '-') return 0; }
+        else         { if (!isxdigit((unsigned char)s[i])) return 0; }
+    }
+    return 1;
+}
+
+static int check_format(const cmcp_json_t *schema, const cmcp_json_t *value,
+                         path_buf_t *path, cmcp_schema_error_t *err) {
+    /* Only applies to strings. The keyword is a no-op for non-strings
+     * — same posture as `pattern`, and matches Ajv. */
+    if (value->type != CMCP_JSON_STRING) return CMCP_OK;
+    const cmcp_json_t *fmt = cmcp_json_object_get(schema, "format");
+    if (!fmt || fmt->type != CMCP_JSON_STRING) return CMCP_OK;
+
+    const char *f = fmt->str.s;
+    const char *s = value->str.s;
+    int ok = 1;       /* unknown formats accepted (annotation posture) */
+    if      (!strcmp(f, "date-time")) ok = format_date_time(s);
+    else if (!strcmp(f, "email"))     ok = format_email(s);
+    else if (!strcmp(f, "uri"))       ok = format_uri(s);
+    else if (!strcmp(f, "uuid"))      ok = format_uuid(s);
+    if (!ok)
+        return fail(err, path, "format", "value does not match format %s", f);
     return CMCP_OK;
 }
 
@@ -677,7 +890,8 @@ static int check_conditional(const cmcp_json_t *schema, const cmcp_json_t *value
 /* Top-level dispatch                                                      */
 /* ====================================================================== */
 
-static int validate(const cmcp_json_t *schema, const cmcp_json_t *value,
+static int validate(validate_ctx_t *ctx,
+                     const cmcp_json_t *schema, const cmcp_json_t *value,
                      path_buf_t *path, cmcp_schema_error_t *err) {
     /* Boolean schemas — JSON Schema allows `true` (always pass) and
      * `false` (always fail) as a whole schema. They appear most often
@@ -690,17 +904,39 @@ static int validate(const cmcp_json_t *schema, const cmcp_json_t *value,
         /* Schema author error — silently accept. */
         return CMCP_OK;
 
-    int rc;
-    if ((rc = check_type(schema, value, path, err))          != CMCP_OK) return rc;
-    if ((rc = check_enum(schema, value, path, err))          != CMCP_OK) return rc;
-    if ((rc = check_const(schema, value, path, err))         != CMCP_OK) return rc;
-    if ((rc = check_string(schema, value, path, err))        != CMCP_OK) return rc;
-    if ((rc = check_number(schema, value, path, err))        != CMCP_OK) return rc;
-    if ((rc = check_object(schema, value, path, err))        != CMCP_OK) return rc;
-    if ((rc = check_array(schema, value, path, err))         != CMCP_OK) return rc;
-    if ((rc = check_combinators(schema, value, path, err))   != CMCP_OK) return rc;
-    if ((rc = check_conditional(schema, value, path, err))   != CMCP_OK) return rc;
-    return CMCP_OK;
+    /* Bound recursion depth — attacker schemas can hide ref cycles
+     * (`{"$defs":{"x":{"$ref":"#/$defs/x"}}}`) or genuine deep
+     * `allOf` chains. Same defense as the JSON parser's depth cap. */
+    if (++ctx->depth > ctx->max_depth) {
+        ctx->depth--;
+        return fail(err, path, "$ref",
+                     "schema recursion exceeded %d levels",
+                     ctx->max_depth);
+    }
+
+    int rc = CMCP_OK;
+    int ref_consumed = 0;
+    rc = check_ref(ctx, schema, value, path, err, &ref_consumed);
+    if (rc != CMCP_OK) goto out;
+    /* draft-2020-12: $ref siblings are honoured. Fall through into the
+     * rest of the keywords. (Draft-07 would early-return if $ref was
+     * present; we don't, to match Ajv's 2020-12 mode.) */
+    (void)ref_consumed;
+
+    if ((rc = check_type(schema, value, path, err))                != CMCP_OK) goto out;
+    if ((rc = check_enum(schema, value, path, err))                != CMCP_OK) goto out;
+    if ((rc = check_const(schema, value, path, err))               != CMCP_OK) goto out;
+    if ((rc = check_string(schema, value, path, err))              != CMCP_OK) goto out;
+    if ((rc = check_format(schema, value, path, err))              != CMCP_OK) goto out;
+    if ((rc = check_number(schema, value, path, err))              != CMCP_OK) goto out;
+    if ((rc = check_object(ctx, schema, value, path, err))         != CMCP_OK) goto out;
+    if ((rc = check_array(ctx, schema, value, path, err))          != CMCP_OK) goto out;
+    if ((rc = check_combinators(ctx, schema, value, path, err))    != CMCP_OK) goto out;
+    if ((rc = check_conditional(ctx, schema, value, path, err))    != CMCP_OK) goto out;
+
+out:
+    ctx->depth--;
+    return rc;
 }
 
 /* ====================================================================== */
@@ -731,7 +967,12 @@ int cmcp_schema_validate(const cmcp_json_t *schema,
         return CMCP_ENOMEM;
     }
 
-    int rc = validate(schema, value, &path, err);
+    validate_ctx_t ctx = {
+        .root      = schema,
+        .depth     = 0,
+        .max_depth = CMCP_SCHEMA_MAX_DEPTH,
+    };
+    int rc = validate(&ctx, schema, value, &path, err);
 
     free(path.data);
     cmcp_json_free(null_node);

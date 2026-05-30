@@ -131,6 +131,26 @@ conformance: all $(CONF_C_BIN)
 $(CONF_C_BIN): $(CONF_DIR)/client_vs_ts.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
+# --- Schema validator cross-check (axis 6.7) ------------------------------
+# Runs the cMCP JSON Schema validator and Ajv (the JSON Schema engine the
+# TypeScript MCP SDK pulls in) against a shared corpus of (schema, value)
+# pairs and asserts both agree on accept/reject for every entry. The C
+# runner is libcmcp_core-only; the JS driver pulls Ajv + ajv-formats from
+# conformance/node_modules. See conformance/schema_ajv_crosscheck.mjs.
+SCHEMA_CONF_RUNNER := $(CONF_DIR)/schema_ajv_runner
+
+$(SCHEMA_CONF_RUNNER): $(CONF_DIR)/schema_ajv_runner.c $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+schema-conformance: all $(SCHEMA_CONF_RUNNER)
+	@command -v node >/dev/null || { echo "node not found — install Node.js"; exit 1; }
+	@command -v npm  >/dev/null || { echo "npm not found — install Node.js"; exit 1; }
+	@echo "=== schema-conformance: installing Ajv + ajv-formats ==="
+	npm install --prefix $(CONF_DIR) --silent --no-audit --no-fund
+	@echo
+	@echo "=== schema-conformance: cMCP validator  vs  Ajv (draft-2020-12) ==="
+	node $(CONF_DIR)/schema_ajv_crosscheck.mjs
+
 # --- Replay-based conformance gate (axis 5.3) -----------------------------
 # Replays every wire transcript under conformance/fixtures/ at a freshly
 # spawned server and asserts the recorded responses still match (modulo
@@ -682,6 +702,6 @@ clean:
         fuzz-build fuzz-smoke docs \
         soak soak-churn soak-http soak-http-churn \
         bench bench-build bench-compare bench-compare-build \
-        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp conformance replay check-spec-drift \
+        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp conformance schema-conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

@@ -6,6 +6,8 @@
   "description": "Conformance harness — exercises cMCP against the MCP TypeScript reference implementation. Not part of the cMCP library; see conformance/README.md.",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@modelcontextprotocol/server-everything": "^2026.1.26"
+    "@modelcontextprotocol/server-everything": "^2026.1.26",
+    "ajv": "^8.17.0",
+    "ajv-formats": "^3.0.1"
   }
 }

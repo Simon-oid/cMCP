@@ -33,8 +33,13 @@ Full design in [`TODO.md`](TODO.md) under "Tier 6".
   Steady-state stdio: 50k calls/s p50=19µs p99=27µs (5.8× TS-SDK,
   47× Python-SDK).
 - **6.7** — schema validator near-parity with Ajv: `oneOf`/`anyOf`/
-  `allOf`/`not`, `pattern`, common `format`s, `multipleOf`, `min/max
-  Items`, `min/maxProperties`, tuple `items`, `const`, `if/then/else`.
+  `allOf`/`not`, `pattern`, `multipleOf`, `min/maxItems`,
+  `min/maxProperties`, tuple `items`, `const`, `if/then/else`, plus
+  6.7-closure additions `$ref` / `$defs` / draft-07 `definitions`
+  (bounded ref resolver, draft-2020-12 sibling semantics) and `format`
+  (`date-time`, `email`, `uri`, `uuid` with unknown-format = annotation).
+  A new `make schema-conformance` lane proves agreement with Ajv
+  (draft-2020-12 + ajv-formats) over an 83-entry corpus.
 
 Plus a handful of follow-ups discovered while building the above:
 HTTP-client 503 hang fix (6.6.x), `cmcp-inspect` ergonomics, etc.
@@ -548,13 +553,102 @@ updated.
 
 #### Deferred to post-6.7
 
-`$ref` / `$defs` / `definitions` (bounded ref resolver), `format`
-(`date-time`, `email`, `uri`, `uuid`), `dependentRequired` /
-`dependentSchemas` / `dependencies`, `contains` / `minContains` /
-`maxContains`, `unevaluatedProperties` / `unevaluatedItems`. Rationale
-per keyword in `docs/schema-conformance.md`. The 6.7.3 Ajv cross-check
-harness (corpus of ≥500 (schema, value) pairs vs Ajv) lands in a
-follow-up commit alongside `make schema-conformance`.
+`dependentRequired` / `dependentSchemas` / `dependencies`, `contains` /
+`minContains` / `maxContains`, `unevaluatedProperties` /
+`unevaluatedItems`. Rationale per keyword in
+`docs/schema-conformance.md`. Deferred to demand — no in-tree
+consumer needs them today.
+
+### 6.7.5 close 6.7 — `$ref`, `format`, and the Ajv cross-check lane
+
+Closes the two keyword families that 6.7.2 deferred and lands the
+6.7.3 cross-check harness that the axis acceptance criterion called
+for.
+
+#### `$ref` / `$defs` / draft-07 `definitions`
+
+`src/schema.c` grows a JSON-Pointer (RFC 6901) resolver that walks
+references against the root schema passed to `cmcp_schema_validate`.
+Supports `#` (the root itself) and `#/segment/segment` paths with
+`~0` / `~1` un-escaping. Both the 2020-12 (`$defs`) and draft-07
+(`definitions`) addresses work.
+
+Threaded through every recursive call via a new `validate_ctx_t`
+(root + depth + max depth) so resolver context never escapes the
+caller's frame. Sibling keywords are honoured per draft-2020-12:
+`{"$ref":"#/$defs/S", "minLength":3}` enforces *both* the referenced
+schema *and* the inline `minLength`. (Draft-07 made `$ref` exclusive;
+2020-12 reversed it. We track 2020-12.)
+
+Recursion is bounded by `CMCP_SCHEMA_MAX_DEPTH = 64`. A cyclic
+schema (`{"$ref":"#"}` against a self-recursive value) trips the cap
+and surfaces as `"keyword":"$ref"` rather than overflowing the stack.
+External refs (network or filesystem fetches) are explicitly *not*
+supported; documented as such.
+
+#### `format` — `date-time` / `email` / `uri` / `uuid`
+
+Lexical (fast-mode) validators in the same posture Ajv's
+`ajv-formats` plugin uses by default: enforced for strings, no-op
+on non-strings, **unknown formats accepted silently**. This matches
+the JSON-Schema annotation posture and keeps schemas portable
+across implementations that enforce a different format subset.
+
+- `date-time`: RFC 3339 lexical shape with `Z` or `±hh:mm` zone.
+- `email`: single `@`, non-empty local, domain with at least one `.`
+  and only `[A-Za-z0-9._+-]`.
+- `uri`: `scheme:` followed by a non-empty, non-whitespace remainder.
+- `uuid`: case-insensitive RFC 4122 textual form.
+
+#### Tests
+
+`tests/test_schema.c` grows 12 new test functions (30 new assertions)
+covering `$ref` against `$defs` / `definitions` / root, unresolvable
+refs, cycle-bounded refs, sibling-honoured refs, and 4 + 2 cases per
+format keyword (positive, negative, non-string no-op, unknown-format
+accept). Schema-test count: 170 → 200 assertions. Full suite:
+2892 → 2922 assertions across 22 binaries. ASan / valgrind clean.
+
+#### `make schema-conformance` — cMCP vs Ajv (draft-2020-12)
+
+New Makefile target. Builds `conformance/schema_ajv_runner` (a tiny
+libcmcp_core-only C driver that walks a JSON corpus and emits per-
+entry `<name>\t<ok|fail>`), then runs `conformance/schema_ajv_crosscheck.mjs`
+which loads the same corpus, runs Ajv (`ajv/dist/2020.js` with
+`ajv-formats`), and asserts agreement on every entry. Disagreements
+exit non-zero.
+
+Corpus (`conformance/corpus_schema.json`): 83 (schema, value,
+expected) triples covering every supported keyword family — types,
+enum/const, numeric bounds, string bounds, pattern, format,
+object shape (`properties`/`required`/`additionalProperties`/
+`patternProperties`/`min/maxProperties`/`propertyNames`), array
+shape (`items`/`prefixItems`/`uniqueItems`/`min/maxItems`),
+combinators (`allOf`/`anyOf`/`oneOf`/`not`), conditional
+(`if`/`then`/`else`), boolean schemas, and references
+(`$ref`/`$defs`/`definitions`/recursive/sibling).
+
+83/83 agree on `main`. The harness becomes the gate against future
+divergence — adding a new keyword without a corpus entry is fine; a
+keyword that misbehaves vs Ajv surfaces as a CI failure here.
+
+#### Docs
+
+`docs/schema-conformance.md` gains a "References" subsection and a
+"Format" subsection that document the new behaviour; the "Not yet
+implemented" table loses the `$ref` / `format` rows. The
+"Cross-check methodology" section is rewritten to describe the
+working `make schema-conformance` target (was: "lands in a
+follow-up").
+
+`conformance/package.json` adds `ajv` and `ajv-formats` to
+`dependencies`. The harness installs them on first run via
+`npm install --prefix conformance`.
+
+#### .gitignore
+
+Adds `conformance/schema_ajv_runner` (the compiled C driver). The
+`.c`, `.mjs`, and `.json` sources are tracked.
 
 ### 6.5.1 threat model + HTTP slowloris defense
 

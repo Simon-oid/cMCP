@@ -991,6 +991,179 @@ static void test_boolean_schema_true_false(void) {
 }
 
 /* ====================================================================== */
+/* $ref + $defs                                                            */
+/* ====================================================================== */
+
+static void test_ref_basic(void) {
+    /* The classic example: definitions block + a $ref into it. */
+    cmcp_json_t *schema = J(
+        "{\"$defs\":{\"PositiveInt\":"
+                    "{\"type\":\"integer\",\"minimum\":1}},"
+         "\"$ref\":\"#/$defs/PositiveInt\"}");
+    cmcp_json_t *ok  = J("5");
+    cmcp_json_t *bad = J("0");
+    TEST_ASSERT(cmcp_schema_validate(schema, ok,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_ref_definitions_draft07_alias(void) {
+    /* Draft-07 schemas use `definitions` instead of `$defs`. We resolve
+     * it the same way — the path is just keys, no semantic difference. */
+    cmcp_json_t *schema = J(
+        "{\"definitions\":{\"Color\":"
+                    "{\"type\":\"string\",\"enum\":[\"red\",\"blue\"]}},"
+         "\"$ref\":\"#/definitions/Color\"}");
+    cmcp_json_t *ok  = J("\"red\"");
+    cmcp_json_t *bad = J("\"green\"");
+    TEST_ASSERT(cmcp_schema_validate(schema, ok,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_ref_root_self(void) {
+    /* `#` resolves to root — a recursive shape that bottoms out on
+     * `type: array` containing items matching the same root schema. */
+    cmcp_json_t *schema = J(
+        "{\"type\":\"array\",\"items\":{\"$ref\":\"#\"}}");
+    cmcp_json_t *ok  = J("[[[],[]],[]]");
+    cmcp_json_t *bad = J("[[\"oops\"]]");
+    TEST_ASSERT(cmcp_schema_validate(schema, ok,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+static void test_ref_unresolvable(void) {
+    /* A pointer into a missing key surfaces as a $ref error, not an
+     * accept. */
+    cmcp_json_t *schema = J(
+        "{\"$ref\":\"#/$defs/Nope\"}");
+    cmcp_json_t *v      = J("42");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(schema, v, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "$ref") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(schema); cmcp_json_free(v);
+}
+
+static void test_ref_cycle_bounded(void) {
+    /* A direct ref cycle: validating against either side recurses
+     * forever. The depth cap (CMCP_SCHEMA_MAX_DEPTH) must catch it
+     * and surface a $ref error rather than blowing the stack. */
+    cmcp_json_t *schema = J(
+        "{\"$defs\":{\"X\":{\"$ref\":\"#/$defs/Y\"},"
+                    "\"Y\":{\"$ref\":\"#/$defs/X\"}},"
+         "\"$ref\":\"#/$defs/X\"}");
+    cmcp_json_t *v = J("42");
+    cmcp_schema_error_t e;
+    TEST_ASSERT(cmcp_schema_validate(schema, v, &e) == CMCP_ESCHEMA);
+    TEST_ASSERT(e.keyword && strcmp(e.keyword, "$ref") == 0);
+    cmcp_schema_error_clear(&e);
+    cmcp_json_free(schema); cmcp_json_free(v);
+}
+
+static void test_ref_sibling_keywords_honoured(void) {
+    /* draft-2020-12 honours siblings of $ref. The target says
+     * type:string; the sibling says minLength:3 — the value "hi" must
+     * fail the sibling even though it satisfies the target. */
+    cmcp_json_t *schema = J(
+        "{\"$defs\":{\"S\":{\"type\":\"string\"}},"
+         "\"$ref\":\"#/$defs/S\",\"minLength\":3}");
+    cmcp_json_t *ok  = J("\"hello\"");
+    cmcp_json_t *bad = J("\"hi\"");
+    TEST_ASSERT(cmcp_schema_validate(schema, ok,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema); cmcp_json_free(ok); cmcp_json_free(bad);
+}
+
+/* ====================================================================== */
+/* format (date-time, email, uri, uuid)                                    */
+/* ====================================================================== */
+
+static void test_format_date_time(void) {
+    cmcp_json_t *schema = J(
+        "{\"type\":\"string\",\"format\":\"date-time\"}");
+    cmcp_json_t *ok1 = J("\"1985-04-12T23:20:50.52Z\"");
+    cmcp_json_t *ok2 = J("\"2026-05-29T08:00:00+02:00\"");
+    cmcp_json_t *bad1 = J("\"2026-05-29\"");        /* no time */
+    cmcp_json_t *bad2 = J("\"2026/05/29T08:00:00Z\""); /* wrong separator */
+    TEST_ASSERT(cmcp_schema_validate(schema, ok1,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, ok2,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad1, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad2, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema);
+    cmcp_json_free(ok1); cmcp_json_free(ok2);
+    cmcp_json_free(bad1); cmcp_json_free(bad2);
+}
+
+static void test_format_email(void) {
+    cmcp_json_t *schema = J(
+        "{\"type\":\"string\",\"format\":\"email\"}");
+    cmcp_json_t *ok  = J("\"user@example.com\"");
+    cmcp_json_t *bad1 = J("\"no-at-sign\"");
+    cmcp_json_t *bad2 = J("\"user@\"");
+    cmcp_json_t *bad3 = J("\"user@no-dot\"");
+    TEST_ASSERT(cmcp_schema_validate(schema, ok,   NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad1, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad2, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad3, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema);
+    cmcp_json_free(ok);
+    cmcp_json_free(bad1); cmcp_json_free(bad2); cmcp_json_free(bad3);
+}
+
+static void test_format_uri(void) {
+    cmcp_json_t *schema = J(
+        "{\"type\":\"string\",\"format\":\"uri\"}");
+    cmcp_json_t *ok1 = J("\"https://example.com/path?q=1\"");
+    cmcp_json_t *ok2 = J("\"urn:isbn:0451450523\"");
+    cmcp_json_t *bad1 = J("\"not a uri\"");
+    cmcp_json_t *bad2 = J("\"://no-scheme\"");
+    TEST_ASSERT(cmcp_schema_validate(schema, ok1,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, ok2,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad1, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad2, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema);
+    cmcp_json_free(ok1); cmcp_json_free(ok2);
+    cmcp_json_free(bad1); cmcp_json_free(bad2);
+}
+
+static void test_format_uuid(void) {
+    cmcp_json_t *schema = J(
+        "{\"type\":\"string\",\"format\":\"uuid\"}");
+    cmcp_json_t *ok1 = J("\"550e8400-e29b-41d4-a716-446655440000\"");
+    cmcp_json_t *ok2 = J("\"550E8400-E29B-41D4-A716-446655440000\"");
+    cmcp_json_t *bad1 = J("\"not-a-uuid\"");
+    cmcp_json_t *bad2 = J("\"550e8400e29b41d4a716446655440000\""); /* no hyphens */
+    TEST_ASSERT(cmcp_schema_validate(schema, ok1,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, ok2,  NULL) == CMCP_OK);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad1, NULL) == CMCP_ESCHEMA);
+    TEST_ASSERT(cmcp_schema_validate(schema, bad2, NULL) == CMCP_ESCHEMA);
+    cmcp_json_free(schema);
+    cmcp_json_free(ok1); cmcp_json_free(ok2);
+    cmcp_json_free(bad1); cmcp_json_free(bad2);
+}
+
+static void test_format_unknown_accepted(void) {
+    /* An unknown format value is an annotation; the validator must NOT
+     * reject it. Matches Ajv's default mode. */
+    cmcp_json_t *schema = J(
+        "{\"type\":\"string\",\"format\":\"hostname-with-extras\"}");
+    cmcp_json_t *v = J("\"anything\"");
+    TEST_ASSERT(cmcp_schema_validate(schema, v, NULL) == CMCP_OK);
+    cmcp_json_free(schema); cmcp_json_free(v);
+}
+
+static void test_format_only_applies_to_strings(void) {
+    /* Numbers / objects with `format` are a no-op — same posture as
+     * `pattern`. */
+    cmcp_json_t *schema = J("{\"format\":\"email\"}");
+    cmcp_json_t *v      = J("42");
+    TEST_ASSERT(cmcp_schema_validate(schema, v, NULL) == CMCP_OK);
+    cmcp_json_free(schema); cmcp_json_free(v);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_schema:\n");
@@ -1041,6 +1214,18 @@ int main(void) {
     TEST_RUN(test_not);
     TEST_RUN(test_if_then_else);
     TEST_RUN(test_boolean_schema_true_false);
+    TEST_RUN(test_ref_basic);
+    TEST_RUN(test_ref_definitions_draft07_alias);
+    TEST_RUN(test_ref_root_self);
+    TEST_RUN(test_ref_unresolvable);
+    TEST_RUN(test_ref_cycle_bounded);
+    TEST_RUN(test_ref_sibling_keywords_honoured);
+    TEST_RUN(test_format_date_time);
+    TEST_RUN(test_format_email);
+    TEST_RUN(test_format_uri);
+    TEST_RUN(test_format_uuid);
+    TEST_RUN(test_format_unknown_accepted);
+    TEST_RUN(test_format_only_applies_to_strings);
 
     /* Wire integration. */
     TEST_RUN(test_tools_call_schema_violation);

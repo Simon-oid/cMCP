@@ -86,6 +86,43 @@ are honoured at every position — top-level, in `properties`, in
 schema `{}` also accepts everything (it falls out of the keyword set
 being empty).
 
+### References
+
+| Keyword | Behaviour |
+|---|---|
+| `$ref` | Resolved as an RFC 6901 JSON Pointer **against the root schema** passed to `cmcp_schema_validate`. Supports `#` (the root itself) and `#/segment/segment` paths; both `~0` (`~`) and `~1` (`/`) escapes are honoured. Sibling keywords are honoured per draft-2020-12 — `$ref` + `minLength` both apply. Unresolvable refs surface as `"keyword":"$ref"`. |
+| `$defs` (2020-12) / `definitions` (draft-07) | Reference targets. Either name works at the same address. |
+
+Recursive references are bounded by `CMCP_SCHEMA_MAX_DEPTH` (64
+levels). A `$ref` cycle that would otherwise recurse forever (e.g.
+`{"$ref":"#"}` on a self-recursive value) trips the cap and surfaces
+as `"keyword":"$ref"` rather than overflowing the stack. This is a
+deliberate, documented departure from "ideal" 2020-12 semantics, which
+would allow the cycle to terminate based on value structure alone.
+
+External refs (`$ref` pointing to a remote URI or another document)
+are **not** supported. cMCP intentionally does no network or
+filesystem fetching during validation.
+
+### Format
+
+`format` is implemented in the "fast / annotation" posture that Ajv
+uses by default (`ajv-formats`): we apply a lexical check for the
+listed formats, and **unknown formats accept silently** so that a
+schema using a format we don't enforce does not break.
+
+| Format | Check |
+|---|---|
+| `date-time` | RFC 3339 lexical shape: `YYYY-MM-DDThh:mm:ss[.frac]TZ`, where `TZ` is `Z` or `±hh:mm`. |
+| `email` | Single `@` separating a non-empty local part from a domain that contains at least one `.` and only `[A-Za-z0-9._+-]`. |
+| `uri` | Scheme `[A-Za-z][A-Za-z0-9+.-]*` followed by `:` and a non-empty, non-whitespace remainder. |
+| `uuid` | RFC 4122 textual representation, case-insensitive `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`. |
+
+`format` only applies to string values; on non-string values it is a
+no-op (matches Ajv). Any other format value (e.g. `ipv4`, `hostname`,
+`regex`) is accepted as an annotation — the validator does not reject
+the value, but does not enforce the format either.
+
 ## Annotation keywords
 
 The following do not affect validation. They flow through to consumers
@@ -131,17 +168,14 @@ JSON parser preserves the lexical form.
 If you want to accept either form for the same field, use
 `"type": ["integer", "number"]` or just `"type": "number"`.
 
-## Not yet implemented (deferred post-6.7)
+## Not yet implemented
 
 These keywords parse without error (schemas containing them remain
-valid) but are not enforced. Each lands in a follow-up commit when
-needed:
+valid) but are not enforced. They are deferred to demand:
 
 | Keyword | Why deferred |
 |---|---|
-| `$ref` / `$defs` / `definitions` | Requires a bounded ref resolver. No in-tree consumer needs it yet. |
-| `format` (`date-time`, `email`, `uri`, `uuid`, …) | Each format value needs a separate validator; landing as a batch in a follow-up. |
-| `dependentRequired` / `dependentSchemas` / `dependencies` (draft-07) | Rarely used; deferred. |
+| `dependentRequired` / `dependentSchemas` / `dependencies` (draft-07) | Rarely used; deferred until a real consumer needs them. |
 | `contains` / `minContains` / `maxContains` | Pending demand. |
 | `unevaluatedProperties` / `unevaluatedItems` | Requires evaluation tracking through combinators — significant complexity for marginal benefit. |
 
@@ -151,15 +185,22 @@ same forward-compatible posture the validator has carried since v0.1.
 
 ## Cross-check methodology
 
-Tier 6 axis 6.7.3 (post-6.7.2) wires a `make schema-conformance`
-target that runs cMCP's validator and Ajv side-by-side over a corpus
-of (schema, value, expected) triples and asserts agreement on every
-pair. The corpus draws from:
+`make schema-conformance` runs cMCP's validator and Ajv (draft-2020-12
+mode, with `ajv-formats`) side-by-side over the corpus in
+`conformance/corpus_schema.json` and fails on any per-entry
+disagreement on accept/reject. The corpus covers each supported
+keyword family — types, enum/const, numeric bounds, string bounds,
+pattern, format, object shape, array shape, combinators, conditional,
+boolean schemas, and references.
 
-- The supported-keyword test cases in `tests/test_schema.c`.
-- A subset of the JSON Schema test suite's draft-2020-12 fixtures.
-- Schemas extracted from `@modelcontextprotocol/server-everything`
-  v2025.11.x.
+Run it locally:
+
+```bash
+make schema-conformance
+```
+
+Dependencies: Node ≥ 18 + the `ajv` and `ajv-formats` packages, which
+the target installs into `conformance/node_modules/` on first run.
 
 Disagreements (where they exist) are documented above as deliberate
 departures. The harness is the gate that flags new disagreements on
