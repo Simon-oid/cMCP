@@ -28,6 +28,14 @@
 
 typedef struct cmcp_client cmcp_client_t;
 
+/* Single-client typed helpers (below) re-use the session-layer record
+ * shapes from cmcp_session.h, so a host pulls in one struct definition
+ * and one set of *_free destructors regardless of whether it talks to
+ * one server or N. The include sits after the cmcp_client_t typedef so
+ * cmcp_session.h's references to cmcp_client_t resolve cleanly when a
+ * consumer #includes cmcp_client.h before (or instead of) cmcp_session.h. */
+#include "cmcp_session.h"
+
 /* ====================================================================== */
 /* Lifecycle                                                               */
 /* ====================================================================== */
@@ -177,6 +185,80 @@ int cmcp_client_call_async_progress(cmcp_client_t *c,
                                      cmcp_progress_fn fn,
                                      void *userdata,
                                      long long *out_id);
+
+/* ====================================================================== */
+/* Single-client typed helpers                                              */
+/* ====================================================================== */
+
+/* These helpers exist so a host talking to ONE server doesn't have to
+ * drop to raw cmcp_json_object_get walking, and doesn't have to wrap
+ * the single client in a cmcp_session_t just to get list-iteration and
+ * pagination handling for free. They mirror the cmcp_session_t shapes:
+ * the record types and *_free destructors live in cmcp_session.h.
+ *
+ * For records produced by these helpers, the `server` and `qualified`
+ * fields (where present on the session-layer struct) are populated
+ * with NULL — there's only one client, so there's no namespacing to
+ * carry. Pair every list helper with the matching cmcp_session_*_free
+ * (which is NULL-safe on those fields). */
+
+/* Send `tools/list` and accumulate every page into a flat array. On
+ * CMCP_OK *out_tools is a malloc'd array of length *out_n (free with
+ * cmcp_session_tools_free) and the .server / .qualified fields on
+ * each entry are NULL.
+ *
+ * Returns CMCP_OK on success (including the empty-list case); the
+ * standard transport errors from cmcp_client_request on a wire failure;
+ * CMCP_EPROTOCOL if the server returned a JSON-RPC error for the first
+ * page. */
+int cmcp_client_tools_list(cmcp_client_t *c,
+                            cmcp_session_tool_t **out_tools,
+                            size_t *out_n);
+
+/* Send `resources/list` and accumulate every page. Same ownership and
+ * error model as cmcp_client_tools_list. Free with
+ * cmcp_session_resources_free. */
+int cmcp_client_resources_list(cmcp_client_t *c,
+                                cmcp_session_resource_t **out_resources,
+                                size_t *out_n);
+
+/* Send `prompts/list` and accumulate every page. Same ownership and
+ * error model as cmcp_client_tools_list. Free with
+ * cmcp_session_prompts_free. */
+int cmcp_client_prompts_list(cmcp_client_t *c,
+                              cmcp_session_prompt_t **out_prompts,
+                              size_t *out_n);
+
+/* Send `resources/read` for `uri` and surface the first content item's
+ * text body. On CMCP_OK *out_text is a malloc'd NUL-terminated string
+ * (caller frees with free()) and *out_n is its byte length (excluding
+ * the NUL).
+ *
+ * Decision on binary `blob` content (per v0.6.0 acceptance doc rule 1):
+ * we keep the helper text-only. If the server returns a `blob` content
+ * item the helper returns CMCP_EUNSUPPORTED — a host that needs binary
+ * resources drops to cmcp_client_request("resources/read", ...) and
+ * walks the result tree itself.
+ *
+ * Returns CMCP_OK; CMCP_EINVAL on bad arguments; CMCP_EPROTOCOL if the
+ * server returned a JSON-RPC error or a structurally invalid result;
+ * CMCP_ENOTFOUND if `result.contents` is an empty array;
+ * CMCP_EUNSUPPORTED if the first content item is a `blob`; the
+ * standard transport errors on a wire failure. */
+int cmcp_client_resource_read(cmcp_client_t *c, const char *uri,
+                               char **out_text, size_t *out_n);
+
+/* Send `prompts/get` for `name` with optional `args` (consumed; may be
+ * NULL) and surface the messages array. On CMCP_OK *out_messages is an
+ * owned cmcp_json_t whose `type` is CMCP_JSON_ARRAY — caller frees
+ * with cmcp_json_free.
+ *
+ * Returns CMCP_OK; CMCP_EINVAL on bad arguments; CMCP_EPROTOCOL if the
+ * server returned a JSON-RPC error or a structurally invalid result;
+ * the standard transport errors on a wire failure. */
+int cmcp_client_prompt_get(cmcp_client_t *c, const char *name,
+                            cmcp_json_t *args,
+                            cmcp_json_t **out_messages);
 
 /* ====================================================================== */
 /* Sampling (server → host LLM call)                                        */

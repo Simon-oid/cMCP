@@ -31,6 +31,7 @@
 #include "cmcp.h"
 #include "cmcp_client.h"
 #include "cmcp_json.h"
+#include "cmcp_session.h"
 #include "cmcp_types.h"
 #include "cmcp_transport.h"
 
@@ -1048,6 +1049,341 @@ int cmcp_client_call_async_progress(cmcp_client_t *c, const char *method,
         return rc;
     }
     *out_id = id;
+    return CMCP_OK;
+}
+
+/* ====================================================================== */
+/* Single-client typed helpers                                              */
+/* ====================================================================== */
+
+/* Read the opaque nextCursor off a list-page response, or NULL if the
+ * server marked this as the final page. Mirrors session.c's helper of
+ * the same name — we don't share via a private header in v0.6.0 to
+ * keep the diff blast radius small. */
+static const char *helper_result_next_cursor(const cmcp_rpc_message_t *resp) {
+    if (!resp || resp->error || !resp->result ||
+        resp->result->type != CMCP_JSON_OBJECT) return NULL;
+    const cmcp_json_t *nc = cmcp_json_object_get(resp->result, "nextCursor");
+    return (nc && nc->type == CMCP_JSON_STRING) ? nc->str.s : NULL;
+}
+
+/* If `resp` carries a nextCursor, fetch the next page in place and
+ * return 1. Otherwise return 0. On a request failure pagination simply
+ * stops with the pages collected so far. */
+static int helper_fetch_next_page(cmcp_client_t *c, const char *method,
+                                    cmcp_rpc_message_t *resp) {
+    const char *cur = helper_result_next_cursor(resp);
+    if (!cur) return 0;
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return 0;
+    cmcp_json_object_set(params, "cursor", cmcp_json_new_string(cur));
+    cmcp_rpc_message_clear(resp);
+    cmcp_rpc_message_init(resp);
+    return cmcp_client_request(c, method, params, resp) == CMCP_OK;
+}
+
+/* Absorb one tools/list page into the growing result array. server and
+ * qualified are left NULL — single-client helpers don't namespace. */
+static void absorb_tools_page(const cmcp_rpc_message_t *resp,
+                                cmcp_session_tool_t **arr,
+                                size_t *len, size_t *cap) {
+    if (!resp || !resp->result || resp->result->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *tools = cmcp_json_object_get(resp->result, "tools");
+    if (!tools || tools->type != CMCP_JSON_ARRAY) return;
+
+    for (size_t i = 0; i < tools->arr.len; i++) {
+        const cmcp_json_t *t = tools->arr.items[i];
+        if (!t || t->type != CMCP_JSON_OBJECT) continue;
+        const cmcp_json_t *name = cmcp_json_object_get(t, "name");
+        if (!name || name->type != CMCP_JSON_STRING) continue;
+        const cmcp_json_t *desc = cmcp_json_object_get(t, "description");
+        const cmcp_json_t *sch  = cmcp_json_object_get(t, "inputSchema");
+
+        if (*len == *cap) {
+            size_t new_cap = *cap ? *cap * 2 : 8;
+            cmcp_session_tool_t *na = (cmcp_session_tool_t *)realloc(*arr,
+                                       new_cap * sizeof *na);
+            if (!na) return;
+            *arr = na;
+            *cap = new_cap;
+        }
+        cmcp_session_tool_t *e = &(*arr)[*len];
+        memset(e, 0, sizeof *e);
+        e->name        = xstrdup(name->str.s);
+        e->description = (desc && desc->type == CMCP_JSON_STRING)
+                            ? xstrdup(desc->str.s) : NULL;
+        e->input_schema = sch ? cmcp_json_clone(sch) : NULL;
+        if (!e->name) {
+            free(e->name);
+            free(e->description);
+            cmcp_json_free(e->input_schema);
+            continue;
+        }
+        (*len)++;
+    }
+}
+
+int cmcp_client_tools_list(cmcp_client_t *c,
+                            cmcp_session_tool_t **out_tools,
+                            size_t *out_n) {
+    if (!c || !out_tools || !out_n) return CMCP_EINVAL;
+    *out_tools = NULL;
+    *out_n = 0;
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "tools/list", NULL, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+
+    cmcp_session_tool_t *arr = NULL;
+    size_t len = 0, cap = 0;
+    do {
+        absorb_tools_page(&resp, &arr, &len, &cap);
+    } while (helper_fetch_next_page(c, "tools/list", &resp));
+    cmcp_rpc_message_clear(&resp);
+
+    *out_tools = arr;
+    *out_n = len;
+    return CMCP_OK;
+}
+
+static void absorb_resources_page(const cmcp_rpc_message_t *resp,
+                                    cmcp_session_resource_t **arr,
+                                    size_t *len, size_t *cap) {
+    if (!resp || !resp->result || resp->result->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *res = cmcp_json_object_get(resp->result, "resources");
+    if (!res || res->type != CMCP_JSON_ARRAY) return;
+
+    for (size_t i = 0; i < res->arr.len; i++) {
+        const cmcp_json_t *r = res->arr.items[i];
+        if (!r || r->type != CMCP_JSON_OBJECT) continue;
+        const cmcp_json_t *uri  = cmcp_json_object_get(r, "uri");
+        const cmcp_json_t *name = cmcp_json_object_get(r, "name");
+        if (!uri  || uri->type  != CMCP_JSON_STRING) continue;
+        if (!name || name->type != CMCP_JSON_STRING) continue;
+        const cmcp_json_t *desc = cmcp_json_object_get(r, "description");
+        const cmcp_json_t *mime = cmcp_json_object_get(r, "mimeType");
+
+        if (*len == *cap) {
+            size_t new_cap = *cap ? *cap * 2 : 8;
+            cmcp_session_resource_t *na = (cmcp_session_resource_t *)realloc(
+                *arr, new_cap * sizeof *na);
+            if (!na) return;
+            *arr = na;
+            *cap = new_cap;
+        }
+        cmcp_session_resource_t *e = &(*arr)[*len];
+        memset(e, 0, sizeof *e);
+        e->uri         = xstrdup(uri->str.s);
+        e->name        = xstrdup(name->str.s);
+        e->description = (desc && desc->type == CMCP_JSON_STRING)
+                            ? xstrdup(desc->str.s) : NULL;
+        e->mime_type   = (mime && mime->type == CMCP_JSON_STRING)
+                            ? xstrdup(mime->str.s) : NULL;
+        if (!e->uri || !e->name) {
+            free(e->uri); free(e->name);
+            free(e->description); free(e->mime_type);
+            continue;
+        }
+        (*len)++;
+    }
+}
+
+int cmcp_client_resources_list(cmcp_client_t *c,
+                                cmcp_session_resource_t **out_resources,
+                                size_t *out_n) {
+    if (!c || !out_resources || !out_n) return CMCP_EINVAL;
+    *out_resources = NULL;
+    *out_n = 0;
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "resources/list", NULL, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+
+    cmcp_session_resource_t *arr = NULL;
+    size_t len = 0, cap = 0;
+    do {
+        absorb_resources_page(&resp, &arr, &len, &cap);
+    } while (helper_fetch_next_page(c, "resources/list", &resp));
+    cmcp_rpc_message_clear(&resp);
+
+    *out_resources = arr;
+    *out_n = len;
+    return CMCP_OK;
+}
+
+static void absorb_prompts_page(const cmcp_rpc_message_t *resp,
+                                  cmcp_session_prompt_t **arr,
+                                  size_t *len, size_t *cap) {
+    if (!resp || !resp->result || resp->result->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *prs = cmcp_json_object_get(resp->result, "prompts");
+    if (!prs || prs->type != CMCP_JSON_ARRAY) return;
+
+    for (size_t i = 0; i < prs->arr.len; i++) {
+        const cmcp_json_t *p = prs->arr.items[i];
+        if (!p || p->type != CMCP_JSON_OBJECT) continue;
+        const cmcp_json_t *name = cmcp_json_object_get(p, "name");
+        if (!name || name->type != CMCP_JSON_STRING) continue;
+        const cmcp_json_t *desc = cmcp_json_object_get(p, "description");
+        const cmcp_json_t *args = cmcp_json_object_get(p, "arguments");
+
+        if (*len == *cap) {
+            size_t new_cap = *cap ? *cap * 2 : 8;
+            cmcp_session_prompt_t *na = (cmcp_session_prompt_t *)realloc(
+                *arr, new_cap * sizeof *na);
+            if (!na) return;
+            *arr = na;
+            *cap = new_cap;
+        }
+        cmcp_session_prompt_t *e = &(*arr)[*len];
+        memset(e, 0, sizeof *e);
+        e->name        = xstrdup(name->str.s);
+        e->description = (desc && desc->type == CMCP_JSON_STRING)
+                            ? xstrdup(desc->str.s) : NULL;
+        e->arguments   = args ? cmcp_json_clone(args) : NULL;
+        if (!e->name) {
+            free(e->name);
+            free(e->description);
+            cmcp_json_free(e->arguments);
+            continue;
+        }
+        (*len)++;
+    }
+}
+
+int cmcp_client_prompts_list(cmcp_client_t *c,
+                              cmcp_session_prompt_t **out_prompts,
+                              size_t *out_n) {
+    if (!c || !out_prompts || !out_n) return CMCP_EINVAL;
+    *out_prompts = NULL;
+    *out_n = 0;
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "prompts/list", NULL, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+
+    cmcp_session_prompt_t *arr = NULL;
+    size_t len = 0, cap = 0;
+    do {
+        absorb_prompts_page(&resp, &arr, &len, &cap);
+    } while (helper_fetch_next_page(c, "prompts/list", &resp));
+    cmcp_rpc_message_clear(&resp);
+
+    *out_prompts = arr;
+    *out_n = len;
+    return CMCP_OK;
+}
+
+int cmcp_client_resource_read(cmcp_client_t *c, const char *uri,
+                               char **out_text, size_t *out_n) {
+    if (!c || !uri || !out_text || !out_n) return CMCP_EINVAL;
+    *out_text = NULL;
+    *out_n = 0;
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) return CMCP_ENOMEM;
+    cmcp_json_object_set(params, "uri", cmcp_json_new_string(uri));
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "resources/read", params, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    if (!resp.result || resp.result->type != CMCP_JSON_OBJECT) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    const cmcp_json_t *contents = cmcp_json_object_get(resp.result, "contents");
+    if (!contents || contents->type != CMCP_JSON_ARRAY) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    if (contents->arr.len == 0) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_ENOTFOUND;
+    }
+    const cmcp_json_t *first = contents->arr.items[0];
+    if (!first || first->type != CMCP_JSON_OBJECT) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    /* Spec: each content item carries either `text` (string) or `blob`
+     * (base64 string). The helper is text-only; blob is the documented
+     * CMCP_EUNSUPPORTED case. */
+    if (cmcp_json_object_get(first, "blob")) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EUNSUPPORTED;
+    }
+    const cmcp_json_t *text = cmcp_json_object_get(first, "text");
+    if (!text || text->type != CMCP_JSON_STRING) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    char *buf = (char *)malloc(text->str.len + 1);
+    if (!buf) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_ENOMEM;
+    }
+    memcpy(buf, text->str.s, text->str.len);
+    buf[text->str.len] = '\0';
+    *out_text = buf;
+    *out_n = text->str.len;
+    cmcp_rpc_message_clear(&resp);
+    return CMCP_OK;
+}
+
+int cmcp_client_prompt_get(cmcp_client_t *c, const char *name,
+                            cmcp_json_t *args,
+                            cmcp_json_t **out_messages) {
+    if (!c || !name || !out_messages) {
+        cmcp_json_free(args);
+        return CMCP_EINVAL;
+    }
+    *out_messages = NULL;
+
+    cmcp_json_t *params = cmcp_json_new_object();
+    if (!params) { cmcp_json_free(args); return CMCP_ENOMEM; }
+    cmcp_json_object_set(params, "name", cmcp_json_new_string(name));
+    if (args) cmcp_json_object_set(params, "arguments", args);
+
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = cmcp_client_request(c, "prompts/get", params, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    if (!resp.result || resp.result->type != CMCP_JSON_OBJECT) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    const cmcp_json_t *msgs = cmcp_json_object_get(resp.result, "messages");
+    if (!msgs || msgs->type != CMCP_JSON_ARRAY) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    cmcp_json_t *cloned = cmcp_json_clone(msgs);
+    cmcp_rpc_message_clear(&resp);
+    if (!cloned) return CMCP_ENOMEM;
+    *out_messages = cloned;
     return CMCP_OK;
 }
 
