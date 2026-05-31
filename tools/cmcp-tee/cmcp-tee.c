@@ -18,7 +18,14 @@
  * Frames preserve newline-delimited boundaries; the trailing newline is
  * stripped before logging. The file is opened in append mode so multiple
  * sessions accumulate, separated by `t`. stderr from the wrapped server
- * is NOT touched — let the host see it or redirect from the shell. */
+ * is NOT touched — let the host see it or redirect from the shell.
+ *
+ * Per-frame log cap (B.2): the wire is always teed faithfully, but each
+ * LOG record is bounded by $CMCP_TEE_MAX_FRAME bytes (default 1 MiB; 0
+ * disables). A frame over the cap is recorded clipped, with extra fields
+ * `"truncated":true,"orig_len":<true-bytes>,"cap":<cap>`. This keeps a
+ * hostile upstream from turning the wire log into a memory bomb (tee
+ * links no cMCP libs, so it can't reuse the server's JSON caps). */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -37,15 +44,28 @@
 static FILE            *g_log    = NULL;
 static pthread_mutex_t  g_log_mu = PTHREAD_MUTEX_INITIALIZER;
 
+/* Per-frame byte cap for the JSONL *log record* (B.2). The tee stays
+ * byte-for-byte transparent on the wire — this only bounds what we
+ * write to the log, so a hostile peer's 10 MiB single-frame payload is
+ * recorded as a truncated marker instead of (a) a 10 MiB JSONL line and
+ * (b) a 10 MiB accumulation buffer in this process. Snapshotted once in
+ * main from $CMCP_TEE_MAX_FRAME (default 1 MiB; 0 disables the cap). */
+#define TEE_DEFAULT_MAX_FRAME (1024UL * 1024UL)
+static size_t g_max_frame = TEE_DEFAULT_MAX_FRAME;
+
 static double now_seconds(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-/* JSON-string-escape `frame` and emit one log line under lock so
- * concurrent pump threads can't interleave their writes. */
-static void log_frame(const char *dir, const char *frame, size_t len) {
+/* JSON-string-escape the first `len` bytes of `frame` and emit one log
+ * line under lock so concurrent pump threads can't interleave writes.
+ * When `orig_len > len` the frame was truncated to the cap: we add
+ * `"truncated":true,"orig_len":<orig_len>,"cap":<len>` so a reader can
+ * tell a faithful record from a clipped one. */
+static void log_frame(const char *dir, const char *frame,
+                      size_t len, size_t orig_len) {
     pthread_mutex_lock(&g_log_mu);
     fprintf(g_log, "{\"t\":%.6f,\"dir\":\"%s\",\"frame\":\"",
             now_seconds(), dir);
@@ -62,7 +82,11 @@ static void log_frame(const char *dir, const char *frame, size_t len) {
             else          fputc((int)c, g_log);
         }
     }
-    fputs("\"}\n", g_log);
+    if (orig_len > len)
+        fprintf(g_log, "\",\"truncated\":true,\"orig_len\":%zu,\"cap\":%zu}\n",
+                orig_len, len);
+    else
+        fputs("\"}\n", g_log);
     fflush(g_log);
     pthread_mutex_unlock(&g_log_mu);
 }
@@ -71,14 +95,16 @@ static void log_frame(const char *dir, const char *frame, size_t len) {
  * just-completed line (without the newline) is sent to the log under
  * the given direction tag. */
 static void pump(int in_fd, int out_fd, const char *dir) {
-    char  *buf  = NULL;
-    size_t cap  = 0;
-    size_t used = 0;
+    char  *buf   = NULL;
+    size_t alloc = 0;        /* bytes allocated in buf                 */
+    size_t used  = 0;        /* bytes stored for the current line (<= cap) */
+    size_t total = 0;        /* true current-line length, excl. newline */
     char   chunk[4096];
     for (;;) {
         ssize_t n = read(in_fd, chunk, sizeof chunk);
         if (n <= 0) break;
-        /* Forward bytes to peer first so latency isn't affected by logging. */
+        /* Forward bytes to peer first so latency isn't affected by logging.
+         * Forwarding is always faithful — the cap only bounds the log. */
         ssize_t w = 0;
         while (w < n) {
             ssize_t k = write(out_fd, chunk + w, (size_t)(n - w));
@@ -86,22 +112,32 @@ static void pump(int in_fd, int out_fd, const char *dir) {
             w += k;
         }
         for (ssize_t i = 0; i < n; i++) {
-            if (used + 1 > cap) {
-                size_t ncap = cap ? cap * 2 : 256;
-                char *nb = (char *)realloc(buf, ncap);
-                if (!nb) goto done;
-                buf = nb; cap = ncap;
+            char c = chunk[i];
+            if (c == '\n') {
+                log_frame(dir, buf, used, total);
+                used = 0; total = 0;
+                continue;
             }
-            buf[used++] = chunk[i];
-            if (chunk[i] == '\n') {
-                log_frame(dir, buf, used - 1);
-                used = 0;
+            total++;
+            /* Store into the log buffer only while under the cap
+             * (0 = unlimited). Past the cap we keep counting `total`
+             * for the truncation marker but stop growing memory. */
+            if (g_max_frame == 0 || used < g_max_frame) {
+                if (used + 1 > alloc) {
+                    size_t nalloc = alloc ? alloc * 2 : 256;
+                    if (g_max_frame && nalloc > g_max_frame)
+                        nalloc = g_max_frame;
+                    char *nb = (char *)realloc(buf, nalloc);
+                    if (!nb) goto done;
+                    buf = nb; alloc = nalloc;
+                }
+                buf[used++] = c;
             }
         }
     }
 done:
     /* Flush any trailing partial line so weird shutdowns are still visible. */
-    if (used > 0) log_frame(dir, buf, used);
+    if (total > 0) log_frame(dir, buf, used, total);
     free(buf);
 }
 
@@ -125,6 +161,14 @@ int main(int argc, char **argv) {
     }
     const char *log_path = argv[1];
     const char *server   = argv[2];
+
+    /* Snapshot the per-frame log cap once, before any pump thread runs. */
+    const char *mf = getenv("CMCP_TEE_MAX_FRAME");
+    if (mf && *mf) {
+        char *end;
+        long v = strtol(mf, &end, 10);
+        if (*end == '\0' && v >= 0) g_max_frame = (size_t)v;  /* 0 = unlimited */
+    }
 
     g_log = fopen(log_path, "a");
     if (!g_log) {

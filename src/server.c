@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/resource.h>   /* getrlimit/setrlimit — F.4 RLIMIT_AS insurance */
 
 /* ====================================================================== */
 /* Lifecycle states                                                        */
@@ -804,6 +805,20 @@ int cmcp_handler_cancelled(const cmcp_handler_ctx_t *hctx) {
     int c = hctx->cancelled;
     pthread_mutex_unlock(&hctx->server->inflight_mu);
     return c;
+}
+
+const char *cmcp_handler_get_header(const cmcp_handler_ctx_t *hctx,
+                                    const char *name) {
+    if (!hctx || !name) return NULL;
+    cmcp_server_t *s = hctx->server;
+    /* active_transport is stable for the whole run; notify_mu just
+     * guards the pointer read (it's set/cleared under that lock). The
+     * returned value's lifetime is governed by the transport (valid for
+     * this handler call) — see cmcp_transport request_header_fn. */
+    pthread_mutex_lock(&s->notify_mu);
+    cmcp_transport_t *t = s->active_transport;
+    pthread_mutex_unlock(&s->notify_mu);
+    return cmcp_transport_request_header(t, name);
 }
 
 void cmcp_handler_set_structured(cmcp_handler_ctx_t *hctx,
@@ -1735,6 +1750,47 @@ static size_t resolve_worker_count(void) {
     return 4;
 }
 
+/* F.4 cheap insurance: if $CMCP_HANDLER_RLIMIT_AS_MB is a positive
+ * integer, lower the process address-space soft limit so a runaway
+ * handler hits malloc-returns-NULL instead of OOM-killing the box.
+ * Coarse and process-wide (NOT per-handler isolation — see the contract
+ * note on cmcp_server_add_tool). Best-effort: we never RAISE an existing
+ * limit, never exceed the hard limit, and silently no-op on any parse or
+ * setrlimit failure — a misconfigured knob must not stop the server from
+ * running. Snapshotted once; applied at the first cmcp_server_run(). */
+static pthread_once_t g_rlimit_once = PTHREAD_ONCE_INIT;
+
+static void rlimit_as_init(void) {
+#ifdef RLIMIT_AS
+    const char *e = getenv("CMCP_HANDLER_RLIMIT_AS_MB");
+    if (!e || !*e) return;
+    char *end;
+    long mb = strtol(e, &end, 10);
+    if (*end != '\0' || mb <= 0) return;          /* unset/invalid → no-op */
+
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_AS, &rl) != 0) return;
+
+    /* Cap in bytes, guarding against overflow on the multiply. */
+    rlim_t want = (rlim_t)mb * 1024u * 1024u;
+    if ((long)(want / (1024u * 1024u)) != mb) return;  /* overflowed */
+
+    /* Never raise above the current hard limit; never raise an already
+     * lower soft limit. We only ever TIGHTEN. */
+    if (rl.rlim_max != RLIM_INFINITY && want > rl.rlim_max)
+        want = rl.rlim_max;
+    if (rl.rlim_cur != RLIM_INFINITY && want >= rl.rlim_cur)
+        return;                                   /* already at/below want */
+
+    rl.rlim_cur = want;
+    (void)setrlimit(RLIMIT_AS, &rl);              /* best-effort */
+#endif
+}
+
+static void maybe_apply_rlimit_as(void) {
+    pthread_once(&g_rlimit_once, rlimit_as_init);
+}
+
 /* A request handed to the pool. It owns `msg` and embeds the `ctx`
  * that the in-flight table points at; `server` and `transport` are
  * borrowed — both outlive the pool, because the run loop joins the pool
@@ -1771,6 +1827,9 @@ static void process_work(void *arg) {
 
 int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
     if (!s || !t) return CMCP_EINVAL;
+
+    /* F.4 opt-in: tighten RLIMIT_AS once, before any handler can run. */
+    maybe_apply_rlimit_as();
 
     cmcp_pool_t *pool = cmcp_pool_new(resolve_worker_count());
     if (!pool) return CMCP_ENOMEM;

@@ -7,7 +7,17 @@ CURL_LIBS   := $(shell $(PKG_CONFIG) --libs libcurl)
 
 CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -O2 -g -Iinclude $(CURL_CFLAGS)
 LDFLAGS ?=
-LDLIBS  ?= $(CURL_LIBS) -lpthread -lm
+# libcurl is only pulled in by src/transport_http_client.c (the HTTP *client*
+# transport). Server-side HTTP is hand-rolled on sockets and needs no curl.
+# Wrapping CURL_LIBS in --as-needed lets the linker drop the DT_NEEDED entry
+# for any binary that never references the HTTP client — so a stdio-only
+# server (echo-server) or a filesystem server carries no libcurl dependency,
+# while a binary that does call cmcp_transport_http_connect keeps it. The
+# archives are scanned before LDLIBS, so by the time the linker reaches curl
+# any transport_http_client.o it pulled has already surfaced the undefined
+# curl_* symbols that keep the library. pthread/m are genuinely universal, so
+# --no-as-needed pins them unconditionally.
+LDLIBS  ?= -Wl,--as-needed $(CURL_LIBS) -Wl,--no-as-needed -lpthread -lm
 
 # --- Source partitioning into three link targets ---------------------------
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.
@@ -285,6 +295,10 @@ bench-profile: bench-profile-cpu bench-profile-heap
 # it depends on that binary in addition to the libs. This specific rule
 # overrides the generic tests/% pattern below.
 tests/test_fs_server: tests/test_fs_server.c $(BUILT_LIBS) $(FS_MCP_BIN)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+# test_tee_frame_cap execs the built cmcp-tee binary (B.2 cap regression).
+tests/test_tee_frame_cap: tests/test_tee_frame_cap.c $(BUILT_LIBS) $(TEE_BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
 tests/%: tests/%.c $(BUILT_LIBS)

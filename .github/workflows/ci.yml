@@ -86,6 +86,7 @@ jobs:
       # cache wins. On the first ever run (no prior main push), this
       # is a no-op and the delta script reports informational-only.
       - name: Restore coverage baseline (Tier 7.4)
+        id: restore-cov
         if: github.event_name == 'pull_request'
         uses: actions/cache/restore@v4
         with:
@@ -93,6 +94,20 @@ jobs:
           key: coverage-baseline-main-${{ github.event.pull_request.base.sha }}
           restore-keys: |
             coverage-baseline-main-
+
+      # A.5: make the cache outcome unambiguous in the job log. Without
+      # this, a first PR after main (cache expired/empty) and a genuine
+      # green gate look identical to a reviewer. The cache action's
+      # cache-hit is only true on an EXACT key; with restore-keys a prefix
+      # match still populates the file, so we key off the file itself.
+      - name: Coverage baseline cache status (A.5)
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ -f coverage-baseline/summary.txt ]; then
+              echo "coverage: baseline cache HIT — gate will diff vs base ${{ github.event.pull_request.base.sha }}"
+          else
+              echo "coverage: no baseline cache hit (informational only this PR — gate cannot diff)"
+          fi
 
       - name: make coverage
         run: make coverage

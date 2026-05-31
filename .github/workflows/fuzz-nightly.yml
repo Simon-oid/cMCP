@@ -154,7 +154,17 @@ jobs:
               gh issue comment "$existing" --body "Repeat fire on run \`${{ github.run_id }}\` (${#arts[@]} artefact(s))."
               echo "commented on issue #$existing"
           else
-              gh issue create --title "$title" --body "$body" --label "fuzz,bug" || \
+              # Route to the maintainer and tag with the dedicated triage
+              # label (A.4). repository_owner is the assignee — @me would
+              # resolve to the Actions bot, which can't own an issue. The
+              # label/assignee flags degrade gracefully: if the label
+              # doesn't exist yet or the assignee can't be set, retry
+              # without them rather than dropping the alert.
+              owner='${{ github.repository_owner }}'
+              gh issue create --title "$title" --body "$body" \
+                    --label "fuzz-nightly,fuzz,bug" --assignee "$owner" || \
+                gh issue create --title "$title" --body "$body" \
+                    --assignee "$owner" || \
                 gh issue create --title "$title" --body "$body"
               echo "opened new issue"
           fi

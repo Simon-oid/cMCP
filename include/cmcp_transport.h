@@ -78,6 +78,19 @@ struct cmcp_transport {
      * which the upper layer interrupts via pthread_kill. */
     void (*wake_fn)(cmcp_transport_t *t);
 
+    /* Optional. Look up a header from the request currently being
+     * handled, case-insensitively, returning a borrowed pointer (valid
+     * only until the next frame is read) or NULL if absent. Lets a
+     * handler reach transport-level metadata it otherwise couldn't —
+     * e.g. an HTTP `Authorization` value so a host can implement
+     * per-tool auth. Only meaningful for request/response transports
+     * that carry headers; stdio leaves this NULL (always "no header").
+     *
+     * Safe because the HTTP transport handles exactly one request at a
+     * time (single acceptor, single-slot handoff), so "the current
+     * request" is unambiguous for the duration of a handler call. */
+    const char *(*request_header_fn)(cmcp_transport_t *t, const char *name);
+
     void *impl;
 };
 
@@ -100,6 +113,12 @@ static inline void cmcp_transport_close(cmcp_transport_t *t) {
 
 static inline void cmcp_transport_wake(cmcp_transport_t *t) {
     if (t && t->wake_fn) t->wake_fn(t);
+}
+
+static inline const char *cmcp_transport_request_header(cmcp_transport_t *t,
+                                                         const char *name) {
+    if (t && t->request_header_fn) return t->request_header_fn(t, name);
+    return NULL;
 }
 
 /* ====================================================================== */

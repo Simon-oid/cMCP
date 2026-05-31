@@ -433,6 +433,32 @@ sweeps the table every 200ms and flags any request past its deadline —
 the loop flags every in-flight request before draining the pool, so
 handlers stuck on a dead transport unwind instead of writing into it.
 
+**The handler contract (cooperative cancellation — load-bearing).**
+Both the `notifications/cancelled` path and the watchdog only *flag*;
+neither force-kills. There is deliberately no `pthread_cancel` — async
+cancellation of a thread that may hold the transport writer mutex or a
+`malloc` arena lock is unsafe in C, and a bounded in-process pool is the
+right footprint for the Pi-class target. The consequence is a contract
+on handler authors, documented at `cmcp_server_add_tool` in
+`include/cmcp_server.h`:
+
+- A handler **MUST** poll `cmcp_handler_cancelled(hctx)` in any loop or
+  before any long/blocking step and return early when it reads non-zero.
+- A handler that blocks unboundedly burns its worker slot permanently.
+  `CMCP_WORKERS` such handlers (default 4) deadlock the whole server —
+  no further request, not even `initialize`, gets a worker. This is a
+  contract violation by the handler, not a pool bug.
+
+As coarse, opt-in insurance against a handler that leaks memory rather
+than spins, `CMCP_HANDLER_RLIMIT_AS_MB` (unset/`0` → off) lowers the
+process `RLIMIT_AS` soft limit once at `cmcp_server_run` entry, so a
+runaway allocation hits `malloc`-returns-`NULL` instead of the OOM
+killer. It is process-wide (caps library + host too) and best-effort —
+never raises an existing limit, never exceeds the hard limit, silently
+no-ops on any failure. It is NOT isolation: per-handler resource caps
+and out-of-process sandboxing are a separate, deferred tier (the threat
+model today is single-author tools, not untrusted third-party code).
+
 **Server → client requests.** A worker can call
 `cmcp_server_send_request` (used internally by `cmcp_handler_elicit`
 to issue `elicitation/create`) from inside a handler. The function

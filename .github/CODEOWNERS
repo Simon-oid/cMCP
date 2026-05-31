@@ -1,0 +1,12 @@
+# Code ownership for cMCP.
+#
+# Single-maintainer repo: the owner reviews everything by default. The
+# explicit entries below exist so GitHub routes review requests — and,
+# for the nightly-fuzz triage flow (A.4), the human follow-up — to a
+# named owner rather than nobody.
+
+* @Simon-oid
+
+# Operational gates whose failures need an owner on the hook.
+/.github/workflows/fuzz-nightly.yml  @Simon-oid
+/.github/workflows/spec-drift.yml    @Simon-oid

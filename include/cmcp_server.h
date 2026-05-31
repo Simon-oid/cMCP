@@ -82,6 +82,27 @@ int cmcp_handler_progress(cmcp_handler_ctx_t *hctx,
                           double progress, double total,
                           const char *message);
 
+/* Look up a transport-level header for the request being handled,
+ * case-insensitively (e.g. `cmcp_handler_get_header(hctx,
+ * "Authorization")`). Lets a host implement per-tool auth: the MCP
+ * threat model terminates TLS in front of the server, but the bytes have
+ * to reach policy, and this is how a handler sees them.
+ *
+ * Returns a BORROWED pointer valid only for the duration of this handler
+ * call — copy it if you need it longer; never free it. Returns NULL when
+ * the header is absent, the name is NULL, or the transport carries no
+ * headers at all (the stdio transport always returns NULL — there is no
+ * out-of-band metadata channel there).
+ *
+ * Redaction note: this returns the RAW value — the credential scrubber
+ * (CMCP_LOG_REDACT) does not touch it, because the handler is the
+ * consumer of auth policy and must see the real bytes. The scrubber only
+ * masks credential-shaped keys inside a `cmcp_server_log` data payload,
+ * so if a handler chooses to log a fetched token it is still protected
+ * there; the library itself never logs request headers. NULL-safe. */
+const char *cmcp_handler_get_header(const cmcp_handler_ctx_t *hctx,
+                                    const char *name);
+
 /* Attach a structured result to this tool call. The library wraps it
  * as `structuredContent` in the tools/call response. If the tool has
  * an `output_schema`, the value is validated against it before send;
@@ -161,7 +182,40 @@ typedef struct {
  *   CMCP_ENOMEM     on allocation failure
  *
  * MUST be called BEFORE `cmcp_server_run()`. Adding tools concurrently
- * with the run loop is unsupported in v0.1. */
+ * with the run loop is unsupported in v0.1.
+ *
+ * ----------------------------------------------------------------------
+ * HANDLER CONTRACT — cancellation is COOPERATIVE.
+ * ----------------------------------------------------------------------
+ * Handlers run in-process on a fixed worker pool (size `CMCP_WORKERS`,
+ * default 4). The library NEVER force-kills a handler: there is no
+ * pthread_cancel, no per-handler thread teardown. The cancel paths
+ * (`notifications/cancelled` from the peer, and the
+ * `CMCP_HANDLER_TIMEOUT_MS` watchdog) only FLAG the call — they flip the
+ * bit that `cmcp_handler_cancelled(hctx)` reads. A handler that never
+ * polls it runs to completion regardless.
+ *
+ * Therefore every handler MUST:
+ *   1. Poll `cmcp_handler_cancelled(hctx)` periodically inside any loop
+ *      or before any long/blocking step, and return early when it reads
+ *      non-zero. (Returning early is free — the worker discards the
+ *      response for an already-cancelled request.)
+ *   2. Not block unboundedly. A handler stuck in `while (1) {}` or an
+ *      un-timed blocking syscall burns its worker slot forever. With the
+ *      default pool, FOUR such handlers deadlock the whole server — no
+ *      further request, not even `initialize`, gets a worker.
+ *
+ * This is a contract on YOU, not a bug in the pool. The pool is bounded
+ * on purpose (predictable footprint, the Pi-class deployment target).
+ *
+ * Coarse memory insurance (opt-in): set `CMCP_HANDLER_RLIMIT_AS_MB` to a
+ * positive integer and the server applies that as a process-wide
+ * `RLIMIT_AS` ceiling at `cmcp_server_run()` entry, so a runaway handler
+ * hits malloc-returns-NULL instead of OOM-killing the box. It is
+ * process-wide and coarse (it also caps the library + host), NOT
+ * per-handler isolation — true out-of-process sandboxing is a separate,
+ * deferred tier. Unset/0 → no limit (default). See docs/architecture.md
+ * "Worker pool & the handler contract". */
 int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool);
 
 /* Convenience: build a content-array containing a single text item.

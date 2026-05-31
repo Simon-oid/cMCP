@@ -435,6 +435,15 @@ typedef struct http_impl {
     int                resp_present;
     int                resp_was_minted; /* mint session id on this response */
 
+    /* Headers of the request currently in the slot (B.1). Deep-copied
+     * from the parsed request under slot_mu when the body is deposited,
+     * so a handler can reach e.g. `Authorization` via
+     * cmcp_handler_get_header. Replaced on the next deposit; because the
+     * transport handles one request at a time, a value handed to a
+     * handler stays valid for that handler's whole call. */
+    cmcp_http_header_t cur_headers[CMCP_HTTP_MAX_HEADERS];
+    size_t             cur_n_headers;
+
     /* SSE bookkeeping. sse_mu guards both the holder list AND the
      * event ring + counter (MCP 2025-11-25 SEP-1699): a single lock so
      * an emit can atomically assign an id, record the event in the
@@ -592,6 +601,63 @@ static body_kind_t classify_body(const char *body, size_t len) {
     return k;
 }
 
+/* B.1 — current-request header snapshot. -------------------------------- */
+
+/* Free the snapshot. Caller holds slot_mu (or is in single-threaded
+ * teardown). */
+static void http_clear_cur_headers(http_impl_t *impl) {
+    for (size_t i = 0; i < impl->cur_n_headers; i++) {
+        free(impl->cur_headers[i].name);
+        free(impl->cur_headers[i].value);
+        impl->cur_headers[i].name  = NULL;
+        impl->cur_headers[i].value = NULL;
+    }
+    impl->cur_n_headers = 0;
+}
+
+/* Deep-copy `req`'s headers into the slot so a handler can read them
+ * after `req` (a stack local in the acceptor) is gone. Caller holds
+ * slot_mu. A strdup failure drops that one header (it simply reads as
+ * absent) rather than failing the request — auth is handler policy, not
+ * a transport invariant. */
+static void http_set_cur_headers(http_impl_t *impl, const http_request_t *req) {
+    http_clear_cur_headers(impl);
+    size_t n = req->n_headers;
+    if (n > CMCP_HTTP_MAX_HEADERS) n = CMCP_HTTP_MAX_HEADERS;
+    for (size_t i = 0; i < n; i++) {
+        char *nm = req->headers[i].name  ? strdup(req->headers[i].name)  : NULL;
+        char *vl = req->headers[i].value ? strdup(req->headers[i].value) : NULL;
+        if ((req->headers[i].name && !nm) || (req->headers[i].value && !vl)) {
+            free(nm); free(vl);
+            continue;
+        }
+        impl->cur_headers[impl->cur_n_headers].name  = nm;
+        impl->cur_headers[impl->cur_n_headers].value = vl;
+        impl->cur_n_headers++;
+    }
+}
+
+/* vtable request_header_fn: case-insensitive lookup in the current
+ * request's snapshot. The borrowed pointer stays valid for the handler's
+ * call because the transport handles one request at a time — the next
+ * deposit (which would replace the snapshot) cannot run until this
+ * request's response has been written. */
+static const char *http_request_header_fn(cmcp_transport_t *t,
+                                          const char *name) {
+    http_impl_t *impl = (http_impl_t *)t->impl;
+    const char *val = NULL;
+    pthread_mutex_lock(&impl->slot_mu);
+    for (size_t i = 0; i < impl->cur_n_headers; i++) {
+        if (impl->cur_headers[i].name &&
+            strcasecmp(impl->cur_headers[i].name, name) == 0) {
+            val = impl->cur_headers[i].value;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&impl->slot_mu);
+    return val;
+}
+
 static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     if (req->body_len == 0) {
         reply_error(fd, 400, "Bad Request", "empty body\n");
@@ -654,6 +720,7 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     impl->req_len     = req->body_len;
     impl->req_is_init = kind.method_is_init;
     impl->req_present = 1;
+    http_set_cur_headers(impl, req);     /* B.1: expose headers to handler */
     pthread_cond_signal(&impl->read_cv);
 
     /* Notifications and JSON-RPC responses produce no upper-layer
@@ -1234,6 +1301,7 @@ static void http_close_fn(cmcp_transport_t *t) {
         free(impl->req_body);
         free(impl->resp_body);
         free(impl->allowed_origins);
+        http_clear_cur_headers(impl);        /* B.1: free header snapshot */
         if (impl->event_ring) {
             sse_buf_entry_t *ring = (sse_buf_entry_t *)impl->event_ring;
             for (size_t i = 0; i < impl->event_ring_capacity; i++) {
@@ -1374,6 +1442,7 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
     t->write_fn = http_write_fn;
     t->close_fn = http_close_fn;
     t->wake_fn  = http_wake_fn;
+    t->request_header_fn = http_request_header_fn;
 
     if (pthread_create(&impl->acceptor, NULL, acceptor_main, impl) != 0) {
         pthread_mutex_destroy(&impl->slot_mu);

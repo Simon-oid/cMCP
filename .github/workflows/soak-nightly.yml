@@ -1,0 +1,60 @@
+# Nightly soak — folds A.2 (install-soak-cron) + A.3 (heartbeat /
+# missed-run alarm) into one scheduled GitHub Action.
+#
+# The local-cron approach the Tier-7 plan shipped only produces signal
+# if a specific box is powered on, and a skipped night is invisible.
+# A scheduled workflow inverts that: GitHub runs it (or visibly doesn't),
+# the Actions tab is the heartbeat, and a drift failure mails the
+# maintainer for free — no crontab, no gist, no cross-check job.
+#
+# This is a REDUCED soak (minutes, both transports) sized to fit a CI
+# runner — it catches steady-state leaks/fd-growth/latency drift on a
+# nightly cadence. The full multi-hour endurance run still belongs on
+# real hardware via `make soak-nightly`; this is the always-on tripwire.
+
+name: soak-nightly
+
+on:
+  schedule:
+    # 03:17 UTC daily — off the top of the hour to avoid the scheduler's
+    # congested :00 slot (GitHub may delay heavily-contended crons).
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Soak duration per transport (seconds)'
+        required: false
+        default: '1200'
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    name: reduced soak (stdio + http)
+    runs-on: ubuntu-latest
+    # Hard ceiling well under GitHub's 6h job cap: two legs of ~20min
+    # plus build, with headroom for a contended runner.
+    timeout-minutes: 75
+    env:
+      # Reduced from the 21600s (6h) endurance default; long enough for
+      # the awk drift criteria to have ample samples at INTERVAL=5s.
+      SOAK_DURATION: ${{ github.event.inputs.duration || '1200' }}
+      SOAK_WARMUP: '60'
+      SOAK_INTERVAL: '5'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Build
+        run: make
+
+      - name: Soak — stdio transport
+        run: make soak
+
+      - name: Soak — HTTP transport
+        run: make soak-http
