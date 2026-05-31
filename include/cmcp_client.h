@@ -328,6 +328,71 @@ cmcp_tool_outcome_t cmcp_client_tool_call(cmcp_client_t *c,
                                             char **out_text,
                                             cmcp_rpc_error_t **out_rpc_err);
 
+/* Typed async pair, A4 (v0.7 candidate surfaced by the v0.6.0 dogfood
+ * rewrite). cmcp_client_tool_call is the sync sugar; this pair lets
+ * the host fan out N concurrent tool calls and reap them in any order
+ * without dropping back to the raw cmcp_client_call_async +
+ * cmcp_client_wait surface (which would re-expose the two-channel
+ * error model A2's outcome enum eliminated).
+ *
+ * Wire shape, ownership, and error semantics are identical to
+ * cmcp_client_tool_call — the split is purely about scheduling.
+ *
+ * cmcp_client_tool_call_async: builds {name, arguments} (NULL args
+ * becomes {}), dispatches via the async core, stores the in-flight
+ * id in `*out_id`. `args` is consumed in every code path (including
+ * caller-misuse: NULL c / NULL name / NULL out_id). Returns CMCP_OK
+ * on success, or one of CMCP_EINVAL / CMCP_ENOMEM / CMCP_EAGAIN
+ * (in-flight cap) / transport error from the writer.
+ *
+ * cmcp_client_tool_wait: blocks until the response arrives, then
+ * processes it through the same three branches as
+ * cmcp_client_tool_call. Always returns one of the three
+ * cmcp_tool_outcome_t values. Failures that cannot arrive on the
+ * wire (caller passed an unknown id; the call was cancelled
+ * mid-flight; the response was malformed) surface as
+ * CMCP_TOOL_ERR_PROTOCOL with a synthesized cmcp_rpc_error_t so the
+ * caller's switch has no default arm. */
+int cmcp_client_tool_call_async(cmcp_client_t *c,
+                                  const char *name,
+                                  cmcp_json_t *args,
+                                  long long *out_id);
+
+cmcp_tool_outcome_t cmcp_client_tool_wait(cmcp_client_t *c,
+                                            long long id,
+                                            cmcp_json_t **out_result,
+                                            char **out_text,
+                                            cmcp_rpc_error_t **out_rpc_err);
+
+/* Content-shortcut helper, A5 (v0.7 candidate surfaced by the v0.6.0
+ * dogfood rewrite). Many host call sites want one thing from a
+ * `tools/call`: the LLM-facing text. Both the success branch
+ * (result.content[0].text) and the tool-error branch
+ * (isError:true + result.content[0].text) produce that text — but
+ * cmcp_client_tool_call hands the success branch back as a raw
+ * cmcp_json_t the host then has to walk. A5 flattens both:
+ *
+ *   On CMCP_OK:
+ *      *out_text is the first content[].text from the result, as
+ *      an owned malloc-d C string. Empty string if the result had
+ *      no content items or the first item had no text. *out_rpc_err
+ *      stays NULL. The success-vs-tool-error distinction is
+ *      DELIBERATELY collapsed; if you need it, use
+ *      cmcp_client_tool_call.
+ *
+ *   On negative return (CMCP_EPROTOCOL):
+ *      *out_rpc_err is an owned cmcp_rpc_error_t (free with
+ *      cmcp_rpc_error_free). *out_text stays NULL.
+ *
+ * `args` is consumed in every code path. NULL out_text or NULL
+ * out_rpc_err is silently freed. NULL c / NULL name / NULL out_text
+ * is reported as CMCP_EPROTOCOL with a synthesized -32602. */
+int cmcp_client_tool_call_text(cmcp_client_t *c,
+                                const char *name,
+                                cmcp_json_t *args,
+                                char **out_text,
+                                cmcp_rpc_error_t **out_rpc_err);
+
 /* ====================================================================== */
 /* Sampling (server → host LLM call)                                        */
 /* ====================================================================== */

@@ -16,16 +16,26 @@
  * the wire log of a dogfood run still records what the new surface
  * looks like in action.
  *
+ * v0.7 follow-up (Unreleased, 2026-05-31): step 5 is restored to its
+ * original parallel-fan shape using A4's cmcp_client_tool_call_async +
+ * cmcp_client_tool_wait pair, which carry the same 3-way outcome as
+ * A2. A new step 8 exercises A5's cmcp_client_tool_call_text so the
+ * harness demonstrates the OK-path text shortcut end-to-end. Both
+ * v0.7-* gaps surfaced by the O1 rewrite are closed; the dogfood
+ * summary now reports findings: 0.
+ *
  * Pattern coverage (still the butlerbot shape):
  *   1. handshake + capability inspection (read server identity)
  *   2. cmcp_client_tools_list -> walk typed records
  *   3. cmcp_client_resource_read -> ambient context (crag://stats)
  *   4. 3 sync cmcp_client_tool_call -> 3-way outcome switch
- *   5. (was parallel async) sequential fan — A1/A2 are sync-only;
- *      see new finding for the async-typed gap
+ *   5. A4 async fan: 3 cmcp_client_tool_call_async dispatches, then
+ *      cmcp_client_tool_wait reaps each — same 3-way switch as step 4
  *   6. error paths: empty query, k=999 -> one switch per site
  *   7. unknown-tool: one switch -> CMCP_TOOL_ERR_PROTOCOL
- *   8. tear down cleanly
+ *   8. A5 content-shortcut: one cmcp_client_tool_call_text -> owned
+ *      text, no result-tree walking
+ *   9. tear down cleanly
  *
  * Every step logs "expect" / "got" / "finding" lines to stderr.
  *
@@ -262,37 +272,47 @@ static int run_session(const char *server_path,
         log_tool_outcome(q1 - q0, site, outcome, result_json, err_text, rpc_err);
     }
 
-    /* --- step 5: was async-parallel; A1/A2 are sync-only ------------ */
-    STEP("sequential fan of 3 cmcp_client_tool_call (was async-parallel)");
-    EXPECT("3 sync calls; total time is sum, not max(single)");
+    /* --- step 5: A4 async fan ---------------------------------------- */
+    STEP("async fan of 3 cmcp_client_tool_call_async + tool_wait (A4)");
+    EXPECT("3 dispatches first, then 3 reaps; same 3-way switch as step 4");
 
     const char *async_q[3] = {"json layer", "client async API", "transport vtable"};
+    long long ids[3] = {0, 0, 0};
     double s0 = now_ms();
     for (int i = 0; i < 3; i++) {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(async_q[i]));
+        int rc = cmcp_client_tool_call_async(cli, "crag_search", args, &ids[i]);
+        if (rc != CMCP_OK) {
+            fprintf(stderr, "  fan[%d] dispatch failed: %s\n",
+                    i, cmcp_errstr(rc));
+        }
+    }
+    double s1 = now_ms();
+    fprintf(stderr, "  all 3 dispatched in %.1fms\n", s1 - s0);
 
+    /* Reap in reverse order — the reader thread demuxes by id, so the
+     * wait order is independent of the wire arrival order. */
+    for (int i = 2; i >= 0; i--) {
         cmcp_json_t      *result_json = NULL;
         char             *err_text    = NULL;
         cmcp_rpc_error_t *rpc_err     = NULL;
         char site[64];
-        snprintf(site, sizeof(site), "fan[%d] @+%.1fms \"%s\"",
+        snprintf(site, sizeof(site), "fan[%d] reap@+%.1fms \"%s\"",
                  i, now_ms() - s0, async_q[i]);
-
         double q0 = now_ms();
-        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
-            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        cmcp_tool_outcome_t outcome = cmcp_client_tool_wait(
+            cli, ids[i], &result_json, &err_text, &rpc_err);
         double q1 = now_ms();
-        log_tool_outcome(q1 - q0, site, outcome, result_json, err_text, rpc_err);
+        log_tool_outcome(q1 - q0, site, outcome,
+                         result_json, err_text, rpc_err);
     }
-    FINDING("v0.7-async-typed-tool-call",
-            "A1/A2 are sync-only. The async surface (cmcp_client_call_async + "
-            "cmcp_client_wait) still hands raw cmcp_rpc_message_t to the host, "
-            "so the rewrite cannot use it without re-importing the two-channel "
-            "error model A2 eliminated. v0.7 candidate: cmcp_client_tool_call_async("
-            "name, args, &id) returning a long long, paired with cmcp_client_tool_wait("
-            "id, &result, &text, &rpc_err) that yields the same 3-way outcome as A2. "
-            "Parallel fan-out then stays in the flattened model.");
+    CLOSED("v0.7-async-typed-tool-call",
+           "A4 closes the gap: cmcp_client_tool_call_async dispatches and "
+           "cmcp_client_tool_wait reaps with the same 3-way outcome as A2. "
+           "The fan-out stays in the flattened model — no raw "
+           "cmcp_rpc_message_t handling in the host, no two-channel error "
+           "reads.");
 
     /* --- step 6: schema-rejection error paths ----------------------- */
     STEP("error paths: empty query (minLength), k=999 (maximum) — one switch per site");
@@ -354,17 +374,45 @@ static int run_session(const char *server_path,
                          result_json, err_text, rpc_err);
     }
 
-    /* Bonus finding (the OK-path content shortcut). cmcp_client_tool_call's
-     * OK channel returns raw cmcp_json_t — the host still has to walk the
-     * result to extract content[].text for display, even though A2 already
-     * extracts it on the TOOL_LEVEL path. */
-    FINDING("v0.7-tool-call-text-shortcut",
-            "cmcp_client_tool_call OK path returns raw cmcp_json_t — the host "
-            "wants content[0].text but the helper only extracts it for the "
-            "TOOL_LEVEL path. v0.7 candidate: cmcp_client_tool_call_text(name, "
-            "args, &text) flattens both content[].text outcomes (success or "
-            "tool error) into a single string, keeping CMCP_TOOL_ERR_PROTOCOL "
-            "as the only out-of-band channel.");
+    /* --- step 8: A5 content-shortcut demo --------------------------- */
+    STEP("cmcp_client_tool_call_text (A5) — one search, owned text out");
+    EXPECT("CMCP_OK + owned text payload; no result-tree walking");
+
+    {
+        cmcp_json_t *args = cmcp_json_new_object();
+        cmcp_json_object_set(args, "query",
+                              cmcp_json_new_string("schema validator"));
+        char             *text    = NULL;
+        cmcp_rpc_error_t *rpc_err = NULL;
+        double q0 = now_ms();
+        int rc = cmcp_client_tool_call_text(cli, "crag_search", args,
+                                              &text, &rpc_err);
+        double q1 = now_ms();
+        if (rc == CMCP_OK) {
+            char buf[160];
+            size_t n = text ? strlen(text) : 0;
+            size_t take = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
+            if (text) memcpy(buf, text, take);
+            buf[take] = 0;
+            for (size_t i = 0; i < take; i++) if (buf[i] == '\n') buf[i] = ' ';
+            fprintf(stderr, "  text-shortcut %.1fms: OK text=\"%s%s\"\n",
+                    q1 - q0, buf, n > take ? "..." : "");
+            free(text);
+        } else {
+            fprintf(stderr,
+                    "  text-shortcut %.1fms: PROTOCOL code=%d msg=\"%s\"\n",
+                    q1 - q0,
+                    rpc_err ? rpc_err->code : 0,
+                    (rpc_err && rpc_err->message) ? rpc_err->message
+                                                   : "(null)");
+            cmcp_rpc_error_free(rpc_err);
+        }
+    }
+    CLOSED("v0.7-tool-call-text-shortcut",
+           "A5 closes the gap: cmcp_client_tool_call_text returns owned "
+           "content[0].text directly on both success and tool-error paths "
+           "(squashed into CMCP_OK). The host has no result-tree walking "
+           "left; CMCP_TOOL_ERR_PROTOCOL is the only out-of-band channel.");
 
     /* --- teardown --------------------------------------------------- */
     STEP("client free (asks child to exit, reaps)");

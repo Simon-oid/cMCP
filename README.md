@@ -67,13 +67,18 @@ protocol bump, no struct layout change, no removals — SemVer-minor.
   `conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl`,
   registered in `make replay`.
 
-Two v0.7-candidate findings surfaced by the rewrite itself —
-`cmcp_client_tool_call_async` + a typed wait (to keep parallel
-fan-out in the flattened model), and `cmcp_client_tool_call_text`
-(to flatten `content[].text` on the OK path too) — are filed for
-v0.7. Tier 7's always-on quality posture (perf-regression CI gate,
-nightly fuzz, nightly soak, coverage delta, schema-corpus growth)
-remains the v0.7 tier.
+**Unreleased — v0.7 host-API extensions.** The two v0.7-candidate
+findings surfaced by the v0.6.0 rewrite itself have landed:
+**A4** is `cmcp_client_tool_call_async` + `cmcp_client_tool_wait`
+(parallel fan-out stays in the flattened 3-way outcome model),
+**A5** is `cmcp_client_tool_call_text` (flattens
+`content[].text` on the OK path too, squashing success
+vs tool-error). The dogfood harness now exercises both — step 5
+restored to A4 async fan-out, new step 8 demonstrates A5 — and
+the replay fixture is re-captured; `findings: 0`. Additive only,
+SemVer-minor. Tier 7's always-on quality posture (perf-regression
+CI gate, nightly fuzz, nightly soak, coverage delta,
+schema-corpus growth) remains the v0.7 tier.
 
 The Tier 6 quality bar that v0.6.0 is built on:
 

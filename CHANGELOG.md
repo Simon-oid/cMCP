@@ -4,6 +4,96 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## Unreleased — v0.7 host-API extensions
+
+Continuing the v0.6.0 thread: close the two follow-up findings the O1
+dogfood rewrite surfaced (`v0.7-async-typed-tool-call` and
+`v0.7-tool-call-text-shortcut`) and restore the dogfood harness's
+step-5 parallel fan-out that the sync-only A1/A2 surface lost.
+Additive only; no protocol bump, no struct layout change, no
+removals — SemVer-minor.
+
+### Added
+
+- **A4** — typed async `tools/call` pair on `cmcp_client_t`:
+  - `cmcp_client_tool_call_async(c, name, args, &id)` — dispatch
+    half. Builds `{name, arguments}`, sends via the async core,
+    stores the in-flight id in `*out_id`. `args` is consumed in
+    every code path (including caller-misuse: NULL c / NULL name /
+    NULL out_id). Returns `CMCP_OK` or one of `CMCP_EINVAL` /
+    `CMCP_ENOMEM` / `CMCP_EAGAIN` (in-flight cap) / transport
+    error from the writer.
+  - `cmcp_client_tool_wait(c, id, &result, &text, &rpc_err)` —
+    reap half. Blocks until the response arrives, then maps it
+    onto the same `cmcp_tool_outcome_t` 3-way enum A2 introduced.
+    Transport-side failures (unknown id, mid-flight cancel,
+    malformed response) surface as `CMCP_TOOL_ERR_PROTOCOL` with
+    a synthesized `cmcp_rpc_error_t` so the caller's switch has
+    no default arm.
+  - Wire shape, ownership, and error semantics are identical to
+    `cmcp_client_tool_call` — the split is purely about
+    scheduling. The host fans out N concurrent tool calls and
+    reaps them in any order without dropping back to the raw
+    `cmcp_client_call_async` + `cmcp_client_wait` surface (which
+    would re-expose the two-channel error model A2 eliminated).
+- **A5** — `cmcp_client_tool_call_text`, content-shortcut helper.
+  Many host call sites want one thing from a `tools/call`: the
+  LLM-facing text. Both the success branch
+  (`result.content[0].text`) and the tool-error branch
+  (`isError:true` + `result.content[0].text`) produce that text;
+  A2 only extracts the latter automatically. A5 flattens both:
+  on `CMCP_OK`, `*out_text` is the first `content[].text` from
+  the result as an owned C string (empty-string fallback so the
+  caller has no NULL-vs-empty ambiguity); on `CMCP_EPROTOCOL`,
+  `*out_rpc_err` carries the wire/synth error and `*out_text`
+  stays NULL. Success-vs-tool-error is *deliberately* squashed —
+  hosts that need the distinction use `cmcp_client_tool_call`.
+
+### Changed
+
+- `tools/dogfood-crag-host/main.c` step 5 restored to the async
+  fan-out shape lost in the v0.6.0 O1 rewrite. Now uses A4 — 3x
+  `cmcp_client_tool_call_async` followed by 3x
+  `cmcp_client_tool_wait` in reverse order, exercising the
+  reader-thread id-based demux end-to-end. The
+  `v0.7-async-typed-tool-call` finding is retired as a ✓-closed
+  marker in the wire log.
+- `tools/dogfood-crag-host/main.c` grows a new step 8 — one
+  `cmcp_client_tool_call_text` call against `crag_search` —
+  proving A5 end-to-end through the dogfood harness. The
+  `v0.7-tool-call-text-shortcut` finding is retired as a ✓-closed
+  marker; the harness summary now reports `findings: 0`, the
+  v0.6.0 dogfood thread is fully closed.
+
+### Internal
+
+- `src/client.c` refactored: `cmcp_client_tool_call` (A2) now
+  shares `build_tool_call_params` + `process_tool_response`
+  helpers with the new A4 wait half and A5 flattener, so the
+  3-way branching policy stays single-sourced across all three
+  call sites.
+- `conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl`
+  re-captured against the A4 step-5 + A5 step-8; now 27 wire
+  frames covering 14 RPC calls. Step 5's three `tools/call`
+  requests arrive as a back-to-back burst (responses follow in
+  id order because `CMCP_WORKERS=1` is pinned in the replay
+  registry env block); step 8 adds one more `tools/call` for the
+  A5 demo.
+- `tests/test_client_helpers.c` grows from 17 to 25 test cases /
+  124 to 204 assertions: A4 OK / concurrent fan-out / tool-level
+  / protocol-unknown-tool / EINVAL / synth-error, plus A5 OK /
+  tool-error-becomes-OK / protocol-unknown-tool / NULL args /
+  synth-error.
+
+### Quality matrix (all green)
+
+- `make test` (23 binaries; `test_client_helpers` 204/204
+  assertions including the new A4 + A5 cases)
+- `valgrind ./tests/test_client_helpers` (leak-free)
+- `make test-asan` / `make test-tsan`
+- `make replay` (6 pass / 1 skip, including the re-captured
+  dogfood fixture)
+
 ## v0.6.0 — first host-driven cut (2026-05-30)
 
 The first release sized by **a real host's pain**, not the spec. After
