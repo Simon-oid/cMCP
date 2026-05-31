@@ -4,14 +4,16 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
-## Unreleased — v0.7 host-API extensions
+## Unreleased — v0.7 host-API extensions + schema-corpus growth
 
-Continuing the v0.6.0 thread: close the two follow-up findings the O1
-dogfood rewrite surfaced (`v0.7-async-typed-tool-call` and
-`v0.7-tool-call-text-shortcut`) and restore the dogfood harness's
-step-5 parallel fan-out that the sync-only A1/A2 surface lost.
-Additive only; no protocol bump, no struct layout change, no
-removals — SemVer-minor.
+Two threads land in this batch. (1) Close the two follow-up findings
+the v0.6.0 O1 dogfood rewrite surfaced (`v0.7-async-typed-tool-call`
+and `v0.7-tool-call-text-shortcut`) and restore the dogfood harness's
+step-5 parallel fan-out. (2) Grow the schema-conformance corpus from
+83 → 500 (schema, value) pairs against Ajv (the first Tier 7 axis to
+land — the only one that needs no infrastructure decision). Additive
+only; no protocol bump, no struct layout change, no removals —
+SemVer-minor.
 
 ### Added
 
@@ -85,6 +87,73 @@ removals — SemVer-minor.
   tool-error-becomes-OK / protocol-unknown-tool / NULL args /
   synth-error.
 
+### Schema-conformance corpus 83 → 500 (Tier 7.5)
+
+The first of the five Tier 7 ops axes (the one that needs no
+infrastructure decision — pure write-more-tests). The Ajv
+cross-check corpus at `conformance/corpus_schema.json` grows from
+83 (schema, value) pairs to **500**. The schema-conformance gate
+(`make schema-conformance`) is now 500/500 cMCP-vs-Ajv agreement.
+
+New families added:
+
+- **Type-system edge cases (+28)** — empty strings, zero/negative
+  integers, NaN-adjacent number values, type-mismatched primitives
+  (boolean-as-integer, integer-as-boolean), array-of-types with
+  multiple variants.
+- **Enum + const (+36)** — object/array enum values, mixed-type
+  enums (string + integer + boolean + null), deep-object const
+  equality, empty-collection const, case-sensitivity.
+- **String bounds + Unicode (+22)** — code-point counting for CJK
+  + emoji, exact-bound cases, no-type annotation-only cases,
+  whitespace handling.
+- **Pattern (POSIX ERE) (+22)** — anchoring, quantifiers,
+  character classes, alternation, negation, escaped dots,
+  application-only-to-string semantics.
+- **Format (+30)** — full coverage of `date-time` (TZ offsets,
+  fractional seconds), `email` (plus-addressing, subdomains),
+  `uri` (ftp/mailto/file/query/fragment), `uuid` (case, v1/v4
+  shapes). Plus positive-only cases for unknown formats
+  (`ipv4`, `hostname`, `date`, `json-pointer`, `uri-reference`)
+  where both cMCP (annotation-only) and Ajv agree on accept.
+- **Numeric bounds + multipleOf (+40)** — `exclusiveMinimum`/
+  `exclusiveMaximum` interaction with `minimum`/`maximum`,
+  on-string/on-array/on-bool no-op cases, large-value bounds,
+  fractional `multipleOf` with epsilon tolerance.
+- **Object (+55)** — `required` × `properties` × `additional-
+  Properties` × `patternProperties` × `propertyNames` ×
+  `min/maxProperties` combinatorics, deeply-nested required,
+  no-op-on-non-object semantics, full realistic shapes.
+- **Array (+45)** — `items` × `minItems` × `maxItems` ×
+  `uniqueItems` × `prefixItems` combinatorics, boolean-schema
+  `items: true/false`, mixed-type items, deeply-nested arrays.
+- **Combinators (+55)** — `allOf`/`anyOf`/`oneOf`/`not` with
+  multiple constraints, `not`-of-empty-schema, `not`-of-boolean,
+  `oneOf` multi-match-rejection, `if`/`then`/`else` with nested
+  conditionals and conditional-required.
+- **$ref + $defs (+22)** — refs inside `properties`/`items`/
+  `allOf`/`anyOf`/`not`, two-level chains, `~0`/`~1` JSON-pointer
+  escapes, draft-07 `definitions` alias, recursive linked-list
+  shapes, sibling-keyword honouring per draft-2020-12.
+- **Real MCP tool schemas (+35)** — lifted from in-tree servers
+  (echo-server's `echo`/`add`, filesystem-mcp's
+  `fs_read`/`fs_write`/`fs_list`, crag-mcp's
+  `crag_search`/`crag_stats`) plus elicitation prompts, sampling
+  message envelopes, resource-link shapes, progress-token
+  string-or-integer.
+- **Edge cases (+27)** — deeply-nested properties (4 levels),
+  unicode property names, annotation-only schemas, very large
+  numbers, scientific notation, comprehensive RPC request shape.
+
+Three corpus entries were deliberately *not* added because the
+JSON Schema spec rejects them as malformed (Ajv compile error):
+`{"allOf":[]}`, `{"anyOf":[]}`, and `{"required":["a","a"]}`. The
+spec requires `allOf`/`anyOf` arrays be non-empty and `required`
+items be unique. cMCP currently permits all three (forward-
+compatible parser), but exercising them as Ajv-rejects would have
+manufactured artificial divergences. Filed as a follow-up
+audit item.
+
 ### Quality matrix (all green)
 
 - `make test` (23 binaries; `test_client_helpers` 204/204
@@ -93,6 +162,7 @@ removals — SemVer-minor.
 - `make test-asan` / `make test-tsan`
 - `make replay` (6 pass / 1 skip, including the re-captured
   dogfood fixture)
+- `make schema-conformance` (500/500 cMCP vs Ajv agreement)
 
 ## v0.6.0 — first host-driven cut (2026-05-30)
 

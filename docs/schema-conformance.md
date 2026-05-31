@@ -191,7 +191,12 @@ mode, with `ajv-formats`) side-by-side over the corpus in
 disagreement on accept/reject. The corpus covers each supported
 keyword family — types, enum/const, numeric bounds, string bounds,
 pattern, format, object shape, array shape, combinators, conditional,
-boolean schemas, and references.
+boolean schemas, and references. The corpus also includes realistic
+MCP tool input schemas lifted from the in-tree reference servers
+(echo-server, filesystem-mcp, crag-mcp) plus elicitation and
+sampling envelopes. The corpus stands at **500 (schema, value) pairs**
+as of v0.7 (Unreleased) — grown from the v0.5.0 baseline of 83 as
+the first Tier 7.5 deliverable.
 
 Run it locally:
 
