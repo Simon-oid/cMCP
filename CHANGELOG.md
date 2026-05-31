@@ -4,16 +4,21 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
-## Unreleased — v0.7 host-API extensions + schema-corpus growth
+## v0.7.0 — host-API extensions + schema-corpus growth (2026-05-31)
 
-Two threads land in this batch. (1) Close the two follow-up findings
+Two threads land in this release. (1) Close the two follow-up findings
 the v0.6.0 O1 dogfood rewrite surfaced (`v0.7-async-typed-tool-call`
 and `v0.7-tool-call-text-shortcut`) and restore the dogfood harness's
 step-5 parallel fan-out. (2) Grow the schema-conformance corpus from
-83 → 500 (schema, value) pairs against Ajv (the first Tier 7 axis to
-land — the only one that needs no infrastructure decision). Additive
-only; no protocol bump, no struct layout change, no removals —
-SemVer-minor.
+83 → 500 (schema, value) pairs against Ajv — the first Tier 7 ops
+axis to land (the only one that needs no infrastructure decision).
+Additive only; no protocol bump, no struct layout change, no
+removals — SemVer-minor.
+
+The four remaining Tier 7 axes (perf-regression CI gate, nightly
+fuzz baselines, nightly soak runs, coverage delta) are deferred —
+each gates on an infrastructure/policy decision rather than on
+engineering, and the work that's ready ships rather than waiting.
 
 ### Added
 

@@ -229,5 +229,21 @@ git tag -a v0.6.0 -m "v0.6.0: first host-driven cut (A1/A2/A3 + dogfood replay)"
 git push --tags
 ```
 
+`v0.7.0` bundles the **host-API extensions** that closed the two
+v0.7-candidate findings the v0.6.0 dogfood rewrite surfaced (A4
+async typed `tools/call` pair; A5 content-shortcut) with the
+**first Tier 7 ops axis** (schema-conformance Ajv corpus 83 → 500).
+The four remaining Tier 7 axes (perf-regression CI gate, nightly
+fuzz, nightly soak, coverage delta) are deferred — each gates on an
+infrastructure/policy decision and the work that's ready ships
+rather than waiting. The tag is applied at release time against the
+"cut v0.7.0" commit (the paperwork roll-up that lands `CHANGELOG`,
+`README`, `cmcp.h` `CMCP_VERSION` bump, and this file):
+
+```bash
+git tag -a v0.7.0 -m "v0.7.0: host-API extensions (A4/A5) + schema-corpus 500" HEAD
+git push --tags
+```
+
 Going forward, every CHANGELOG release section ships with its tag at
 release time — no retro work needed.

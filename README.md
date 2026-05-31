@@ -29,15 +29,28 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
-**v0.6 — first host-driven cut (2026-05-30).** Sized by a real
-host's pain, not the spec. After Tier 6 closed at v0.5.0, the
-in-tree `tools/dogfood-crag-host/` was run as a butlerbot-shaped
-host against `tools/crag-mcp/` end-to-end under `tools/cmcp-tee/`.
-Four ergonomics findings (F1–F4) in the public client surface
-fell out. v0.6.0 is the additive closure of those findings, the
-rewritten dogfood harness that proves they hold, and a new
-replay-gated wire fixture capturing the post-fix shape. No
-protocol bump, no struct layout change, no removals — SemVer-minor.
+**v0.7 — host-API extensions + schema-corpus growth (2026-05-31).**
+Two threads landed together. (1) The two v0.7-candidate findings
+surfaced by the v0.6.0 dogfood rewrite itself are closed:
+**A4** is `cmcp_client_tool_call_async` + `cmcp_client_tool_wait`
+(parallel fan-out stays in the flattened 3-way outcome model);
+**A5** is `cmcp_client_tool_call_text` (flattens `content[].text`
+on the OK path too, squashing success vs tool-error). The dogfood
+harness now exercises both — step 5 restored to A4 async fan-out,
+new step 8 demonstrates A5 — and the replay fixture is re-captured;
+`findings: 0`. (2) The first Tier 7 ops axis lands too: the
+schema-conformance Ajv cross-check corpus grows from 83 → 500
+(schema, value) pairs across 14 keyword families including real
+MCP tool input schemas; `make schema-conformance` is 500/500
+agreement. Additive only, SemVer-minor.
+
+The four remaining Tier 7 axes (perf-regression CI gate, nightly
+fuzz, nightly soak, coverage delta) are deferred — each gates on
+an infrastructure/policy decision rather than on engineering, and
+the work that's ready ships rather than waiting.
+
+The v0.6.0 axes — A1/A2/A3 + dogfood rewrite + replay gate — are
+the foundation v0.7 built on. They are summarised here:
 
 - **A1 — single-client typed helpers** on `cmcp_client_t`:
   `tools_list` / `resources_list` / `prompts_list` /
@@ -60,25 +73,10 @@ protocol bump, no struct layout change, no removals — SemVer-minor.
   Minor-5 convention: `tools/call` input-schema rejection surfaces
   on the result channel as `isError:true + content[].text`, not
   as JSON-RPC `-32602`.
-- **Dogfood harness rewrite + replay gate.** `tools/dogfood-crag-host/`
-  now uses only A1/A2 — zero direct `cmcp_json_object_get`, zero
-  direct `cmcp_rpc_message_t`, one switch per `tools/call`. The
-  captured wire lands as a permanent regression bank at
-  `conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl`,
-  registered in `make replay`.
-
-**Unreleased — v0.7 host-API extensions.** The two v0.7-candidate
-findings surfaced by the v0.6.0 rewrite itself have landed:
-**A4** is `cmcp_client_tool_call_async` + `cmcp_client_tool_wait`
-(parallel fan-out stays in the flattened 3-way outcome model),
-**A5** is `cmcp_client_tool_call_text` (flattens
-`content[].text` on the OK path too, squashing success
-vs tool-error). The dogfood harness now exercises both — step 5
-restored to A4 async fan-out, new step 8 demonstrates A5 — and
-the replay fixture is re-captured; `findings: 0`. Additive only,
-SemVer-minor. Tier 7's always-on quality posture (perf-regression
-CI gate, nightly fuzz, nightly soak, coverage delta,
-schema-corpus growth) remains the v0.7 tier.
+- **Dogfood harness + replay gate.** `tools/dogfood-crag-host/`
+  uses only the typed helpers; the wire capture lives at
+  `conformance/fixtures/crag-mcp/dogfood/session-2026-05-30.jsonl`
+  and is registered in `make replay`.
 
 The Tier 6 quality bar that v0.6.0 is built on:
 
