@@ -29,25 +29,64 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
+**v0.8 — Tier 7 closed (regression gates over the Tier 6 baselines, 2026-05-31).**
+The four Tier 7 axes deferred at v0.7.0 land in this cut: each one
+turns a Tier-6 baseline into a CI gate (or, for the long-haul axes,
+a nightly cron lane + tracking-issue plumbing). The present-tense
+bugs Tier 5/6 closed are now defended against the slow-drift kind —
+silent perf regressions, coverage hollowing, deep-corpus crash
+discoveries, multi-hour resource leaks. Additive only, SemVer-minor;
+no protocol bump, no struct layout change.
+
+- **7.1 perf-regression CI gate.** `bench/baseline.json` carries the
+  committed reference numbers per workload + metric (direction +
+  tolerance band per metric). `bench/compare-baseline.sh` runs
+  `bench/run.sh` median-of-11 in CI, diffs vs the baseline, sticky-
+  comments the delta table on the PR, exits non-zero past the band.
+  Five gated metrics across stdio/HTTP. Honours `[skip-bench]` for
+  intentional perf trade-offs (two-commit workflow documented in
+  `docs/perf-regression-gate.md`).
+- **7.2 nightly fuzz baselines.** `.github/workflows/fuzz-nightly.yml`
+  runs each of the four libFuzzer harnesses (json, rpc, schema, http)
+  for 6h at 02:00 UTC daily. Post-run corpus uploads as 90-day
+  artefact; any crash/leak/timeout opens a tracking issue (with
+  reuse-or-comment dedup on repeat fires) and fails the job.
+  `tools/fuzz-corpus-roll.sh` is the weekly fold helper driving
+  libFuzzer `-merge=1` so the seed corpus stays small + curated.
+- **7.3 nightly soak runs.** `tests/soak/nightly.sh` orchestrates
+  6h stdio + 6h HTTP sequentially (not parallel: concurrent runs
+  pollute each other's RSS/p99 drift signal, which is the gate's
+  measurement). Dated output dir under `~/.cmcp-soak/`, PASSED or
+  FAILED file marker. Local-cron lane, not GitHub Actions —
+  shared-runner jitter would noise the gate to the point of paging
+  on green. Cron recipe + triage steps in `docs/soak-nightly.md`.
+- **7.4 coverage delta gate.** `scripts/coverage-delta.sh` diffs
+  `coverage/summary.txt` against the prior main-side snapshot
+  restored from actions cache, fails the PR if lines or functions
+  dropped more than 1.0pp. Branches reported but not gated (too
+  noisy). Sticky PR comment via `gh api` (no third-party action).
+  Honours `[skip-cov]` for legitimate cleanups.
+  Policy + rationale in `docs/coverage-policy.md`.
+
+Sticky PR comments use a first-party `gh api` sentinel-marker pattern
+so CI gains no third-party action dependencies. The 7.5 axis
+(schema-conformance corpus 83 → 500 against Ajv) shipped in v0.7.0
+and stays at 500/500 agreement under the gate.
+
+The v0.7.0 axes — A4 + A5 host-API extensions and the schema corpus
+growth — are the foundation v0.8 layered the gates on. They are
+summarised here:
+
 **v0.7 — host-API extensions + schema-corpus growth (2026-05-31).**
-Two threads landed together. (1) The two v0.7-candidate findings
-surfaced by the v0.6.0 dogfood rewrite itself are closed:
 **A4** is `cmcp_client_tool_call_async` + `cmcp_client_tool_wait`
 (parallel fan-out stays in the flattened 3-way outcome model);
 **A5** is `cmcp_client_tool_call_text` (flattens `content[].text`
 on the OK path too, squashing success vs tool-error). The dogfood
-harness now exercises both — step 5 restored to A4 async fan-out,
-new step 8 demonstrates A5 — and the replay fixture is re-captured;
-`findings: 0`. (2) The first Tier 7 ops axis lands too: the
-schema-conformance Ajv cross-check corpus grows from 83 → 500
-(schema, value) pairs across 14 keyword families including real
-MCP tool input schemas; `make schema-conformance` is 500/500
-agreement. Additive only, SemVer-minor.
-
-The four remaining Tier 7 axes (perf-regression CI gate, nightly
-fuzz, nightly soak, coverage delta) are deferred — each gates on
-an infrastructure/policy decision rather than on engineering, and
-the work that's ready ships rather than waiting.
+harness exercises both — step 5 in A4 async fan-out, step 8 in A5
+— and the replay fixture covers the wire shape; `findings: 0`.
+Schema-conformance Ajv cross-check corpus grew from 83 → 500
+(schema, value) pairs across 14 keyword families;
+`make schema-conformance` is 500/500.
 
 The v0.6.0 axes — A1/A2/A3 + dogfood rewrite + replay gate — are
 the foundation v0.7 built on. They are summarised here:

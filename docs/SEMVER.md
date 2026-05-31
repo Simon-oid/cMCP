@@ -245,5 +245,21 @@ git tag -a v0.7.0 -m "v0.7.0: host-API extensions (A4/A5) + schema-corpus 500" H
 git push --tags
 ```
 
+`v0.8.0` **closes Tier 7**: the four axes deferred at v0.7.0 land
+together as regression gates over the Tier 6 baselines. 7.1
+perf-regression CI gate (median-of-11 vs `bench/baseline.json`), 7.2
+nightly fuzz baselines (6h × 4 harnesses, cron), 7.3 nightly soak
+runs (6h stdio + 6h HTTP, local-cron orchestrator), 7.4 coverage
+delta gate (1.0pp band on lines + functions, via actions cache).
+Additive only — no public-surface change, no protocol bump, no
+struct layout change. The tag is applied at release time against the
+"cut v0.8.0" commit (the paperwork roll-up that lands `CHANGELOG`,
+`README`, `cmcp.h` `CMCP_VERSION` bump, and this file):
+
+```bash
+git tag -a v0.8.0 -m "v0.8.0: Tier 7 closed (regression gates 7.1 / 7.2 / 7.3 / 7.4)" HEAD
+git push --tags
+```
+
 Going forward, every CHANGELOG release section ships with its tag at
 release time — no retro work needed.

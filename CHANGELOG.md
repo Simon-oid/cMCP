@@ -4,14 +4,37 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
-## Unreleased — Tier 7 closure (regression gates)
+## v0.8.0 — Tier 7 closure (regression gates) (2026-05-31)
 
-The four Tier 7 axes deferred at v0.7.0 land in this block: each one
-turns a Tier-6 baseline into a CI gate (or, for the long-haul axes,
-a nightly cron lane + tracking-issue plumbing). With these in place,
-the present-tense bugs Tier 5/6 closed are now defended against the
-slow-drift kind — silent perf regressions, coverage hollowing, deep-
-corpus crash discoveries, multi-hour resource leaks.
+The four Tier 7 axes deferred at v0.7.0 land in this release: each
+one turns a Tier-6 baseline into a CI gate (or, for the long-haul
+axes, a nightly cron lane + tracking-issue plumbing). With these in
+place, the present-tense bugs Tier 5/6 closed are now defended
+against the slow-drift kind — silent perf regressions, coverage
+hollowing, deep-corpus crash discoveries, multi-hour resource leaks.
+
+Five Tier 7 axes total. The schema-conformance corpus growth (7.5)
+shipped in v0.7.0; this cut closes the other four (7.1 perf, 7.2
+fuzz nightly, 7.3 soak nightly, 7.4 coverage delta) plus the
+release paperwork. Additive only — no public-surface change, no
+protocol bump, no struct layout change. SemVer-minor.
+
+### Quality matrix (steady)
+
+- `make test` — 23/23 binaries green, ~3.2k assertions.
+- `make valgrind` — leak-free.
+- `make test-asan` / `make test-tsan` — green.
+- `make replay` — wire-fixture gate green.
+- `make fuzz-smoke` — 4 harnesses, 60s each, green seeds.
+- `make schema-conformance` — 500/500 cMCP vs Ajv (from v0.7.0).
+- `make coverage` — published per push; **new in v0.8.0:** PR-time
+  delta gate fires on >1.0pp drop in lines or functions.
+- `make bench` — three steady-state workloads; **new in v0.8.0:**
+  PR-time median-of-11 regression gate vs `bench/baseline.json`.
+- **New nightly cron lanes:** `fuzz-nightly.yml` (4 × 6h libFuzzer,
+  per-harness corpus + crash-issue plumbing) and the local
+  `make soak-nightly` orchestrator (6h stdio + 6h HTTP sequential,
+  PASSED/FAILED file marker for monitor polling).
 
 ### Added — 7.4 coverage delta gate
 
