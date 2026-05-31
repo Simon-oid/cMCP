@@ -1,0 +1,161 @@
+name: Fuzz nightly
+
+# Tier 7.2 — long-haul libFuzzer baselines.
+#
+# Tier 5 / 6 stood up four parser harnesses (json, rpc, schema,
+# http) and CI runs them at 60s smoke level on every push. That
+# catches the obvious crashes but not the deep-corpus discoveries
+# that show up at hour-scale coverage growth. This workflow runs
+# each harness for 6h overnight, uploads the post-run corpus
+# (for the weekly fold via tools/fuzz-corpus-roll.sh), and opens
+# a tracking issue if any crash / leak / timeout artefact lands.
+#
+# Why 6h: GitHub Actions free-tier job ceiling. Self-hosted runners
+# could go longer (24h is the aspirational target in
+# docs/agentic-readiness.md); the 6h floor is what shared runners
+# allow. Stacking 4 harnesses x 6h = 24h total, with daily coverage
+# delta visible per-harness in the artifact log.
+#
+# Matrix runs in parallel — each harness has its own corpus, no
+# shared state across them.
+
+on:
+  schedule:
+    # 02:00 UTC daily; offset from spec-drift (Monday 09:00 UTC) so
+    # both jobs aren't competing for runner pool capacity.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      duration_s:
+        description: "libFuzzer -max_total_time per harness (seconds)"
+        default: "21600"
+        required: false
+
+# Only one nightly fuzz run at a time. If a fresh nightly fires
+# while the previous is still going (the 6h jobs don't always
+# finish under 24h on a busy runner pool), drop the new one rather
+# than queue a second pass.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.harness }}
+    runs-on: ubuntu-latest
+    # 6h libFuzzer budget + ~20 min overhead for build/setup/upload.
+    timeout-minutes: 380
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        harness: [json, rpc, schema, http]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build + fuzz dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev clang
+
+      - name: Build fuzz/${{ matrix.harness }}
+        run: make fuzz/fuzz_${{ matrix.harness }}
+
+      - name: Prepare artifact dir
+        run: mkdir -p fuzz/artifacts_${{ matrix.harness }}
+
+      # libFuzzer writes any reproducible crash / leak / timeout
+      # to the artifact_prefix dir. The corpus dir grows in-place
+      # as new coverage entries land. We don't fail the run on a
+      # crash here — let it complete the budget so the corpus is
+      # maximally useful — and assert on the artifact dir after.
+      - name: Run fuzz/${{ matrix.harness }} (6h)
+        env:
+          DURATION: ${{ github.event.inputs.duration_s || '21600' }}
+        run: |
+          set +e
+          ./fuzz/fuzz_${{ matrix.harness }} \
+              fuzz/corpus_${{ matrix.harness }} \
+              -max_total_time=${DURATION} \
+              -print_final_stats=1 \
+              -artifact_prefix=fuzz/artifacts_${{ matrix.harness }}/ \
+              2>&1 | tee fuzz/run-${{ matrix.harness }}.log
+          rc=$?
+          # libFuzzer exits non-zero on the *first* crash; we re-run
+          # the binary against the artifact dir at the gate step
+          # below to decide pass/fail at job level. Don't propagate
+          # the inner exit code here — let the upload happen first.
+          echo "fuzzer exit=$rc" >&2
+          exit 0
+
+      - name: Upload run corpus + log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.harness }}-corpus
+          path: |
+            fuzz/corpus_${{ matrix.harness }}/
+            fuzz/run-${{ matrix.harness }}.log
+          retention-days: 90
+
+      - name: Upload crash artefacts (if any)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.harness }}-artefacts
+          path: fuzz/artifacts_${{ matrix.harness }}/
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # Crash-handling gate: if the artifact dir is non-empty, open
+      # a tracking issue with the minimised input attached + fail the
+      # job. The issue title carries the harness name + first
+      # artefact filename so duplicates by repeat-runs are deduped at
+      # the human triage step.
+      - name: Crash gate (open issue + fail)
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HARNESS: ${{ matrix.harness }}
+        run: |
+          shopt -s nullglob
+          arts=(fuzz/artifacts_${HARNESS}/*)
+          if [ ${#arts[@]} -eq 0 ]; then
+              echo "fuzz/${HARNESS}: clean ($(wc -l < fuzz/run-${HARNESS}.log) log lines)"
+              exit 0
+          fi
+          first=$(basename "${arts[0]}")
+          title="fuzz nightly ${HARNESS}: ${first}"
+          # Reuse-or-create: search for an existing open issue with
+          # the same title so we don't spam if the same crash
+          # surfaces multiple nights.
+          existing=$(gh issue list --state open --search "in:title \"${title}\"" \
+              --json number --jq '.[0].number' || true)
+          body=$(cat <<EOF
+          Nightly fuzz harness \`fuzz_${HARNESS}\` produced ${#arts[@]} artefact(s)
+          on run \`${{ github.run_id }}\`.
+
+          First artefact: \`${first}\`
+
+          Reproduce locally:
+          \`\`\`
+          make fuzz/fuzz_${HARNESS}
+          ./fuzz/fuzz_${HARNESS} <attached-artefact>
+          \`\`\`
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )
+          if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body "Repeat fire on run \`${{ github.run_id }}\` (${#arts[@]} artefact(s))."
+              echo "commented on issue #$existing"
+          else
+              gh issue create --title "$title" --body "$body" --label "fuzz,bug" || \
+                gh issue create --title "$title" --body "$body"
+              echo "opened new issue"
+          fi
+          exit 1

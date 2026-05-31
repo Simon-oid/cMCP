@@ -205,19 +205,34 @@ $(SOAK_HTTP_DRV): $(SOAK_DIR)/soak_http_driver.c $(SOAK_DIR)/soak_common.h $(BUI
 $(SOAK_HTTP_SRV): $(SOAK_DIR)/echo_http_server.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
-soak: $(SOAK_BIN) examples/echo-server
+# Build-only sub-targets so orchestrators (nightly.sh) can rebuild
+# without immediately running a soak. `make soak` / `make soak-http`
+# still build + run as before.
+soak-build:      $(SOAK_BIN) examples/echo-server
+soak-http-build: $(SOAK_HTTP_BINS)
+
+soak: soak-build
 	@./$(SOAK_DIR)/run.sh
 
-soak-churn: $(SOAK_BIN) examples/echo-server
+soak-churn: soak-build
 	@SOAK_CHURN=1 ./$(SOAK_DIR)/run.sh
 
 # HTTP soak — same drift criteria, different transport. Closes the
 # Tier-5 deferral; methodology in tests/soak/run_http.sh.
-soak-http: $(SOAK_HTTP_BINS)
+soak-http: soak-http-build
 	@./$(SOAK_DIR)/run_http.sh
 
-soak-http-churn: $(SOAK_HTTP_BINS)
+soak-http-churn: soak-http-build
 	@SOAK_CHURN=1 ./$(SOAK_DIR)/run_http.sh
+
+# Tier 7.3: nightly soak orchestrator. Runs the 6h stdio leg followed by
+# the 6h HTTP leg sequentially, persisting CSVs + a combined log into a
+# dated directory under $SOAK_NIGHTLY_DIR (default ~/.cmcp-soak). See
+# tests/soak/nightly.sh for env knobs (SOAK_DURATION/WARMUP/INTERVAL/
+# NIGHTLY_DIR/NIGHTLY_REBUILD) and docs/soak-nightly.md for the
+# operational guide.
+soak-nightly:
+	@./$(SOAK_DIR)/nightly.sh
 
 # --- Performance baselines (Tier 6 axis 6.6.1) ----------------------------
 # Opt-in: in-process micro-benches over stdio and HTTP that emit CSV rows
@@ -712,7 +727,7 @@ clean:
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
         fuzz-build fuzz-smoke docs \
-        soak soak-churn soak-http soak-http-churn \
+        soak soak-build soak-churn soak-http soak-http-build soak-http-churn soak-nightly \
         bench bench-build bench-compare bench-compare-build \
         bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp dogfood-crag-host conformance schema-conformance replay check-spec-drift \
         install install-headers install-libs install-bins \

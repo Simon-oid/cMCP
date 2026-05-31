@@ -64,6 +64,14 @@ jobs:
     name: make coverage (lcov + gcovr)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # `pull-requests: write` needed for the Tier 7.4 sticky delta
+    # comment posted to PR conversations. `contents: read` is the
+    # default, repeated here so the permissions block is self-contained
+    # — the rest of the workflow still inherits the workflow-default
+    # read-only token.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v5
 
@@ -72,11 +80,84 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev lcov gcovr
 
+      # Tier 7.4 step 1: pull the most recent main-side coverage
+      # summary out of the actions cache, so the gate has something
+      # to diff against. restore-keys: matches by prefix → newest
+      # cache wins. On the first ever run (no prior main push), this
+      # is a no-op and the delta script reports informational-only.
+      - name: Restore coverage baseline (Tier 7.4)
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: coverage-baseline/summary.txt
+          key: coverage-baseline-main-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            coverage-baseline-main-
+
       - name: make coverage
         run: make coverage
 
       - name: Post coverage summary to job log
         run: cat coverage/summary.txt
+
+      # Tier 7.4 step 2: diff vs the restored baseline (PR only). The
+      # delta script also honours [skip-cov] in the HEAD commit
+      # subject (rare-but-legitimate opt-out). Exit status is the
+      # gate verdict; the rendered markdown lands in coverage/delta.md
+      # for the next step to comment.
+      - name: Coverage delta gate (Tier 7.4)
+        if: github.event_name == 'pull_request'
+        run: |
+          subj=$(git log -1 --pretty=%s "${{ github.event.pull_request.head.sha }}" 2>/dev/null || echo "")
+          case "$subj" in
+              *"[skip-cov]"*) export SKIP_COV=1 ;;
+              *) export SKIP_COV=0 ;;
+          esac
+          base=coverage-baseline/summary.txt
+          [ -f "$base" ] || base=/nonexistent
+          ./scripts/coverage-delta.sh "$base" coverage/summary.txt
+
+      # Sticky PR comment via gh CLI (preinstalled on ubuntu-latest).
+      # No third-party action — we look for an existing comment carrying
+      # the sentinel marker and PATCH it in place; otherwise POST a new
+      # one. Runs even if the gate failed so the table is always visible.
+      - name: Post / update coverage delta comment (Tier 7.4)
+        if: github.event_name == 'pull_request' && !cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- cmcp:coverage-delta -->'
+          BODY="$MARKER"$'\n'"$(cat coverage/delta.md)"
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" \
+            | head -n1)
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f body="$BODY" >/dev/null
+            echo "updated comment $EXISTING"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f body="$BODY" >/dev/null
+            echo "posted new comment"
+          fi
+
+      # Tier 7.4 step 3: refresh the main-side baseline cache so the
+      # next PR diffs against the latest reality. Only runs on push
+      # to main — PRs use the restored baseline read-only.
+      - name: Save coverage baseline (Tier 7.4)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p coverage-baseline
+          cp coverage/summary.txt coverage-baseline/summary.txt
+
+      - name: Cache coverage baseline (Tier 7.4)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: coverage-baseline/summary.txt
+          key: coverage-baseline-main-${{ github.sha }}
 
       # Upload the genhtml output so reviewers can browse line-by-line.
       # Retention is the default (90 days) — coverage HTML is small.
@@ -101,6 +182,76 @@ jobs:
 
       - name: make analyze
         run: make analyze
+
+  perf-regression:
+    name: bench/compare-baseline.sh (Tier 7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Same posture as coverage: write-back PR comment with the delta
+    # table, read-only otherwise.
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build + bench dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev jq
+
+      - name: make bench-build
+        run: make bench-build
+
+      # Tier 7.1: median-of-11 over bench/run.sh, diffed against
+      # bench/baseline.json. Honours [skip-bench] in the HEAD commit
+      # subject (rare-but-legitimate opt-out — see
+      # docs/perf-regression-gate.md).
+      - name: Perf regression gate (Tier 7.1)
+        env:
+          BENCH_N: "11"
+        run: |
+          subj=$(git log -1 --pretty=%s 2>/dev/null || echo "")
+          case "$subj" in
+              *"[skip-bench]"*) export SKIP_BENCH=1 ;;
+              *) export SKIP_BENCH=0 ;;
+          esac
+          ./bench/compare-baseline.sh
+
+      # Sticky PR comment via gh CLI — same pattern as coverage above.
+      - name: Post / update perf delta comment (Tier 7.1)
+        if: github.event_name == 'pull_request' && !cancelled()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          MARKER='<!-- cmcp:perf-regression -->'
+          BODY="$MARKER"$'\n'"$(cat bench/delta.md)"
+          EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" \
+            | head -n1)
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" \
+              -f body="$BODY" >/dev/null
+            echo "updated comment $EXISTING"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+              -f body="$BODY" >/dev/null
+            echo "posted new comment"
+          fi
+
+      # Keep the per-run CSVs as an artifact so a regression triage
+      # has the raw numbers without re-running the suite. `${{ }}`
+      # required because a bare leading `!` is a YAML tag indicator.
+      - name: Upload bench run CSVs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-runs
+          path: |
+            bench/runs/
+            bench/delta.md
 
   install-smoke:
     name: make install-smoke (packaging surface gate)

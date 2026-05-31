@@ -4,6 +4,119 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## Unreleased — Tier 7 closure (regression gates)
+
+The four Tier 7 axes deferred at v0.7.0 land in this block: each one
+turns a Tier-6 baseline into a CI gate (or, for the long-haul axes,
+a nightly cron lane + tracking-issue plumbing). With these in place,
+the present-tense bugs Tier 5/6 closed are now defended against the
+slow-drift kind — silent perf regressions, coverage hollowing, deep-
+corpus crash discoveries, multi-hour resource leaks.
+
+### Added — 7.4 coverage delta gate
+
+- `scripts/coverage-delta.sh` — diffs two gcovr `--print-summary`
+  outputs, writes a markdown delta table to `coverage/delta.md`, and
+  exits 1 if lines or functions dropped more than 1.0pp. Branches are
+  reported but not gated (too noisy at the per-PR scale). Honours a
+  `SKIP_COV=1` opt-out for legitimate cleanups (`[skip-cov]` in the
+  commit message subject, parsed by CI).
+- `.github/workflows/ci.yml` coverage job grows three steps: restore
+  the prior main-side `coverage/summary.txt` from actions cache, run
+  the delta script, post / update a sticky PR comment via `gh` (no
+  third-party action — sentinel-comment lookup + PATCH or POST).
+  Push to `main` saves the fresh summary back to the cache so the
+  next PR diffs against it.
+- `docs/coverage-policy.md` — the policy contract: what the gate does,
+  why 1.0pp, why lines+functions but not branches, override rules,
+  local reproduction recipe.
+- Permissions: `coverage` job declares `pull-requests: write` for the
+  sticky comment; rest of the workflow keeps its default read-only
+  token.
+
+### Added — 7.1 perf-regression CI gate
+
+- `bench/baseline.json` — committed reference numbers per workload +
+  metric, with per-metric direction (`higher_is_better` /
+  `lower_is_better`) and tolerance band. Five gated metrics:
+  inline-stdio throughput + p99, pool-stdio wall-ms, inline-http
+  throughput + p99. Bands tuned for GitHub Actions ubuntu-latest
+  noise floor (±15-40 % depending on metric class).
+- `bench/compare-baseline.sh` — runs `bench/run.sh` N times (default
+  11), computes the per-metric median, diffs against
+  `bench/baseline.json`, writes the delta table to `bench/delta.md`,
+  exits 1 if any gated metric is outside its tolerance band. Median-
+  of-N + generous bands together absorb the shared-runner ±15-30 %
+  jitter without losing the signal on a real regression. Honours
+  `[skip-bench]` opt-out.
+- `.github/workflows/ci.yml` grows a `perf-regression` job: build
+  bench binaries, run the comparator (N=11), post / update a sticky
+  PR comment via the same gh-CLI pattern as coverage, upload per-run
+  CSVs as artefact for triage.
+- `docs/perf-regression-gate.md` — gate contract, baseline-bump
+  workflow (intentional perf trade-offs land in two commits: code,
+  then baseline + rationale), override rules, calibration story.
+
+### Added — 7.2 nightly fuzz baselines (6h per harness)
+
+- `.github/workflows/fuzz-nightly.yml` — cron `0 2 * * *` (02:00 UTC)
+  + `workflow_dispatch`. 4-job matrix (one per harness: `fuzz_json`,
+  `fuzz_rpc`, `fuzz_schema`, `fuzz_http`), each running for 6h
+  (libFuzzer `-max_total_time=21600`). Post-run corpus uploaded as
+  90-day artefact (`fuzz-<h>-corpus`). Any crash / leak / timeout
+  artefact triggers a tracking issue (`gh issue create`, with reuse-
+  or-comment on repeat-fire of same title to avoid duplicates) and
+  fails the job. Concurrency grouped to one nightly at a time so an
+  overlong run doesn't pile up parallel firings.
+- `tools/fuzz-corpus-roll.sh` — weekly corpus-fold helper. Drives
+  libFuzzer `-merge=1` over the union of seed + incoming nightly
+  artefact, stages `fuzz/corpus_<h>.new` for maintainer review
+  before promotion. Keeps the seed corpus small (per-PR smoke runs
+  stay fast) and curated (each entry represents a meaningful shape).
+- `docs/fuzz-nightly.md` — workflow contract, crash-triage steps,
+  weekly fold recipe, deferred-to-Tier-8 items.
+- Permissions: nightly job declares `issues: write` for the
+  tracking-issue plumbing.
+
+### Added — 7.3 nightly soak runs (6h stdio + 6h HTTP)
+
+- `tests/soak/nightly.sh` — orchestrator that runs the 6h stdio leg
+  then the 6h HTTP leg sequentially (not parallel — concurrent runs
+  pollute each other's RSS/p99 drift metrics, which is the gate's
+  measurement). Persists per-day CSVs + a combined log into
+  `~/.cmcp-soak/<YYYY-MM-DD>/`, writes `PASSED` or `FAILED` file
+  marker for monitor polling, exits non-zero on either leg fire.
+  Env knobs: `SOAK_NIGHTLY_DIR`, `SOAK_DURATION`, `SOAK_WARMUP`,
+  `SOAK_INTERVAL`, `SOAK_NIGHTLY_REBUILD`.
+- `Makefile`: new `soak-nightly` target wrapping the orchestrator;
+  new `soak-build` / `soak-http-build` build-only sub-targets so the
+  orchestrator can rebuild without immediately running a soak (the
+  legacy `soak` / `soak-http` targets retain the build + run shape).
+- `docs/soak-nightly.md` — operational guide: cron recipe, output
+  layout, smoke-test command, drift-fire triage steps. Explicitly
+  positioned as a local-cron lane, not a GitHub Actions one (shared-
+  runner jitter would noise the gate to the point of paging on
+  green; see TODO Tier 7 open question 1).
+
+### Reused / leveraged
+
+- gh CLI sticky-comment pattern (sentinel marker + GET/PATCH/POST
+  via `gh api`) keeps CI free of third-party actions.
+- libFuzzer's `-artifact_prefix` + `-merge=1` modes do the
+  crash-isolation + corpus-pruning work directly — no separate
+  fuzzing framework.
+- The existing `tests/soak/run.sh` / `run_http.sh` awk drift
+  criteria stay authoritative; nightly.sh is purely orchestration.
+
+### Not in this block
+
+- v0.8.0 cut paperwork (CHANGELOG section close, README status flip,
+  `CMCP_VERSION` bump, tag recipe). Defer to the cut commit.
+- butlerbot integration. Tier 7 is library-side self-defense; the
+  embedding lane runs separately when authorised.
+- Continuous perf-history dashboard, auto-bisect on first crash,
+  per-file coverage gating — all Tier 8 candidates per TODO.
+
 ## v0.7.0 — host-API extensions + schema-corpus growth (2026-05-31)
 
 Two threads land in this release. (1) Close the two follow-up findings

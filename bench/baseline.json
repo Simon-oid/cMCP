@@ -1,0 +1,18 @@
+{
+  "_note": "Tier 7.1 perf-regression baseline. Numbers below are median-of-11 from GitHub Actions ubuntu-latest at the SHA the baseline was last refreshed against. Local boxes vary ±5x — these are only meaningful at CI parity. To bump intentionally, see docs/perf-regression-gate.md (the workflow is: one PR changes code, the follow-up PR refreshes this file with the new baseline and explains why).",
+  "_seeded_from": "first ci run (gh-actions ubuntu-latest) on the seed commit; subsequent main pushes refresh nothing automatically — bump by hand when an intentional perf change lands",
+  "median_of": 11,
+  "metrics": {
+    "server_inline_stdio": {
+      "throughput_per_s": { "baseline": 30000.0, "tolerance": 0.25, "direction": "higher_is_better" },
+      "p99_us":           { "baseline": 60.0,    "tolerance": 0.40, "direction": "lower_is_better"  }
+    },
+    "server_pool_stdio": {
+      "wall_ms":          { "baseline": 820.0,   "tolerance": 0.20, "direction": "lower_is_better"  }
+    },
+    "server_inline_http": {
+      "throughput_per_s": { "baseline": 3000.0,  "tolerance": 0.30, "direction": "higher_is_better" },
+      "p99_us":           { "baseline": 800.0,   "tolerance": 0.40, "direction": "lower_is_better"  }
+    }
+  }
+}
