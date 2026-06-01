@@ -1,0 +1,71 @@
+# CI — aarch64 correctness lane (closes AUDIT-2 against regressions).
+#
+# cMCP's load-bearing deployment target is a Raspberry Pi (butlerbot runs
+# as an HTTP *client* against a cMCP server, and may also embed the libs
+# directly), yet every other CI job runs on x86_64 only. AUDIT-2 flagged
+# that the ARM target was verified exactly once, by hand, under QEMU — so
+# an aarch64-only regression (alignment, signedness of `char`, 32/64-bit
+# `long`, atomics) could land silently between manual checks.
+#
+# This job repeats the plain correctness leg on emulated aarch64 every
+# push/PR. It is intentionally NOT a sibling of the x86 matrix:
+#
+#   - It runs under QEMU user-mode emulation (uraimo/run-on-arch-action),
+#     which is ~5-15x slower than native, so it lives in its own workflow
+#     and never gates the fast x86 feedback loop.
+#   - It runs ONLY `make` + `make test` (the build + functional suite).
+#     ASan/TSan under QEMU emulation are slow and unreliable (shadow-memory
+#     mappings fight the emulator); those stay on the native x86 lanes,
+#     which already catch sanitizer regressions arch-independently.
+#
+# The manual baseline this guards: a clean `make && make test` on
+# Debian arm64 under QEMU passes the full suite (3245+ assertions).
+
+name: CI (arm64)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Same posture as the x86 CI: a newer push for the same ref supersedes
+# the in-flight emulated run. QEMU minutes are the scarce resource here,
+# so cancelling stale runs matters more than on the fast lane.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm64-test:
+    name: make test (aarch64 / QEMU)
+    runs-on: ubuntu-latest
+    # Generous ceiling: the full suite under user-mode emulation is far
+    # slower than the ~minutes it takes natively, but well inside this.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build + test on aarch64
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          # Debian bookworm == current stable, matching the by-hand
+          # `debian:stable` QEMU verification that established the baseline.
+          distro: bookworm
+          githubToken: ${{ github.token }}
+          # The action mounts the checked-out tree into the emulated
+          # container; these deps mirror the x86 `test` job's apt line
+          # plus the toolchain the base image doesn't ship.
+          install: |
+            apt-get update -q
+            apt-get install -y --no-install-recommends \
+              gcc make libcurl4-openssl-dev pkg-config ca-certificates
+          # `make clean` first is defensive: a fresh checkout carries no
+          # build artifacts, but if any x86 .o/.a ever leaked into the
+          # mount they would be the wrong object format for this arch.
+          run: |
+            make clean
+            make
+            make test
