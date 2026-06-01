@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* ====================================================================== */
@@ -103,6 +104,19 @@ static int fail_tool(const cmcp_json_t *arguments, void *userdata,
     (void)arguments; (void)userdata; (void)hctx;
     *out_content = cmcp_tool_text_content("intentional handler failure");
     *out_is_error = 1;
+    return *out_content ? CMCP_OK : CMCP_ENOMEM;
+}
+
+/* slow_tool — sleeps long enough that a cancel issued right after the
+ * submit reliably wins the race (the in-tree tools are otherwise instant,
+ * the P6 friction that made the cancel-honored path untestable). */
+static int slow_tool(const cmcp_json_t *arguments, void *userdata,
+                      cmcp_handler_ctx_t *hctx,
+                      cmcp_json_t **out_content, int *out_is_error) {
+    (void)arguments; (void)userdata; (void)hctx; (void)out_is_error;
+    struct timespec ts = { 0, 250L * 1000L * 1000L };  /* 250ms */
+    nanosleep(&ts, NULL);
+    *out_content = cmcp_tool_text_content("slow-done");
     return *out_content ? CMCP_OK : CMCP_ENOMEM;
 }
 
@@ -494,19 +508,15 @@ static void test_tool_call_ok(void) {
     cmcp_json_t *args = cmcp_json_new_object();
     cmcp_json_object_set(args, "message", cmcp_json_new_string("hi"));
 
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_call(
-        w.cli, "echo", args, &result, &text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_call(w.cli, "echo", args);
 
-    TEST_ASSERT(out == CMCP_TOOL_OK);
-    TEST_ASSERT(result != NULL);
-    TEST_ASSERT(text == NULL);
-    TEST_ASSERT(rpc_err == NULL);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_OK);
+    TEST_ASSERT(res.result != NULL);
+    TEST_ASSERT(res.text == NULL);
+    TEST_ASSERT(res.error == NULL);
 
     /* Peek at the result to confirm it really carries content[0].text. */
-    const cmcp_json_t *content = cmcp_json_object_get(result, "content");
+    const cmcp_json_t *content = cmcp_json_object_get(res.result, "content");
     TEST_ASSERT(content && content->type == CMCP_JSON_ARRAY);
     TEST_ASSERT(content->arr.len == 1);
     const cmcp_json_t *first = content->arr.items[0];
@@ -514,7 +524,7 @@ static void test_tool_call_ok(void) {
     TEST_ASSERT(txt && txt->type == CMCP_JSON_STRING);
     TEST_ASSERT(strcmp(txt->str.s, "hi") == 0);
 
-    cmcp_json_free(result);
+    cmcp_tool_result_clear(&res);
     tear_down(&w);
 }
 
@@ -532,19 +542,15 @@ static void test_tool_call_tool_level_error(void) {
     wired_t w = {0};
     TEST_ASSERT(wire_up(&w, srv) == 0);
 
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_call(
-        w.cli, "fail", NULL, &result, &text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_call(w.cli, "fail", NULL);
 
-    TEST_ASSERT(out == CMCP_TOOL_ERR_TOOL_LEVEL);
-    TEST_ASSERT(result == NULL);
-    TEST_ASSERT(text != NULL);
-    TEST_ASSERT(rpc_err == NULL);
-    TEST_ASSERT(strcmp(text, "intentional handler failure") == 0);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_TOOL_LEVEL);
+    TEST_ASSERT(res.result == NULL);
+    TEST_ASSERT(res.text != NULL);
+    TEST_ASSERT(res.error == NULL);
+    TEST_ASSERT(strcmp(res.text, "intentional handler failure") == 0);
 
-    free(text);
+    cmcp_tool_result_clear(&res);
     tear_down(&w);
 }
 
@@ -565,26 +571,22 @@ static void test_tool_call_protocol_unknown_tool(void) {
     wired_t w = {0};
     TEST_ASSERT(wire_up(&w, srv) == 0);
 
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_call(
-        w.cli, "ghost", NULL, &result, &text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_call(w.cli, "ghost", NULL);
 
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
-    TEST_ASSERT(result == NULL);
-    TEST_ASSERT(text == NULL);
-    TEST_ASSERT(rpc_err != NULL);
-    TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
-    TEST_ASSERT(rpc_err->message != NULL);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(res.result == NULL);
+    TEST_ASSERT(res.text == NULL);
+    TEST_ASSERT(res.error != NULL);
+    TEST_ASSERT(res.error->code == CMCP_RPC_INVALID_PARAMS);
+    TEST_ASSERT(res.error->message != NULL);
     /* Structured data carries {name: "ghost"} — confirms the error
      * reached the helper unmodified. */
-    TEST_ASSERT(rpc_err->data && rpc_err->data->type == CMCP_JSON_OBJECT);
-    const cmcp_json_t *nm = cmcp_json_object_get(rpc_err->data, "name");
+    TEST_ASSERT(res.error->data && res.error->data->type == CMCP_JSON_OBJECT);
+    const cmcp_json_t *nm = cmcp_json_object_get(res.error->data, "name");
     TEST_ASSERT(nm && nm->type == CMCP_JSON_STRING);
     TEST_ASSERT(strcmp(nm->str.s, "ghost") == 0);
 
-    cmcp_rpc_error_free(rpc_err);
+    cmcp_tool_result_clear(&res);
     tear_down(&w);
 }
 
@@ -612,27 +614,22 @@ static void test_tool_call_protocol_schema_violation(void) {
     cmcp_json_t *args = cmcp_json_new_object();
     cmcp_json_object_set(args, "message", cmcp_json_new_string(""));
 
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_call(
-        w.cli, "echo", args, &result, &text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_call(w.cli, "echo", args);
 
     /* cMCP may surface schema rejection on either channel — the spec
      * (2025-11-25) prefers tool-level isError:true. We accept either
      * since A3's doc fix follows whatever cMCP actually does. */
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL ||
-                 out == CMCP_TOOL_ERR_TOOL_LEVEL);
-    TEST_ASSERT(result == NULL);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL ||
+                 res.outcome == CMCP_TOOL_ERR_TOOL_LEVEL);
+    TEST_ASSERT(res.result == NULL);
 
-    if (out == CMCP_TOOL_ERR_PROTOCOL) {
-        TEST_ASSERT(rpc_err != NULL);
-        TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
-        cmcp_rpc_error_free(rpc_err);
+    if (res.outcome == CMCP_TOOL_ERR_PROTOCOL) {
+        TEST_ASSERT(res.error != NULL);
+        TEST_ASSERT(res.error->code == CMCP_RPC_INVALID_PARAMS);
     } else {
-        TEST_ASSERT(text != NULL);
-        free(text);
+        TEST_ASSERT(res.text != NULL);
     }
+    cmcp_tool_result_clear(&res);
     tear_down(&w);
 }
 
@@ -653,12 +650,10 @@ static void test_tool_call_null_args(void) {
     wired_t w = {0};
     TEST_ASSERT(wire_up(&w, srv) == 0);
 
-    cmcp_json_t *result = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_call(
-        w.cli, "ping", NULL, &result, NULL, NULL);
-    TEST_ASSERT(out == CMCP_TOOL_OK);
-    TEST_ASSERT(result != NULL);
-    cmcp_json_free(result);
+    cmcp_tool_result_t res = cmcp_client_tool_call(w.cli, "ping", NULL);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_OK);
+    TEST_ASSERT(res.result != NULL);
+    cmcp_tool_result_clear(&res);
 
     tear_down(&w);
 }
@@ -666,34 +661,27 @@ static void test_tool_call_null_args(void) {
 /* ====================================================================== */
 /* test_tool_call_protocol_synth_error                                      */
 /* ====================================================================== */
-/* NULL client / NULL name must not crash; helper returns
- * CMCP_TOOL_ERR_PROTOCOL with a synthesised -32602 so the host's
+/* NULL client / NULL name must not crash; helper returns a
+ * CMCP_TOOL_ERR_PROTOCOL result with a synthesised -32602 so the host's
  * switch handles it without falling through. args must still be
- * consumed (no leak). */
+ * consumed (no leak — valgrind enforces). */
 
 static void test_tool_call_protocol_synth_error(void) {
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
+    cmcp_tool_result_t res = cmcp_client_tool_call(
+        NULL, "x", cmcp_json_new_object() /* must be consumed */);
 
-    cmcp_tool_outcome_t out = cmcp_client_tool_call(
-        NULL, "x",
-        cmcp_json_new_object()  /* must be consumed */,
-        &result, &text, &rpc_err);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(res.result == NULL);
+    TEST_ASSERT(res.text == NULL);
+    TEST_ASSERT(res.error != NULL);
+    TEST_ASSERT(res.error->code == CMCP_RPC_INVALID_PARAMS);
+    cmcp_tool_result_clear(&res);
 
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
-    TEST_ASSERT(result == NULL);
-    TEST_ASSERT(text == NULL);
-    TEST_ASSERT(rpc_err != NULL);
-    TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
-    cmcp_rpc_error_free(rpc_err);
-
-    /* Same but with NULL out_rpc_err — synth error must be silently
-     * freed, not leaked. */
-    out = cmcp_client_tool_call(NULL, "x",
-                                  cmcp_json_new_object(),
-                                  NULL, NULL, NULL);
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
+    /* NULL name, valid-looking client pointer — args still consumed. */
+    res = cmcp_client_tool_call((cmcp_client_t *)0x1, NULL,
+                                cmcp_json_new_object());
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    cmcp_tool_result_clear(&res);
 }
 
 /* ====================================================================== */
@@ -719,23 +707,18 @@ static void test_tool_call_async_ok(void) {
     cmcp_json_t *args = cmcp_json_new_object();
     cmcp_json_object_set(args, "message", cmcp_json_new_string("async-hi"));
 
-    long long id = 0;
-    TEST_ASSERT(cmcp_client_tool_call_async(w.cli, "echo", args, &id)
-                 == CMCP_OK);
-    TEST_ASSERT(id > 0);
+    cmcp_tool_handle_t h = cmcp_client_tool_call_async(w.cli, "echo", args);
+    TEST_ASSERT(cmcp_tool_handle_valid(h));
+    TEST_ASSERT(h.client == w.cli && h.id > 0);
 
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_wait(
-        w.cli, id, &result, &text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_wait(h);
 
-    TEST_ASSERT(out == CMCP_TOOL_OK);
-    TEST_ASSERT(result != NULL);
-    TEST_ASSERT(text == NULL);
-    TEST_ASSERT(rpc_err == NULL);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_OK);
+    TEST_ASSERT(res.result != NULL);
+    TEST_ASSERT(res.text == NULL);
+    TEST_ASSERT(res.error == NULL);
 
-    const cmcp_json_t *content = cmcp_json_object_get(result, "content");
+    const cmcp_json_t *content = cmcp_json_object_get(res.result, "content");
     TEST_ASSERT(content && content->type == CMCP_JSON_ARRAY);
     TEST_ASSERT(content->arr.len == 1);
     const cmcp_json_t *first = content->arr.items[0];
@@ -743,7 +726,7 @@ static void test_tool_call_async_ok(void) {
     TEST_ASSERT(txt && txt->type == CMCP_JSON_STRING);
     TEST_ASSERT(strcmp(txt->str.s, "async-hi") == 0);
 
-    cmcp_json_free(result);
+    cmcp_tool_result_clear(&res);
     tear_down(&w);
 }
 
@@ -761,30 +744,28 @@ static void test_tool_call_async_concurrent(void) {
     TEST_ASSERT(wire_up(&w, srv) == 0);
 
     const char *messages[3] = {"alpha", "beta", "gamma"};
-    long long   ids[3]      = {0, 0, 0};
+    cmcp_tool_handle_t h[3]  = {{0}, {0}, {0}};
     for (int i = 0; i < 3; i++) {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "message",
                               cmcp_json_new_string(messages[i]));
-        TEST_ASSERT(cmcp_client_tool_call_async(w.cli, "echo", args,
-                                                  &ids[i]) == CMCP_OK);
+        h[i] = cmcp_client_tool_call_async(w.cli, "echo", args);
+        TEST_ASSERT(cmcp_tool_handle_valid(h[i]));
     }
-    TEST_ASSERT(ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2]);
+    TEST_ASSERT(h[0].id != h[1].id && h[1].id != h[2].id &&
+                h[0].id != h[2].id);
 
     /* Reap in reverse order — confirms id-based demux, not FIFO. */
     for (int i = 2; i >= 0; i--) {
-        cmcp_json_t *result = NULL;
-        char        *text   = NULL;
-        cmcp_tool_outcome_t out = cmcp_client_tool_wait(
-            w.cli, ids[i], &result, &text, NULL);
-        TEST_ASSERT(out == CMCP_TOOL_OK);
-        TEST_ASSERT(result != NULL);
-        const cmcp_json_t *content = cmcp_json_object_get(result, "content");
+        cmcp_tool_result_t res = cmcp_client_tool_wait(h[i]);
+        TEST_ASSERT(res.outcome == CMCP_TOOL_OK);
+        TEST_ASSERT(res.result != NULL);
+        const cmcp_json_t *content = cmcp_json_object_get(res.result, "content");
         TEST_ASSERT(content && content->arr.len == 1);
         const cmcp_json_t *txt = cmcp_json_object_get(
             content->arr.items[0], "text");
         TEST_ASSERT(txt && strcmp(txt->str.s, messages[i]) == 0);
-        cmcp_json_free(result);
+        cmcp_tool_result_clear(&res);
     }
 
     tear_down(&w);
@@ -799,21 +780,17 @@ static void test_tool_call_async_tool_level(void) {
     wired_t w = {0};
     TEST_ASSERT(wire_up(&w, srv) == 0);
 
-    long long id = 0;
-    TEST_ASSERT(cmcp_client_tool_call_async(w.cli, "fail", NULL, &id)
-                 == CMCP_OK);
+    cmcp_tool_handle_t h = cmcp_client_tool_call_async(w.cli, "fail", NULL);
+    TEST_ASSERT(cmcp_tool_handle_valid(h));
 
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_wait(
-        w.cli, id, NULL, &text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_wait(h);
 
-    TEST_ASSERT(out == CMCP_TOOL_ERR_TOOL_LEVEL);
-    TEST_ASSERT(text != NULL);
-    TEST_ASSERT(rpc_err == NULL);
-    TEST_ASSERT(strcmp(text, "intentional handler failure") == 0);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_TOOL_LEVEL);
+    TEST_ASSERT(res.text != NULL);
+    TEST_ASSERT(res.error == NULL);
+    TEST_ASSERT(strcmp(res.text, "intentional handler failure") == 0);
 
-    free(text);
+    cmcp_tool_result_clear(&res);
     tear_down(&w);
 }
 
@@ -827,59 +804,49 @@ static void test_tool_call_async_protocol_unknown_tool(void) {
     wired_t w = {0};
     TEST_ASSERT(wire_up(&w, srv) == 0);
 
-    long long id = 0;
-    TEST_ASSERT(cmcp_client_tool_call_async(w.cli, "ghost", NULL, &id)
-                 == CMCP_OK);
+    cmcp_tool_handle_t h = cmcp_client_tool_call_async(w.cli, "ghost", NULL);
+    TEST_ASSERT(cmcp_tool_handle_valid(h));
 
-    cmcp_rpc_error_t *rpc_err = NULL;
-    cmcp_tool_outcome_t out = cmcp_client_tool_wait(
-        w.cli, id, NULL, NULL, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_wait(h);
 
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
-    TEST_ASSERT(rpc_err != NULL);
-    TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
-    cmcp_rpc_error_free(rpc_err);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(res.error != NULL);
+    TEST_ASSERT(res.error->code == CMCP_RPC_INVALID_PARAMS);
+    cmcp_tool_result_clear(&res);
 
     tear_down(&w);
 }
 
-/* NULL c / NULL name / NULL out_id are EINVAL. args is consumed in
- * every path so no leak. */
+/* NULL c / NULL name yield an INVALID handle (not a crash); args is
+ * consumed in every path so no leak. */
 static void test_tool_call_async_einval(void) {
-    long long id = 0;
+    cmcp_tool_handle_t h;
     /* NULL client. */
-    TEST_ASSERT(cmcp_client_tool_call_async(
-        NULL, "x", cmcp_json_new_object(), &id) == CMCP_EINVAL);
+    h = cmcp_client_tool_call_async(NULL, "x", cmcp_json_new_object());
+    TEST_ASSERT(!cmcp_tool_handle_valid(h));
     /* NULL name. */
-    TEST_ASSERT(cmcp_client_tool_call_async(
-        (cmcp_client_t *)0x1, NULL, cmcp_json_new_object(), &id)
-                 == CMCP_EINVAL);
-    /* NULL out_id. */
-    TEST_ASSERT(cmcp_client_tool_call_async(
-        (cmcp_client_t *)0x1, "x", cmcp_json_new_object(), NULL)
-                 == CMCP_EINVAL);
+    h = cmcp_client_tool_call_async((cmcp_client_t *)0x1, NULL,
+                                    cmcp_json_new_object());
+    TEST_ASSERT(!cmcp_tool_handle_valid(h));
 }
 
-/* NULL c on the wait side synthesises a protocol error so the host's
- * switch has no default arm. */
+/* An invalid handle on the wait side synthesises a protocol error so the
+ * host's switch has no default arm. */
 static void test_tool_wait_protocol_synth_error(void) {
-    cmcp_json_t      *result  = NULL;
-    char             *text    = NULL;
-    cmcp_rpc_error_t *rpc_err = NULL;
+    cmcp_tool_handle_t bad = { NULL, 0 };
+    cmcp_tool_result_t res = cmcp_client_tool_wait(bad);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(res.result == NULL);
+    TEST_ASSERT(res.text == NULL);
+    TEST_ASSERT(res.error != NULL);
+    TEST_ASSERT(res.error->code == CMCP_RPC_INVALID_PARAMS);
+    cmcp_tool_result_clear(&res);
 
-    cmcp_tool_outcome_t out = cmcp_client_tool_wait(
-        NULL, 0, &result, &text, &rpc_err);
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
-    TEST_ASSERT(result == NULL);
-    TEST_ASSERT(text == NULL);
-    TEST_ASSERT(rpc_err != NULL);
-    TEST_ASSERT(rpc_err->code == CMCP_RPC_INVALID_PARAMS);
-    cmcp_rpc_error_free(rpc_err);
-
-    /* Same but with NULL out_rpc_err — synth error must be silently
-     * freed, not leaked. */
-    out = cmcp_client_tool_wait(NULL, 0, NULL, NULL, NULL);
-    TEST_ASSERT(out == CMCP_TOOL_ERR_PROTOCOL);
+    /* A client with a non-positive id is also invalid. */
+    cmcp_tool_handle_t bad2 = { (cmcp_client_t *)0x1, 0 };
+    res = cmcp_client_tool_wait(bad2);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    cmcp_tool_result_clear(&res);
 }
 
 /* ====================================================================== */
@@ -1002,6 +969,129 @@ static void test_tool_call_text_protocol_synth_error(void) {
 }
 
 /* ====================================================================== */
+/* P7 — struct+handle redesign guards (F2 / F4 / F5)                        */
+/* ====================================================================== */
+
+/* F2 guard: the by-value result carries its payload in the return value,
+ * so there is no out-param to read before the call populates it — the P6
+ * eval-order footgun is gone by construction. We also lock down
+ * cmcp_tool_result_clear: it frees the selected payload and is safe to
+ * call twice (idempotent), which a host's error path will do. */
+static void test_tool_result_clear_idempotent(void) {
+    cmcp_server_t *srv = cmcp_server_new("p7-clr-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "echo"; t.input_schema = echo_schema; t.handler = echo_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    cmcp_json_t *args = cmcp_json_new_object();
+    cmcp_json_object_set(args, "message", cmcp_json_new_string("payload"));
+
+    /* The footgun-free shape: the payload is in the returned struct, not
+     * behind a pointer the compiler could read early. */
+    cmcp_tool_result_t res = cmcp_client_tool_call(w.cli, "echo", args);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_OK);
+    TEST_ASSERT(res.result != NULL);
+
+    cmcp_tool_result_clear(&res);
+    /* After clear, payload pointers are nulled. */
+    TEST_ASSERT(res.result == NULL && res.text == NULL && res.error == NULL);
+    /* Second clear is a no-op, not a double-free. */
+    cmcp_tool_result_clear(&res);
+    /* NULL is tolerated. */
+    cmcp_tool_result_clear(NULL);
+
+    tear_down(&w);
+}
+
+/* F4 guard: the handle binds an in-flight id to its originating client,
+ * so per-client id-space collisions can't cause a wait to reap the wrong
+ * server's response. Two independent servers, a call on each; even if the
+ * two ids coincide, each handle reaps exactly its own server's result. */
+static void test_tool_handle_cross_session_isolation(void) {
+    /* Server A: echo. Server B: a tool that returns a distinct marker. */
+    cmcp_server_t *srvA = cmcp_server_new("p7-iso-A", "0.1.0");
+    cmcp_tool_t ta = {0};
+    ta.name = "echo"; ta.input_schema = echo_schema; ta.handler = echo_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srvA, &ta) == CMCP_OK);
+
+    cmcp_server_t *srvB = cmcp_server_new("p7-iso-B", "0.1.0");
+    cmcp_tool_t tb = {0};
+    tb.name = "echo"; tb.input_schema = echo_schema; tb.handler = echo_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srvB, &tb) == CMCP_OK);
+
+    wired_t wA = {0}, wB = {0};
+    TEST_ASSERT(wire_up(&wA, srvA) == 0);
+    TEST_ASSERT(wire_up(&wB, srvB) == 0);
+
+    cmcp_json_t *aA = cmcp_json_new_object();
+    cmcp_json_object_set(aA, "message", cmcp_json_new_string("from-A"));
+    cmcp_json_t *aB = cmcp_json_new_object();
+    cmcp_json_object_set(aB, "message", cmcp_json_new_string("from-B"));
+
+    cmcp_tool_handle_t hA = cmcp_client_tool_call_async(wA.cli, "echo", aA);
+    cmcp_tool_handle_t hB = cmcp_client_tool_call_async(wB.cli, "echo", aB);
+    TEST_ASSERT(cmcp_tool_handle_valid(hA) && cmcp_tool_handle_valid(hB));
+    /* The handle, not a bare id, is what disambiguates: each carries its
+     * own client. The ids may well collide (both fresh per-client id
+     * spaces) — that is exactly the footgun the binding removes. */
+    TEST_ASSERT(hA.client == wA.cli && hB.client == wB.cli);
+
+    /* Reap B first, then A — order independent, each routed by its own
+     * client. */
+    cmcp_tool_result_t rB = cmcp_client_tool_wait(hB);
+    cmcp_tool_result_t rA = cmcp_client_tool_wait(hA);
+
+    TEST_ASSERT(rA.outcome == CMCP_TOOL_OK && rA.result != NULL);
+    TEST_ASSERT(rB.outcome == CMCP_TOOL_OK && rB.result != NULL);
+
+    const cmcp_json_t *cA = cmcp_json_object_get(rA.result, "content");
+    const cmcp_json_t *cB = cmcp_json_object_get(rB.result, "content");
+    const cmcp_json_t *tA = cmcp_json_object_get(cA->arr.items[0], "text");
+    const cmcp_json_t *tB = cmcp_json_object_get(cB->arr.items[0], "text");
+    TEST_ASSERT(tA && strcmp(tA->str.s, "from-A") == 0);
+    TEST_ASSERT(tB && strcmp(tB->str.s, "from-B") == 0);
+
+    cmcp_tool_result_clear(&rA);
+    cmcp_tool_result_clear(&rB);
+    tear_down(&wA);
+    tear_down(&wB);
+}
+
+/* F5 guard: a cancelled call surfaces as CMCP_TOOL_ERR_CANCELLED, not a
+ * generic -32603 protocol error (the P6 finding). A slow handler lets the
+ * cancel win the race deterministically. The wait after cancel is also
+ * the mandatory completion-record reclaim from the thread-safety
+ * contract. */
+static void test_tool_wait_cancelled(void) {
+    cmcp_server_t *srv = cmcp_server_new("p7-cancel-srv", "0.1.0");
+    cmcp_tool_t t = {0};
+    t.name = "slow"; t.input_schema = tool_schema_empty; t.handler = slow_tool;
+    TEST_ASSERT(cmcp_server_add_tool(srv, &t) == CMCP_OK);
+
+    wired_t w = {0};
+    TEST_ASSERT(wire_up(&w, srv) == 0);
+
+    cmcp_tool_handle_t h = cmcp_client_tool_call_async(w.cli, "slow", NULL);
+    TEST_ASSERT(cmcp_tool_handle_valid(h));
+
+    /* Cancel right away — the handler is mid-sleep, so the local pending
+     * entry is taken before the response can arrive. */
+    int crc = cmcp_client_cancel(h.client, h.id, "p7: cancel-path test");
+    TEST_ASSERT(crc == CMCP_OK);
+
+    cmcp_tool_result_t res = cmcp_client_tool_wait(h);
+    TEST_ASSERT(res.outcome == CMCP_TOOL_ERR_CANCELLED);
+    /* CANCELLED carries no payload — all three pointers stay NULL. */
+    TEST_ASSERT(res.result == NULL && res.text == NULL && res.error == NULL);
+    cmcp_tool_result_clear(&res);
+
+    tear_down(&w);
+}
+
+/* ====================================================================== */
 /* test_einval — every helper rejects NULL inputs                           */
 /* ====================================================================== */
 
@@ -1050,6 +1140,9 @@ int main(void) {
     TEST_RUN(test_tool_call_text_protocol_unknown_tool);
     TEST_RUN(test_tool_call_text_null_args);
     TEST_RUN(test_tool_call_text_protocol_synth_error);
+    TEST_RUN(test_tool_result_clear_idempotent);
+    TEST_RUN(test_tool_handle_cross_session_isolation);
+    TEST_RUN(test_tool_wait_cancelled);
     TEST_RUN(test_einval);
     TEST_DONE();
 }

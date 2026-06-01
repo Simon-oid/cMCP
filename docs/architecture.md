@@ -656,7 +656,16 @@ Tool names are namespaced as `<server>:<tool>`:
   dispatch is async; collection is sequential because the result has
   to be ordered eventually anyway.
 - `cmcp_session_tool_call(qualified, args)` parses the colon, finds
-  the client by server name, builds `tools/call` params, and routes.
+  the client by server name, builds `tools/call` params, and routes
+  synchronously.
+- `cmcp_session_tool_call_async(qualified, args)` does the same routing
+  but dispatches without blocking and returns a `cmcp_tool_handle_t`
+  (the `{client, id}` pair). The host fans out across servers, then
+  reaps each with `cmcp_session_tool_wait` (a thin forwarder to
+  `cmcp_client_tool_wait`). The handle binds the id to its client, so a
+  reap can't be mis-routed even though per-client id spaces collide —
+  this is the multi-server parallel-call path a real agent host needs
+  (P6 F3/F4).
 - The session takes ownership of clients on add; freeing the session
   frees every client, which closes their transports and reaps their
   spawned children.

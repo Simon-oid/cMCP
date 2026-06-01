@@ -599,6 +599,123 @@ static void test_session_two_servers(void) {
 }
 
 /* ====================================================================== */
+/* test_session_tool_call_async_fanout — F3 session-layer parallel calls    */
+/* ====================================================================== */
+/* The whole point of a multi-server session is fanning tool calls out
+ * across servers in parallel. cmcp_session_tool_call_async keeps the
+ * <server>:<tool> routing in the session and hands back the client-level
+ * cmcp_tool_handle_t, so the host reaps with cmcp_session_tool_wait in
+ * any order. This exercises both cross-server fan-out AND two concurrent
+ * calls into the SAME server (whose ids would collide with the other
+ * server's — the binding is what keeps each reap correct). */
+
+/* Pull content[0].text out of a by-value tool result. */
+static char *result_text(const cmcp_tool_result_t *res) {
+    if (res->outcome != CMCP_TOOL_OK || !res->result) return NULL;
+    const cmcp_json_t *arr = cmcp_json_object_get(res->result, "content");
+    if (!arr || arr->type != CMCP_JSON_ARRAY || arr->arr.len == 0) return NULL;
+    const cmcp_json_t *item = arr->arr.items[0];
+    if (!item || item->type != CMCP_JSON_OBJECT) return NULL;
+    const cmcp_json_t *t = cmcp_json_object_get(item, "text");
+    if (!t || t->type != CMCP_JSON_STRING) return NULL;
+    return strdup(t->str.s);
+}
+
+static void test_session_tool_call_async_fanout(void) {
+    transport_pair_t pa, pb;
+    TEST_ASSERT(make_pair(&pa) == 0);
+    TEST_ASSERT(make_pair(&pb) == 0);
+
+    cmcp_server_t *srv_a = cmcp_server_new("srv-a", "0.1.0");
+    cmcp_server_t *srv_b = cmcp_server_new("srv-b", "0.1.0");
+    TEST_ASSERT(register_echo(srv_a, "echo_a", "A:") == CMCP_OK);
+    TEST_ASSERT(register_echo(srv_b, "echo_b", "B:") == CMCP_OK);
+
+    server_arg_t sa = { srv_a, pa.server_t, 0 };
+    server_arg_t sb = { srv_b, pb.server_t, 0 };
+    pthread_t th_a, th_b;
+    TEST_ASSERT(pthread_create(&th_a, NULL, server_thread, &sa) == 0);
+    TEST_ASSERT(pthread_create(&th_b, NULL, server_thread, &sb) == 0);
+
+    cmcp_client_t *cli_a = cmcp_client_new("ses-cli", "0.0.1");
+    cmcp_client_t *cli_b = cmcp_client_new("ses-cli", "0.0.1");
+    TEST_ASSERT(cmcp_client_handshake(cli_a, pa.client_t) == CMCP_OK);
+    TEST_ASSERT(cmcp_client_handshake(cli_b, pb.client_t) == CMCP_OK);
+
+    cmcp_session_t *ses = cmcp_session_new();
+    TEST_ASSERT(ses != NULL);
+    TEST_ASSERT(cmcp_session_add(ses, "alpha", cli_a) == CMCP_OK);
+    TEST_ASSERT(cmcp_session_add(ses, "beta",  cli_b) == CMCP_OK);
+
+    /* Fan out three calls without blocking: two into alpha, one into
+     * beta. The two alpha calls + the beta call cover both same-server
+     * concurrency and cross-server fan-out in one burst. */
+    cmcp_json_t *a1 = cmcp_json_new_object();
+    cmcp_json_object_set(a1, "message", cmcp_json_new_string("one"));
+    cmcp_json_t *a2 = cmcp_json_new_object();
+    cmcp_json_object_set(a2, "message", cmcp_json_new_string("two"));
+    cmcp_json_t *b1 = cmcp_json_new_object();
+    cmcp_json_object_set(b1, "message", cmcp_json_new_string("three"));
+
+    cmcp_tool_handle_t h1 = cmcp_session_tool_call_async(ses, "alpha:echo_a", a1);
+    cmcp_tool_handle_t h2 = cmcp_session_tool_call_async(ses, "alpha:echo_a", a2);
+    cmcp_tool_handle_t h3 = cmcp_session_tool_call_async(ses, "beta:echo_b",  b1);
+
+    TEST_ASSERT(cmcp_tool_handle_valid(h1));
+    TEST_ASSERT(cmcp_tool_handle_valid(h2));
+    TEST_ASSERT(cmcp_tool_handle_valid(h3));
+    /* The session routed each to the right backing client. */
+    TEST_ASSERT(h1.client == cli_a && h2.client == cli_a);
+    TEST_ASSERT(h3.client == cli_b);
+
+    /* Reap in a NON-submission order (h3, h1, h2) — the handle carries
+     * its own client, so order and cross-server collisions don't matter. */
+    cmcp_tool_result_t r3 = cmcp_session_tool_wait(h3);
+    cmcp_tool_result_t r1 = cmcp_session_tool_wait(h1);
+    cmcp_tool_result_t r2 = cmcp_session_tool_wait(h2);
+
+    char *t3 = result_text(&r3);
+    char *t1 = result_text(&r1);
+    char *t2 = result_text(&r2);
+    TEST_ASSERT(t3 && strcmp(t3, "B:three") == 0);   /* routed to beta  */
+    TEST_ASSERT(t1 && strcmp(t1, "A:one")   == 0);   /* routed to alpha */
+    TEST_ASSERT(t2 && strcmp(t2, "A:two")   == 0);   /* routed to alpha */
+    free(t1); free(t2); free(t3);
+    cmcp_tool_result_clear(&r1);
+    cmcp_tool_result_clear(&r2);
+    cmcp_tool_result_clear(&r3);
+
+    /* Unknown server prefix → invalid handle, args still consumed. */
+    cmcp_json_t *ag = cmcp_json_new_object();
+    cmcp_json_object_set(ag, "message", cmcp_json_new_string("x"));
+    cmcp_tool_handle_t hg = cmcp_session_tool_call_async(ses, "ghost:echo", ag);
+    TEST_ASSERT(!cmcp_tool_handle_valid(hg));
+
+    /* Malformed qualified name (no colon) → invalid handle, args consumed. */
+    cmcp_json_t *am = cmcp_json_new_object();
+    cmcp_tool_handle_t hm = cmcp_session_tool_call_async(ses, "noColon", am);
+    TEST_ASSERT(!cmcp_tool_handle_valid(hm));
+
+    /* NULL session / NULL qualified → invalid handle, args consumed. */
+    cmcp_tool_handle_t hn = cmcp_session_tool_call_async(NULL, "alpha:echo_a",
+                                                         cmcp_json_new_object());
+    TEST_ASSERT(!cmcp_tool_handle_valid(hn));
+    cmcp_tool_handle_t hq = cmcp_session_tool_call_async(ses, NULL,
+                                                         cmcp_json_new_object());
+    TEST_ASSERT(!cmcp_tool_handle_valid(hq));
+
+    cmcp_session_free(ses);
+    cmcp_transport_close(pa.client_t);
+    cmcp_transport_close(pb.client_t);
+    pthread_join(th_a, NULL);
+    pthread_join(th_b, NULL);
+    cmcp_server_free(srv_a);
+    cmcp_server_free(srv_b);
+    cmcp_transport_close(pa.server_t);
+    cmcp_transport_close(pb.server_t);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_client_server:\n");
@@ -610,6 +727,7 @@ int main(void) {
     TEST_RUN(test_version_negotiation);
     TEST_RUN(test_version_malformed);
     TEST_RUN(test_session_two_servers);
+    TEST_RUN(test_session_tool_call_async_fanout);
 
     TEST_DONE();
 }

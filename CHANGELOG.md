@@ -4,6 +4,85 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## v0.9.0 — P7 typed tool-call redesign (struct + handle) (2026-06-01)
+
+A single pre-1.0 **breaking** wave on the client-side typed tool-call
+API. It collapses five findings from the P6 host-probe (the first real
+stateful consumer to hold the client API in anger) into one corrected
+abstraction. An LLM Council pass reframed them not as five bugs but as
+one unfinished call/handle shape; fixing the shape dissolves the rest.
+
+This changes public function signatures in `include/cmcp_client.h` and
+`include/cmcp_session.h`. cRAG and any other client-lib consumer must
+migrate; all in-tree callers (tests, `examples/host-probe`,
+`tools/dogfood-crag-host`) were migrated in this same cut.
+
+### Changed — breaking
+
+- **`cmcp_client_tool_call` now returns `cmcp_tool_result_t` by value**
+  instead of writing three out-params (`out_result` / `out_text` /
+  `out_rpc_err`). The out-param shape invited
+  `report(tool_wait(&r,&t,&e), r, t, e)` — but C leaves argument
+  evaluation order unspecified, so `r/t/e` were read (still NULL)
+  *before* the call populated them, silently dropping payloads (P6 F2).
+  Returning by value removes the footgun by construction: there is no
+  pointer to read early. Free every result with the new
+  `cmcp_tool_result_clear`.
+- **`cmcp_client_tool_call_async` now returns a `cmcp_tool_handle_t`**
+  (an opaque `{client, id}` pair) instead of writing a bare
+  `long long *out_id`; **`cmcp_client_tool_wait` now takes that handle**
+  instead of a `(client, id)` pair. Per-client id spaces collide, so a
+  bare id was ambiguous across clients and a wait could be mis-routed to
+  the wrong server (P6 F4). Binding id→client in the handle makes
+  mis-routing structurally impossible. `cmcp_tool_handle_valid` reports
+  whether a dispatch succeeded.
+
+### Added
+
+- **`CMCP_TOOL_ERR_CANCELLED`** outcome (P6 F5). A host-cancelled call
+  previously surfaced as a generic `-32603` protocol error, conflating
+  cancellation with a server failure; it now has its own outcome arm and
+  carries no payload.
+- **`cmcp_session_tool_call_async` / `cmcp_session_tool_wait`** (P6 F3).
+  The session aggregator had only a *synchronous* routed tool call, so a
+  host wanting the parallel calls that are the whole point of a
+  multi-server session had to drop through `cmcp_session_get()` to the
+  raw clients and re-do the routing the session already knew. The async
+  pair keeps the routing in the session and hands back the same
+  `cmcp_tool_handle_t`. Covered by
+  `test_client_server.c::test_session_tool_call_async_fanout` (a 3-call
+  burst — two into one server, one into another — reaped out of order).
+- New replay fixture `echo-server/unknown_tool_protocol_error`
+  (captured via `cmcp-tee`): cements the two-channel error model's
+  PROTOCOL half at the wire — `tools/call` of a nonexistent tool →
+  a real `-32602` frame with `data.name` — complementing the
+  already-pinned `isError` half (`add_schema_missing_required`). This
+  is the P6 council's "capture, don't discard" follow-through.
+- New regression guards in `tests/test_client_helpers.c`:
+  `test_tool_result_clear_idempotent` (F2 / double-free safety),
+  `test_tool_handle_cross_session_isolation` (F4 — two servers whose
+  in-flight ids collide, each handle reaps exactly its own server's
+  result), `test_tool_wait_cancelled` (F5 — a slow handler lets the
+  cancel win the race deterministically).
+
+### Unchanged
+
+- `cmcp_client_tool_call_text` keeps its out-param signature (it returns
+  a single owned string + optional error — no eval-order hazard); its
+  body was re-pointed at the new struct API.
+- Wire format, protocol version (`2025-11-25`), and the two-channel
+  error *semantics* are untouched — this is purely the C surface that
+  exposes them.
+
+### Quality matrix
+
+- `make test` — green (`test_client_helpers` 224/224, incl. 3 new P7
+  guards).
+- `make valgrind` — leak-free (helper suite + `host-probe`).
+- `make test-asan` / `make test-tsan` — green.
+- `make replay` — wire-fixture gate green (crag fixtures skip without
+  the sibling cRAG built).
+
 ## v0.8.0 — Tier 7 closure (regression gates) (2026-05-31)
 
 The four Tier 7 axes deferred at v0.7.0 land in this release: each

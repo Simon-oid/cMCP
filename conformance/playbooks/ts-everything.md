@@ -95,20 +95,32 @@ Calling `get-structured-content {location:"Paris"}` (not in the server's
 (`no-such-tool`) likewise comes back as an `isError` content item carrying
 `MCP error -32602: Tool ... not found`.
 
-cMCP's **own server** does the opposite: a schema-validation failure
-surfaces as a real JSON-RPC **`-32602` error object** (see CLAUDE.md
-"Schema" — failures become `-32602` with `{path,keyword,message}` data),
-and an unknown method/tool is `-32601`/`-32602` at the protocol layer, not
-an `isError` result.
+**Correction (2026-06-01, verified by the P6 host-probe — this overturns
+an earlier draft of this note):** cMCP's own server splits the two cases,
+and NOT the way CLAUDE.md's "Schema" section claims:
 
-Both are spec-defensible: MCP explicitly models tool-*execution* failure as
-`isError` content, and leaves *input*-validation placement under-specified.
-The reference server folds validation into the result channel; cMCP keeps
-it on the protocol channel. **Consequence for a host:** a client must check
-*both* `resp.error` (JSON-RPC) *and* `result.isError` (tool result) to
-catch a bad call universally — checking one is not enough. cMCP's client
-exposes both cleanly (`cmcp-inspect` printed `[tool-level error]` for the
-isError path and would print an RPC error for the protocol path).
+- **Tool-input schema failure** (e.g. `add` with a required arg missing)
+  comes back as a **tool-level `isError` result** — `src/server.c:1177`
+  builds `{isError:true, content:[{text:"Invalid arguments for tool 'add':
+  ... (path: /b, keyword: required)"}]}`. It is NOT a `-32602` JSON-RPC
+  error. So on bad *input*, cMCP behaves the SAME as the TS reference, not
+  the opposite — the host-probe observed exactly this.
+- **Unknown tool / bad `protocolVersion`** DO surface as real `-32602`
+  JSON-RPC errors (`src/server.c:651`, confirmed by the probe:
+  `code=-32602 msg="Unknown tool"`).
+
+CLAUDE.md still says schema failures "surface as `-32602` with
+{path,keyword,message} data" — that is **stale**; the data is right but it
+rides the `isError` content channel, not the error channel. (Tracked as a
+P6 finding to reconcile doc vs. code.)
+
+**Consequence for a host:** to catch a bad call universally you must check
+*both* `resp.error` (JSON-RPC: unknown tool, transport) *and*
+`result.isError` (tool result: bad args, handler failure) — checking one
+is not enough, against cMCP *or* the TS reference. cMCP's client exposes
+both cleanly via the 3-way `cmcp_tool_outcome_t` (the probe got
+`CMCP_TOOL_ERR_PROTOCOL` for the unknown tool and
+`CMCP_TOOL_ERR_TOOL_LEVEL` for the missing arg).
 
 ### D2. Schema features beyond cMCP's validator subset — **[TS quirk / by design]**
 

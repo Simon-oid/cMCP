@@ -14,7 +14,7 @@
 
 /** Package version of this cMCP build (e.g. "0.8.0"). Independent of
  *  `CMCP_PROTOCOL_VERSION` — see docs/SEMVER.md. */
-#define CMCP_VERSION       "0.8.0"
+#define CMCP_VERSION       "0.9.0"
 
 /** MCP wire-protocol revision this cMCP build speaks (e.g.
  *  "2025-11-25"). Pinned per release; the handshake captures whatever

@@ -1391,35 +1391,58 @@ static cmcp_json_t *build_tool_call_params(const char *name,
     return params;
 }
 
-/* Walk the tools/call response and map it onto the 3-way outcome. The
- * resp arg is consumed (cleared) in every code path. Used by both the
- * sync flattener (cmcp_client_tool_call) and the typed-async waiter
- * (cmcp_client_tool_wait) so they share one branching policy. The
- * pre-resp transport error path is the caller's responsibility — this
- * helper is only invoked when a response object is in hand. */
-static cmcp_tool_outcome_t process_tool_response(
-    cmcp_rpc_message_t *resp,
-    cmcp_json_t **out_result,
-    char **out_text,
-    cmcp_rpc_error_t **out_rpc_err) {
+/* Free the owned payload a cmcp_tool_result_t carries and zero it.
+ * Idempotent; NULL is a no-op. The outcome field is left as-is on a
+ * zeroed clear (it is already 0 == CMCP_TOOL_OK), but every owned
+ * pointer is freed and nulled, so a double-clear is safe. */
+void cmcp_tool_result_clear(cmcp_tool_result_t *r) {
+    if (!r) return;
+    cmcp_json_free(r->result);
+    free(r->text);
+    cmcp_rpc_error_free(r->error);
+    r->result = NULL;
+    r->text   = NULL;
+    r->error  = NULL;
+}
+
+/* Helpers building a by-value result for each outcome. Centralising the
+ * struct construction keeps the "exactly one payload populated"
+ * invariant in one place. */
+static cmcp_tool_result_t tool_result_protocol(cmcp_rpc_error_t *err) {
+    cmcp_tool_result_t r = {0};
+    r.outcome = CMCP_TOOL_ERR_PROTOCOL;
+    r.error   = err;
+    return r;
+}
+static cmcp_tool_result_t tool_result_cancelled(void) {
+    cmcp_tool_result_t r = {0};
+    r.outcome = CMCP_TOOL_ERR_CANCELLED;   /* no payload — F5 */
+    return r;
+}
+
+/* Walk the tools/call response and map it onto the outcome enum,
+ * returning a by-value result. The resp arg is consumed (cleared) in
+ * every code path. Shared by the sync flattener (cmcp_client_tool_call)
+ * and the typed-async waiter (cmcp_client_tool_wait) so they keep one
+ * branching policy. Only invoked when a response object is in hand —
+ * the pre-resp transport / cancel paths are the caller's. */
+static cmcp_tool_result_t process_tool_response(cmcp_rpc_message_t *resp) {
+    cmcp_tool_result_t r = {0};
 
     /* Channel-level error: peer sent a JSON-RPC error frame. */
     if (resp->error) {
         cmcp_rpc_error_t *err = resp->error;
         resp->error = NULL;                  /* detach before clear */
         cmcp_rpc_message_clear(resp);
-        deliver_rpc_err(err, out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+        return tool_result_protocol(err);
     }
 
     /* No result is a malformed response — treat as protocol error. */
     if (!resp->result || resp->result->type != CMCP_JSON_OBJECT) {
         cmcp_rpc_message_clear(resp);
-        deliver_rpc_err(
+        return tool_result_protocol(
             make_synth_error(CMCP_RPC_INTERNAL_ERROR,
-                              "tools/call response missing result object"),
-            out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+                              "tools/call response missing result object"));
     }
 
     /* Tool-level error: result.isError == true. Extract the first
@@ -1445,55 +1468,40 @@ static cmcp_tool_outcome_t process_tool_response(
         char *buf = (char *)malloc(tlen + 1);
         if (!buf) {
             cmcp_rpc_message_clear(resp);
-            deliver_rpc_err(
-                make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"),
-                out_rpc_err);
-            return CMCP_TOOL_ERR_PROTOCOL;
+            return tool_result_protocol(
+                make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"));
         }
         memcpy(buf, text, tlen);
         buf[tlen] = '\0';
         cmcp_rpc_message_clear(resp);
 
-        if (out_text) *out_text = buf;
-        else          free(buf);
-        return CMCP_TOOL_ERR_TOOL_LEVEL;
+        r.outcome = CMCP_TOOL_ERR_TOOL_LEVEL;
+        r.text    = buf;
+        return r;
     }
 
     /* Success: hand the result object out by ownership transfer. */
-    cmcp_json_t *result = resp->result;
+    r.result = resp->result;
     resp->result = NULL;                     /* detach before clear */
     cmcp_rpc_message_clear(resp);
-
-    if (out_result) *out_result = result;
-    else            cmcp_json_free(result);
-    return CMCP_TOOL_OK;
+    r.outcome = CMCP_TOOL_OK;
+    return r;
 }
 
-cmcp_tool_outcome_t cmcp_client_tool_call(cmcp_client_t *c,
-                                            const char *name,
-                                            cmcp_json_t *args,
-                                            cmcp_json_t **out_result,
-                                            char **out_text,
-                                            cmcp_rpc_error_t **out_rpc_err) {
-    if (out_result)  *out_result  = NULL;
-    if (out_text)    *out_text    = NULL;
-    if (out_rpc_err) *out_rpc_err = NULL;
-
+cmcp_tool_result_t cmcp_client_tool_call(cmcp_client_t *c,
+                                          const char *name,
+                                          cmcp_json_t *args) {
     if (!c || !name) {
         cmcp_json_free(args);
-        deliver_rpc_err(
+        return tool_result_protocol(
             make_synth_error(CMCP_RPC_INVALID_PARAMS,
-                              "cmcp_client_tool_call: NULL client or tool name"),
-            out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+                              "cmcp_client_tool_call: NULL client or tool name"));
     }
 
     cmcp_json_t *params = build_tool_call_params(name, args);
     if (!params) {
-        deliver_rpc_err(
-            make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"),
-            out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+        return tool_result_protocol(
+            make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"));
     }
 
     cmcp_rpc_message_t resp;
@@ -1503,64 +1511,63 @@ cmcp_tool_outcome_t cmcp_client_tool_call(cmcp_client_t *c,
         char buf[96];
         snprintf(buf, sizeof buf, "tools/call transport failed: %s",
                  cmcp_errstr(rc));
-        deliver_rpc_err(make_synth_error(CMCP_RPC_INTERNAL_ERROR, buf),
-                         out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+        return tool_result_protocol(make_synth_error(CMCP_RPC_INTERNAL_ERROR, buf));
     }
 
-    return process_tool_response(&resp, out_result, out_text, out_rpc_err);
+    return process_tool_response(&resp);
 }
 
-/* A4: typed async pair. cmcp_client_tool_call_async is the dispatch
- * half; cmcp_client_tool_wait is the reap half. Both reuse
+/* Typed async pair. cmcp_client_tool_call_async is the dispatch half;
+ * cmcp_client_tool_wait is the reap half. Both reuse
  * build_tool_call_params + process_tool_response so the branching
- * policy stays single-sourced with the sync flattener above. */
-int cmcp_client_tool_call_async(cmcp_client_t *c,
-                                  const char *name,
-                                  cmcp_json_t *args,
-                                  long long *out_id) {
-    if (!c || !name || !out_id) {
+ * policy stays single-sourced with the sync flattener above. The
+ * returned handle binds the request id to its client so a wait can't be
+ * routed to the wrong one (P6 cross-session mis-routing). */
+cmcp_tool_handle_t cmcp_client_tool_call_async(cmcp_client_t *c,
+                                                const char *name,
+                                                cmcp_json_t *args) {
+    cmcp_tool_handle_t h = { NULL, 0 };       /* invalid until dispatched */
+    if (!c || !name) {
         cmcp_json_free(args);
-        return CMCP_EINVAL;
+        return h;
     }
     cmcp_json_t *params = build_tool_call_params(name, args);
-    if (!params) return CMCP_ENOMEM;
+    if (!params) return h;
     /* cmcp_client_call_async consumes params on every path (including
      * its own EINVAL on a NULL transport — c may be valid here but
      * never connected). */
-    return cmcp_client_call_async(c, "tools/call", params, out_id);
+    long long id = 0;
+    int rc = cmcp_client_call_async(c, "tools/call", params, &id);
+    if (rc != CMCP_OK) return h;              /* stays invalid */
+    h.client = c;
+    h.id     = id;
+    return h;
 }
 
-cmcp_tool_outcome_t cmcp_client_tool_wait(cmcp_client_t *c,
-                                            long long id,
-                                            cmcp_json_t **out_result,
-                                            char **out_text,
-                                            cmcp_rpc_error_t **out_rpc_err) {
-    if (out_result)  *out_result  = NULL;
-    if (out_text)    *out_text    = NULL;
-    if (out_rpc_err) *out_rpc_err = NULL;
-
-    if (!c) {
-        deliver_rpc_err(
+cmcp_tool_result_t cmcp_client_tool_wait(cmcp_tool_handle_t h) {
+    if (!cmcp_tool_handle_valid(h)) {
+        return tool_result_protocol(
             make_synth_error(CMCP_RPC_INVALID_PARAMS,
-                              "cmcp_client_tool_wait: NULL client"),
-            out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+                              "cmcp_client_tool_wait: invalid handle"));
     }
 
     cmcp_rpc_message_t resp;
     cmcp_rpc_message_init(&resp);
-    int rc = cmcp_client_wait(c, id, &resp);
+    int rc = cmcp_client_wait(h.client, h.id, &resp);
+    if (rc == CMCP_ECANCELLED) {
+        /* Host cancel won the race or the client is shutting down. This
+         * is NOT a server error — surface it as its own outcome (F5) so
+         * a host doesn't log a cancellation as a failure. */
+        return tool_result_cancelled();
+    }
     if (rc != CMCP_OK) {
         char buf[96];
         snprintf(buf, sizeof buf, "tools/call wait failed: %s",
                  cmcp_errstr(rc));
-        deliver_rpc_err(make_synth_error(CMCP_RPC_INTERNAL_ERROR, buf),
-                         out_rpc_err);
-        return CMCP_TOOL_ERR_PROTOCOL;
+        return tool_result_protocol(make_synth_error(CMCP_RPC_INTERNAL_ERROR, buf));
     }
 
-    return process_tool_response(&resp, out_result, out_text, out_rpc_err);
+    return process_tool_response(&resp);
 }
 
 /* A5: content-shortcut helper. Flatten both content[].text outcomes
@@ -1585,13 +1592,9 @@ int cmcp_client_tool_call_text(cmcp_client_t *c,
         return CMCP_EPROTOCOL;
     }
 
-    cmcp_json_t      *result_json = NULL;
-    char             *err_text    = NULL;
-    cmcp_rpc_error_t *rpc_err     = NULL;
-    cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
-        c, name, args, &result_json, &err_text, &rpc_err);
+    cmcp_tool_result_t res = cmcp_client_tool_call(c, name, args);
 
-    switch (outcome) {
+    switch (res.outcome) {
     case CMCP_TOOL_OK: {
         /* Extract first content[].text from the success result. Empty
          * string if the result had no content items or the first item
@@ -1600,7 +1603,7 @@ int cmcp_client_tool_call_text(cmcp_client_t *c,
         const char *text = "";
         size_t      tlen = 0;
         const cmcp_json_t *content =
-            cmcp_json_object_get(result_json, "content");
+            cmcp_json_object_get(res.result, "content");
         if (content && content->type == CMCP_JSON_ARRAY &&
             content->arr.len > 0) {
             const cmcp_json_t *item = content->arr.items[0];
@@ -1614,7 +1617,7 @@ int cmcp_client_tool_call_text(cmcp_client_t *c,
         }
         char *buf = (char *)malloc(tlen + 1);
         if (!buf) {
-            cmcp_json_free(result_json);
+            cmcp_tool_result_clear(&res);
             deliver_rpc_err(
                 make_synth_error(CMCP_RPC_INTERNAL_ERROR, "out of memory"),
                 out_rpc_err);
@@ -1622,19 +1625,31 @@ int cmcp_client_tool_call_text(cmcp_client_t *c,
         }
         memcpy(buf, text, tlen);
         buf[tlen] = '\0';
-        cmcp_json_free(result_json);
+        cmcp_tool_result_clear(&res);
         *out_text = buf;
         return CMCP_OK;
     }
     case CMCP_TOOL_ERR_TOOL_LEVEL:
-        /* err_text is already an owned malloc'd string from A2 — hand
-         * it through to the caller. The "tool said no" branch becomes
-         * the "OK + text" branch in this view. */
-        *out_text = err_text;
+        /* res.text is an owned malloc'd string — hand it through to the
+         * caller (transfer ownership, don't let clear free it). The
+         * "tool said no" branch becomes the "OK + text" branch here. */
+        *out_text = res.text;
+        res.text  = NULL;
         return CMCP_OK;
+    case CMCP_TOOL_ERR_CANCELLED:
+        /* No wire error to forward — synthesize one so the out-param
+         * contract (CMCP_EPROTOCOL always populates out_rpc_err) holds. */
+        cmcp_tool_result_clear(&res);
+        deliver_rpc_err(
+            make_synth_error(CMCP_RPC_INTERNAL_ERROR, "tools/call cancelled"),
+            out_rpc_err);
+        return CMCP_EPROTOCOL;
     case CMCP_TOOL_ERR_PROTOCOL:
     default:
-        deliver_rpc_err(rpc_err, out_rpc_err);
+        /* Transfer the owned error to the caller; clear the rest. */
+        deliver_rpc_err(res.error, out_rpc_err);
+        res.error = NULL;
+        cmcp_tool_result_clear(&res);
         return CMCP_EPROTOCOL;
     }
 }

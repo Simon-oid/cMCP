@@ -36,6 +36,24 @@
       ]
     },
     {
+      "name": "echo-server/unknown_tool_protocol_error",
+      "_note": [
+        "The two-channel error model's PROTOCOL half, captured at the",
+        "wire after the P6 host-probe surfaced it: tools/call against a",
+        "tool that does not exist comes back as a real JSON-RPC -32602",
+        "error frame (data.name = the bad tool), NOT a tool-level",
+        "isError result. The complementary isError half (bad arguments",
+        "to a KNOWN tool) is pinned by add_schema_missing_required.",
+        "Together they cement the F1/D1 contract a host must check both",
+        "channels for."
+      ],
+      "fixture": "conformance/fixtures/echo-server/unknown_tool_protocol_error.jsonl",
+      "server": "examples/echo-server",
+      "prerequisites": [
+        {"kind": "file", "path": "examples/echo-server"}
+      ]
+    },
+    {
       "name": "filesystem-mcp/fs_write_symlink_leaf_escape",
       "fixture": "conformance/fixtures/filesystem-mcp/fs_write_symlink_leaf_escape.jsonl",
       "server": "tools/filesystem-mcp/filesystem-mcp",

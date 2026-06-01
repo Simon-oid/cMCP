@@ -30,12 +30,94 @@
 
 typedef struct cmcp_client cmcp_client_t;
 
+/* Outcome of a tools/call. The MCP `tools/call` method can fail in
+ * distinct ways the host has to reason about separately:
+ *
+ *   - a JSON-RPC error on the channel (peer rejected the call,
+ *     transport failed mid-flight, unknown tool surfaced as -32602
+ *     with structured data),
+ *   - a tool-level error (handler succeeded at the channel level but
+ *     reported a failure in result.isError + result.content[]; this is
+ *     also how a server-side argument-schema rejection arrives — see
+ *     docs/schema-conformance.md),
+ *   - host-initiated cancellation (cmcp_client_cancel won the race, or
+ *     the client is shutting down) — distinct from a server error so a
+ *     host does not log a cancelled call as a failure.
+ *
+ * Hosts that try to flatten this into a single resp.error check miss
+ * the tool-level case; hosts that only check result.isError miss the
+ * protocol case. The outcome enum puts every case into one switch. */
+typedef enum {
+    CMCP_TOOL_OK             = 0, /* success — result holds the result object */
+    CMCP_TOOL_ERR_TOOL_LEVEL = 1, /* tool said no — text holds content[0].text */
+    CMCP_TOOL_ERR_PROTOCOL   = 2, /* channel said no — error holds the rpc error */
+    CMCP_TOOL_ERR_CANCELLED  = 3, /* host cancelled / shutdown — no payload (F5) */
+} cmcp_tool_outcome_t;
+
+/* The result of a tools/call, returned BY VALUE. Exactly one payload
+ * field is meaningful, selected by `.outcome`:
+ *
+ *   CMCP_TOOL_OK              .result = result object (owned). Includes
+ *                                       content[], structuredContent (if
+ *                                       any), isError == false.
+ *   CMCP_TOOL_ERR_TOOL_LEVEL  .text   = first content[].text, owned
+ *                                       NUL-terminated string. Empty
+ *                                       string if the server set isError
+ *                                       with no text content.
+ *   CMCP_TOOL_ERR_PROTOCOL    .error  = owned cmcp_rpc_error_t. Carries
+ *                                       the wire error (unknown tool
+ *                                       -32602, method-not-found -32601,
+ *                                       internal -32603, …) OR a
+ *                                       synthesized error when the
+ *                                       failure was transport-side (the
+ *                                       call never reached the peer or
+ *                                       no response came back).
+ *   CMCP_TOOL_ERR_CANCELLED   (no payload — all three pointers NULL.)
+ *
+ * Returning the payload by value rather than through out-params removes
+ * the P6 eval-order footgun: there is no pointer the caller can read
+ * before the call has populated it. Free EVERY result with
+ * cmcp_tool_result_clear regardless of outcome — it frees whichever
+ * payload `.outcome` selected and zeros the struct. */
+typedef struct {
+    cmcp_tool_outcome_t outcome;
+    cmcp_json_t        *result;
+    char               *text;
+    cmcp_rpc_error_t   *error;
+} cmcp_tool_result_t;
+
+/* Free the owned payload a cmcp_tool_result_t carries and zero it.
+ * Safe on a zeroed struct and idempotent (clears the pointers it
+ * frees). NULL `r` is a no-op. */
+void cmcp_tool_result_clear(cmcp_tool_result_t *r);
+
+/* An in-flight tools/call, binding its request id to the client that
+ * issued it. Returned by cmcp_client_tool_call_async, consumed by
+ * cmcp_client_tool_wait. Binding id→client makes it structurally
+ * impossible to wait on the wrong client (the P6 cross-session
+ * mis-routing footgun: per-client id spaces collide, so a bare id is
+ * ambiguous across clients). Treat the fields as read-only. */
+typedef struct {
+    cmcp_client_t *client;
+    long long      id;
+} cmcp_tool_handle_t;
+
+/* A handle is valid iff it names a client and carries a positive id.
+ * cmcp_client_tool_call_async returns an invalid handle (client == NULL)
+ * on dispatch failure; cmcp_client_tool_wait maps an invalid handle to a
+ * CMCP_TOOL_ERR_PROTOCOL result so the caller's switch needs no extra
+ * guard. */
+static inline int cmcp_tool_handle_valid(cmcp_tool_handle_t h) {
+    return h.client != NULL && h.id > 0;
+}
+
 /* Single-client typed helpers (below) re-use the session-layer record
  * shapes from cmcp_session.h, so a host pulls in one struct definition
  * and one set of *_free destructors regardless of whether it talks to
- * one server or N. The include sits after the cmcp_client_t typedef so
- * cmcp_session.h's references to cmcp_client_t resolve cleanly when a
- * consumer #includes cmcp_client.h before (or instead of) cmcp_session.h. */
+ * one server or N. The include sits after the cmcp_client_t typedef and
+ * the tool-call types above so cmcp_session.h's references to all of
+ * them resolve cleanly when a consumer #includes cmcp_client.h before
+ * (or instead of) cmcp_session.h. */
 #include "cmcp_session.h"
 
 /* ====================================================================== */
@@ -328,109 +410,45 @@ int cmcp_client_prompt_get(cmcp_client_t *c, const char *name,
                             cmcp_json_t *args,
                             cmcp_json_t **out_messages);
 
-/* Outcome of a cmcp_client_tool_call. The MCP `tools/call` method can
- * fail in two distinct ways the host has to reason about separately:
+/* Call a tool synchronously, flattening the multi-channel error model
+ * into one by-value result. `args` is consumed (may be NULL — the
+ * helper sends `{}` so the wire stays well-formed and server-side
+ * schema validation still runs).
  *
- *   - a JSON-RPC error on the channel (peer rejected the call,
- *     transport failed mid-flight, schema rejection surfaced as
- *     -32602, unknown tool surfaced as -32602 with structured data),
- *   - a tool-level error (handler succeeded at the channel level but
- *     reported a failure in result.isError + result.content[]).
- *
- * Hosts that try to flatten this into a single resp.error check miss
- * the tool-level case; hosts that only check result.isError miss the
- * protocol case. The 3-way outcome puts both into a single switch. */
-typedef enum {
-    CMCP_TOOL_OK             = 0, /* success, *out_result is owned by caller */
-    CMCP_TOOL_ERR_TOOL_LEVEL = 1, /* tool said no — *out_text is owned by caller */
-    CMCP_TOOL_ERR_PROTOCOL   = 2, /* channel said no — *out_rpc_err is owned by caller */
-} cmcp_tool_outcome_t;
+ * A NULL `c` or NULL `name` yields a CMCP_TOOL_ERR_PROTOCOL result with
+ * a synthesized -32602 error, so the caller's `switch` handles it with
+ * no default arm. Always free the returned result with
+ * cmcp_tool_result_clear. */
+cmcp_tool_result_t cmcp_client_tool_call(cmcp_client_t *c,
+                                          const char *name,
+                                          cmcp_json_t *args);
 
-/* Call a tool, flatten the two-channel error model into one outcome.
+/* Typed async pair. cmcp_client_tool_call is the sync sugar; this pair
+ * lets the host fan out N concurrent tool calls and reap them in any
+ * order without dropping back to the raw cmcp_client_call_async +
+ * cmcp_client_wait surface (which would re-expose the multi-channel
+ * error model the outcome enum eliminated).
  *
- * `args` is consumed (may be NULL — the helper sends `{}` in that case
- * to keep the wire well-formed). On return EXACTLY ONE of *out_result
- * / *out_text / *out_rpc_err is populated, matching the outcome enum.
- *
- *   CMCP_TOOL_OK              *out_result   = result object (owned;
- *                                              free with cmcp_json_free).
- *                                              Includes content[],
- *                                              structuredContent (if
- *                                              the tool produced one),
- *                                              and isError == false.
- *
- *   CMCP_TOOL_ERR_TOOL_LEVEL  *out_text     = first content[].text as a
- *                                              malloc'd NUL-terminated
- *                                              string (owned; free with
- *                                              free()). Empty string if
- *                                              the server set isError
- *                                              without any text content.
- *
- *   CMCP_TOOL_ERR_PROTOCOL    *out_rpc_err  = owned cmcp_rpc_error_t
- *                                              (free with
- *                                              cmcp_rpc_error_free).
- *                                              Carries the wire error
- *                                              (e.g. -32602 schema
- *                                              rejection with
- *                                              structured data, -32601
- *                                              method not found,
- *                                              -32603 internal error),
- *                                              OR a synthesized error
- *                                              when the failure was
- *                                              transport-side (the
- *                                              call never reached the
- *                                              peer or the response
- *                                              never came back).
- *
- * Any of the three out_* may be NULL — passing NULL just discards that
- * branch of the result. Whichever pointer would have received the
- * payload is silently freed.
- *
- * A NULL `c` or NULL `name` is reported as CMCP_TOOL_ERR_PROTOCOL with
- * a synthesized -32602 error so the caller's `switch` still handles
- * it without falling through to a default arm. */
-cmcp_tool_outcome_t cmcp_client_tool_call(cmcp_client_t *c,
-                                            const char *name,
-                                            cmcp_json_t *args,
-                                            cmcp_json_t **out_result,
-                                            char **out_text,
-                                            cmcp_rpc_error_t **out_rpc_err);
-
-/* Typed async pair, A4 (v0.7 candidate surfaced by the v0.6.0 dogfood
- * rewrite). cmcp_client_tool_call is the sync sugar; this pair lets
- * the host fan out N concurrent tool calls and reap them in any order
- * without dropping back to the raw cmcp_client_call_async +
- * cmcp_client_wait surface (which would re-expose the two-channel
- * error model A2's outcome enum eliminated).
- *
- * Wire shape, ownership, and error semantics are identical to
- * cmcp_client_tool_call — the split is purely about scheduling.
+ * Wire shape, ownership, and error semantics match cmcp_client_tool_call
+ * — the split is purely about scheduling.
  *
  * cmcp_client_tool_call_async: builds {name, arguments} (NULL args
- * becomes {}), dispatches via the async core, stores the in-flight
- * id in `*out_id`. `args` is consumed in every code path (including
- * caller-misuse: NULL c / NULL name / NULL out_id). Returns CMCP_OK
- * on success, or one of CMCP_EINVAL / CMCP_ENOMEM / CMCP_EAGAIN
- * (in-flight cap) / transport error from the writer.
+ * becomes {}), dispatches via the async core, returns a handle binding
+ * the in-flight id to `c`. `args` is consumed in every code path
+ * (including caller misuse: NULL c / NULL name). On dispatch failure the
+ * returned handle is invalid (cmcp_tool_handle_valid == 0).
  *
- * cmcp_client_tool_wait: blocks until the response arrives, then
- * processes it through the same three branches as
- * cmcp_client_tool_call. Always returns one of the three
- * cmcp_tool_outcome_t values. Failures that cannot arrive on the
- * wire (caller passed an unknown id; the call was cancelled
- * mid-flight; the response was malformed) surface as
- * CMCP_TOOL_ERR_PROTOCOL with a synthesized cmcp_rpc_error_t so the
- * caller's switch has no default arm. */
-int cmcp_client_tool_call_async(cmcp_client_t *c,
-                                  const char *name,
-                                  cmcp_json_t *args,
-                                  long long *out_id);
+ * cmcp_client_tool_wait: blocks until the response for `h` arrives, then
+ * maps it onto the outcome enum. An invalid handle, an unknown id, a
+ * malformed response, or a transport failure surface as
+ * CMCP_TOOL_ERR_PROTOCOL with a synthesized error; a cancelled call
+ * surfaces as CMCP_TOOL_ERR_CANCELLED. Always free the result with
+ * cmcp_tool_result_clear. */
+cmcp_tool_handle_t cmcp_client_tool_call_async(cmcp_client_t *c,
+                                                const char *name,
+                                                cmcp_json_t *args);
 
-cmcp_tool_outcome_t cmcp_client_tool_wait(cmcp_client_t *c,
-                                            long long id,
-                                            cmcp_json_t **out_result,
-                                            char **out_text,
-                                            cmcp_rpc_error_t **out_rpc_err);
+cmcp_tool_result_t cmcp_client_tool_wait(cmcp_tool_handle_t h);
 
 /* Content-shortcut helper, A5 (v0.7 candidate surfaced by the v0.6.0
  * dogfood rewrite). Many host call sites want one thing from a

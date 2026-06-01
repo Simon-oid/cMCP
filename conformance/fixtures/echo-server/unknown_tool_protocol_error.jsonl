@@ -1,0 +1,5 @@
+{"t":1780336090.886360,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"0\"}}}"}
+{"t":1780336090.886380,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"}
+{"t":1780336090.886383,"dir":"in","frame":"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\",\"arguments\":{}}}"}
+{"t":1780336090.886922,"dir":"out","frame":"{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"capabilities\":{\"tools\":{}},\"protocolVersion\":\"2025-11-25\",\"serverInfo\":{\"name\":\"echo-server\",\"version\":\"0.1.0\"}}}"}
+{"t":1780336090.886931,"dir":"out","frame":"{\"error\":{\"code\":-32602,\"data\":{\"name\":\"no_such_tool\"},\"message\":\"Unknown tool\"},\"id\":2,\"jsonrpc\":\"2.0\"}"}

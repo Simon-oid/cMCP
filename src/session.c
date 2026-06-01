@@ -296,6 +296,41 @@ int cmcp_session_tool_call(cmcp_session_t *s,
     return cmcp_client_request(e->client, "tools/call", params, out_response);
 }
 
+/* F3: async routed tool call. Resolve the "<server>:<tool>" prefix to a
+ * client, then hand off to the client-level async helper, which builds
+ * the params, dispatches, and returns a handle binding the id to that
+ * client. We pass the bare tool name (colon+1) through — the routing is
+ * the session's job, the wire shape is the client's. */
+cmcp_tool_handle_t cmcp_session_tool_call_async(cmcp_session_t *s,
+                                                const char *qualified,
+                                                cmcp_json_t *args) {
+    cmcp_tool_handle_t bad = { NULL, 0 };
+    if (!s || !qualified) {
+        cmcp_json_free(args);
+        return bad;
+    }
+    const char *colon = strchr(qualified, ':');
+    if (!colon || colon == qualified || colon[1] == '\0') {
+        cmcp_json_free(args);
+        return bad;
+    }
+
+    size_t srv_len = (size_t)(colon - qualified);
+    char srv[256];
+    if (srv_len >= sizeof srv) { cmcp_json_free(args); return bad; }
+    memcpy(srv, qualified, srv_len);
+    srv[srv_len] = '\0';
+
+    entry_t *e = find_by_name(s, srv);
+    if (!e) { cmcp_json_free(args); return bad; }
+
+    return cmcp_client_tool_call_async(e->client, colon + 1, args);
+}
+
+cmcp_tool_result_t cmcp_session_tool_wait(cmcp_tool_handle_t h) {
+    return cmcp_client_tool_wait(h);
+}
+
 /* ====================================================================== */
 /* Aggregated resources/list                                               */
 /* ====================================================================== */

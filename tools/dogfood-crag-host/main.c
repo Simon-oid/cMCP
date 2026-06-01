@@ -101,18 +101,14 @@ static double now_ms(void) {
  * harness had to write by hand. */
 static void log_tool_outcome(double dt_ms,
                               const char *site,
-                              cmcp_tool_outcome_t outcome,
-                              cmcp_json_t *result_json,
-                              char *text,
-                              cmcp_rpc_error_t *rpc_err) {
-    switch (outcome) {
+                              cmcp_tool_result_t *res) {
+    switch (res->outcome) {
     case CMCP_TOOL_OK: {
-        /* The OK channel still hands the host a raw cmcp_json_t — the
-         * host wants the first content[].text for display, but A1/A2
-         * don't have a flattener for the success path. emit_stable
-         * shows the whole shape; the v0.7 finding below pencils a
-         * cmcp_client_tool_call_text shortcut. */
-        char *s = cmcp_json_emit_stable(result_json);
+        /* The OK channel hands the host a raw cmcp_json_t — the host
+         * wants the first content[].text for display, but the typed
+         * call doesn't flatten the success path. emit_stable shows the
+         * whole shape; cmcp_client_tool_call_text is the shortcut. */
+        char *s = cmcp_json_emit_stable(res->result);
         size_t n = s ? strlen(s) : 0;
         char buf[160];
         size_t take = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
@@ -122,30 +118,33 @@ static void log_tool_outcome(double dt_ms,
         fprintf(stderr, "  %s %.1fms: OK %s%s\n",
                 site, dt_ms, buf, n > take ? "..." : "");
         free(s);
-        cmcp_json_free(result_json);
         break;
     }
     case CMCP_TOOL_ERR_TOOL_LEVEL: {
         char buf[160];
-        size_t n = text ? strlen(text) : 0;
+        size_t n = res->text ? strlen(res->text) : 0;
         size_t take = n < sizeof(buf) - 1 ? n : sizeof(buf) - 1;
-        if (text) memcpy(buf, text, take);
+        if (res->text) memcpy(buf, res->text, take);
         buf[take] = 0;
         for (size_t i = 0; i < take; i++) if (buf[i] == '\n') buf[i] = ' ';
         fprintf(stderr, "  %s %.1fms: TOOL_ERR \"%s%s\"\n",
                 site, dt_ms, buf, n > take ? "..." : "");
-        free(text);
         break;
     }
     case CMCP_TOOL_ERR_PROTOCOL: {
         fprintf(stderr, "  %s %.1fms: PROTOCOL code=%d msg=\"%s\"\n",
                 site, dt_ms,
-                rpc_err ? rpc_err->code : 0,
-                (rpc_err && rpc_err->message) ? rpc_err->message : "(null)");
-        cmcp_rpc_error_free(rpc_err);
+                res->error ? res->error->code : 0,
+                (res->error && res->error->message) ? res->error->message
+                                                     : "(null)");
         break;
     }
+    case CMCP_TOOL_ERR_CANCELLED:
+        fprintf(stderr, "  %s %.1fms: CANCELLED (host-initiated / shutdown)\n",
+                site, dt_ms);
+        break;
     }
+    cmcp_tool_result_clear(res);
 }
 
 /* ---------- the session ----------------------------------------------- */
@@ -259,17 +258,13 @@ static int run_session(const char *server_path,
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(queries[i]));
 
-        cmcp_json_t      *result_json = NULL;
-        char             *err_text    = NULL;
-        cmcp_rpc_error_t *rpc_err     = NULL;
         char site[64];
         snprintf(site, sizeof(site), "search[%d] \"%s\"", i, queries[i]);
 
         double q0 = now_ms();
-        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
-            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        cmcp_tool_result_t res = cmcp_client_tool_call(cli, "crag_search", args);
         double q1 = now_ms();
-        log_tool_outcome(q1 - q0, site, outcome, result_json, err_text, rpc_err);
+        log_tool_outcome(q1 - q0, site, &res);
     }
 
     /* --- step 5: A4 async fan ---------------------------------------- */
@@ -277,35 +272,30 @@ static int run_session(const char *server_path,
     EXPECT("3 dispatches first, then 3 reaps; same 3-way switch as step 4");
 
     const char *async_q[3] = {"json layer", "client async API", "transport vtable"};
-    long long ids[3] = {0, 0, 0};
+    cmcp_tool_handle_t handles[3] = {{0}, {0}, {0}};
     double s0 = now_ms();
     for (int i = 0; i < 3; i++) {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(async_q[i]));
-        int rc = cmcp_client_tool_call_async(cli, "crag_search", args, &ids[i]);
-        if (rc != CMCP_OK) {
-            fprintf(stderr, "  fan[%d] dispatch failed: %s\n",
-                    i, cmcp_errstr(rc));
+        handles[i] = cmcp_client_tool_call_async(cli, "crag_search", args);
+        if (!cmcp_tool_handle_valid(handles[i])) {
+            fprintf(stderr, "  fan[%d] dispatch failed\n", i);
         }
     }
     double s1 = now_ms();
     fprintf(stderr, "  all 3 dispatched in %.1fms\n", s1 - s0);
 
     /* Reap in reverse order — the reader thread demuxes by id, so the
-     * wait order is independent of the wire arrival order. */
+     * wait order is independent of the wire arrival order. The handle
+     * carries its own client, so a reap can't be mis-routed. */
     for (int i = 2; i >= 0; i--) {
-        cmcp_json_t      *result_json = NULL;
-        char             *err_text    = NULL;
-        cmcp_rpc_error_t *rpc_err     = NULL;
         char site[64];
         snprintf(site, sizeof(site), "fan[%d] reap@+%.1fms \"%s\"",
                  i, now_ms() - s0, async_q[i]);
         double q0 = now_ms();
-        cmcp_tool_outcome_t outcome = cmcp_client_tool_wait(
-            cli, ids[i], &result_json, &err_text, &rpc_err);
+        cmcp_tool_result_t res = cmcp_client_tool_wait(handles[i]);
         double q1 = now_ms();
-        log_tool_outcome(q1 - q0, site, outcome,
-                         result_json, err_text, rpc_err);
+        log_tool_outcome(q1 - q0, site, &res);
     }
     CLOSED("v0.7-async-typed-tool-call",
            "A4 closes the gap: cmcp_client_tool_call_async dispatches and "
@@ -322,15 +312,11 @@ static int run_session(const char *server_path,
     {
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string(""));
-        cmcp_json_t      *result_json = NULL;
-        char             *err_text    = NULL;
-        cmcp_rpc_error_t *rpc_err     = NULL;
         double q0 = now_ms();
-        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
-            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        cmcp_tool_result_t res = cmcp_client_tool_call(cli, "crag_search", args);
         double q1 = now_ms();
-        log_tool_outcome(q1 - q0, "empty-query", outcome,
-                         result_json, err_text, rpc_err);
+        cmcp_tool_outcome_t outcome = res.outcome;
+        log_tool_outcome(q1 - q0, "empty-query", &res);
         if (outcome == CMCP_TOOL_OK)
             FINDING("schema-error-shape",
                     "empty query was ACCEPTED — schema bound missing or validator broken");
@@ -339,15 +325,11 @@ static int run_session(const char *server_path,
         cmcp_json_t *args = cmcp_json_new_object();
         cmcp_json_object_set(args, "query", cmcp_json_new_string("anything"));
         cmcp_json_object_set(args, "k",     cmcp_json_new_int(999));
-        cmcp_json_t      *result_json = NULL;
-        char             *err_text    = NULL;
-        cmcp_rpc_error_t *rpc_err     = NULL;
         double q0 = now_ms();
-        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
-            cli, "crag_search", args, &result_json, &err_text, &rpc_err);
+        cmcp_tool_result_t res = cmcp_client_tool_call(cli, "crag_search", args);
         double q1 = now_ms();
-        log_tool_outcome(q1 - q0, "k=999", outcome,
-                         result_json, err_text, rpc_err);
+        cmcp_tool_outcome_t outcome = res.outcome;
+        log_tool_outcome(q1 - q0, "k=999", &res);
         if (outcome == CMCP_TOOL_OK)
             FINDING("schema-k-bound",
                     "k=999 was ACCEPTED — schema bound missing or validator broken");
@@ -363,15 +345,11 @@ static int run_session(const char *server_path,
 
     {
         cmcp_json_t *args = cmcp_json_new_object();
-        cmcp_json_t      *result_json = NULL;
-        char             *err_text    = NULL;
-        cmcp_rpc_error_t *rpc_err     = NULL;
         double q0 = now_ms();
-        cmcp_tool_outcome_t outcome = cmcp_client_tool_call(
-            cli, "crag_doesnt_exist", args, &result_json, &err_text, &rpc_err);
+        cmcp_tool_result_t res = cmcp_client_tool_call(
+            cli, "crag_doesnt_exist", args);
         double q1 = now_ms();
-        log_tool_outcome(q1 - q0, "unknown-tool", outcome,
-                         result_json, err_text, rpc_err);
+        log_tool_outcome(q1 - q0, "unknown-tool", &res);
     }
 
     /* --- step 8: A5 content-shortcut demo --------------------------- */

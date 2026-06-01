@@ -228,9 +228,10 @@ typedef struct {
 into the value being validated, with `~` and `/` escaped per
 RFC 6901 (`~` → `~0`, `/` → `~1`).
 
-The server wires this into the JSON-RPC error so wire-level callers
-can react programmatically. A `tools/call` rejected by the validator
-returns `-32602 INVALID_PARAMS` with `data` set to:
+The validator surfaces this `{path, keyword, message}` triple either as
+the `data` of a `-32602 INVALID_PARAMS` JSON-RPC error OR, for the
+`tools/call` argument path specifically, as the text of a tool-level
+`isError` result — see the note below for which goes where.
 
 ```json
 {
@@ -239,6 +240,30 @@ returns `-32602 INVALID_PARAMS` with `data` set to:
   "message": "expected type string"
 }
 ```
+
+**Where a `tools/call` argument-schema failure lands (verified — this
+is the shipped behavior, pinned by `tests/test_schema.c`
+`test_tools_call_schema_violation` and `tests/test_tools.c`):** it does
+**NOT** come back as a `-32602` JSON-RPC error. The server builds a
+tool-level result `{ "isError": true, "content": [{ "type": "text",
+"text": "Invalid arguments for tool '<name>': <message> (path: <path>,
+keyword: <keyword>)" }] }` (`src/server.c`, the `cmcp_schema_validate`
+branch in the `tools/call` dispatch). The `{path, keyword, message}`
+detail is preserved, just rendered into the result-channel text rather
+than the error-channel `data`.
+
+This is a **deliberate divergence from a strict reading of the MCP
+spec** (which leans toward `-32602` for invalid params) and matches the
+TypeScript reference SDK's `server-everything`, which also returns bad
+arguments as an `isError` result — so cMCP stays wire-compatible with
+the reference implementation real hosts interoperate against. A host
+must therefore inspect BOTH channels to catch a bad call: `resp.error`
+(JSON-RPC: unknown tool → `-32602`, transport failures) AND
+`result.isError` (tool result: bad arguments, handler-reported failure).
+The `-32602 INVALID_PARAMS` error channel is still used for protocol-
+level rejections — unknown tool name, malformed `protocolVersion`,
+missing required `prompts/get` argument — just not for `tools/call`
+argument-schema validation.
 
 ### Combinator error semantics
 

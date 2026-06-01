@@ -78,6 +78,33 @@ int cmcp_session_tool_call(cmcp_session_t *s,
                             cmcp_json_t *args,
                             cmcp_rpc_message_t *out_response);
 
+/* Async routed tool call (F3). The whole point of a multi-server session
+ * is parallel tool calls, but cmcp_session_tool_call is synchronous —
+ * a host wanting concurrency had to drop through cmcp_session_get() to
+ * the raw clients and re-do the routing the session already knows (the
+ * P6 host-probe's FRICTION 1). This pair keeps the routing in the
+ * session and hands back the same cmcp_tool_handle_t the client-level
+ * async call uses, so the result reaping is identical and the handle's
+ * id→client binding still prevents cross-server mis-routing (F4).
+ *
+ * cmcp_session_tool_call_async: `qualified` is "<server>:<tool>"; args
+ * is consumed (may be NULL). Resolves the server prefix, dispatches via
+ * the routed client, and returns a handle bound to that client. On any
+ * failure (bad session/qualified, unknown server, dispatch error) the
+ * returned handle is invalid (cmcp_tool_handle_valid == 0) and args is
+ * still consumed.
+ *
+ * cmcp_session_tool_wait: reap a handle from cmcp_session_tool_call_async
+ * (or, equivalently, from cmcp_client_tool_call_async — the handle is
+ * the same type). Thin forwarder to cmcp_client_tool_wait, provided for
+ * call-site symmetry. Always free the result with
+ * cmcp_tool_result_clear. */
+cmcp_tool_handle_t cmcp_session_tool_call_async(cmcp_session_t *s,
+                                                const char *qualified,
+                                                cmcp_json_t *args);
+
+cmcp_tool_result_t cmcp_session_tool_wait(cmcp_tool_handle_t h);
+
 /* Look up a client by host-supplied server name. Returns NULL on miss.
  * Useful for sending notifications, custom requests, etc. */
 cmcp_client_t *cmcp_session_get(cmcp_session_t *s, const char *server_name);
