@@ -46,11 +46,21 @@
 /* Valgrind maps large VA ranges of its own; a finite RLIMIT_AS would
  * starve them and crash the guest. Detect it at runtime (the LD_PRELOAD
  * it injects names vgpreload) so `make valgrind` skips the tightening
- * cases just like the sanitizers do. */
+ * cases just like the sanitizers do.
+ *
+ * QEMU user-mode emulation is the same hazard from a third source: the
+ * emulator's own mappings live in the guest address space and count
+ * against RLIMIT_AS, so a ceiling that is roomy on real hardware starves
+ * the emulated process. There is no portable runtime signal for "I am
+ * under qemu-user", so the emulated CI lane sets CMCP_SKIP_RLIMIT_TIGHTEN
+ * explicitly and we honour it here. */
 static int unsafe_to_tighten(void) {
     if (UNDER_SANITIZER) return 1;
     const char *pre = getenv("LD_PRELOAD");
     if (pre && (strstr(pre, "vgpreload") || strstr(pre, "valgrind")))
+        return 1;
+    const char *skip = getenv("CMCP_SKIP_RLIMIT_TIGHTEN");
+    if (skip && skip[0] && strcmp(skip, "0") != 0)
         return 1;
     return 0;
 }
@@ -141,8 +151,8 @@ int main(void) {
     RUN_CHILD("test_negative_is_noop", body_expect_noop("-512"));
 
     if (unsafe_to_tighten()) {
-        fprintf(stderr, "  - test_tightens (skipped: sanitizer/valgrind)\n");
-        fprintf(stderr, "  - test_never_raises (skipped: sanitizer/valgrind)\n");
+        fprintf(stderr, "  - test_tightens (skipped: sanitizer/valgrind/emulation)\n");
+        fprintf(stderr, "  - test_never_raises (skipped: sanitizer/valgrind/emulation)\n");
     } else {
         RUN_CHILD("test_tightens",     body_expect_tighten());
         RUN_CHILD("test_never_raises", body_never_raise());

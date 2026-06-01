@@ -69,6 +69,14 @@ jobs:
           # `make clean` first is defensive: a fresh checkout carries no
           # build artifacts, but if any x86 .o/.a ever leaked into the
           # mount they would be the wrong object format for this arch.
+          # CMCP_SKIP_RLIMIT_TIGHTEN: under QEMU user-mode the emulator's
+          # own VA mappings count against RLIMIT_AS, so the F.4 tightening
+          # cases (test_handler_rlimit) would starve the emulated child —
+          # the same hazard that already skips them under ASan/valgrind.
+          # The inert RLIMIT cases still run; only the lower-the-limit
+          # ones are skipped on this lane.
+          env: |
+            CMCP_SKIP_RLIMIT_TIGHTEN: 1
           run: |
             make clean
             make
