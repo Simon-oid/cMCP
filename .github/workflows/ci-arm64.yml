@@ -60,8 +60,12 @@ jobs:
           # plus the toolchain the base image doesn't ship.
           install: |
             apt-get update -q
+            # libc6-dev is explicit: the minimal bookworm base pulls gcc
+            # WITHOUT the full libc headers, so pthread.h is absent and
+            # src/server.c fails at #include. That is what kept this lane
+            # red on every run before — gcc alone is not enough here.
             apt-get install -y --no-install-recommends \
-              gcc make libcurl4-openssl-dev pkg-config ca-certificates
+              gcc libc6-dev make libcurl4-openssl-dev pkg-config ca-certificates
           # `make clean` first is defensive: a fresh checkout carries no
           # build artifacts, but if any x86 .o/.a ever leaked into the
           # mount they would be the wrong object format for this arch.
