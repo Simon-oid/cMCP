@@ -432,9 +432,12 @@ static void handle_elicitation_request(cmcp_client_t *c,
  * if one is registered against the frame's progressToken. Returns 1
  * on a match (so the caller skips the generic-handler fallthrough);
  * 0 if the token is missing, malformed, or unmatched — let the caller
- * deliver it through the generic notification handler instead. The
- * callback runs while we hold list_mu briefly; it must not block or
- * call back into the client. */
+ * deliver it through the generic notification handler instead. We read
+ * (fn, ud) out under list_mu and release it BEFORE calling the callback,
+ * so the callback does not run with list_mu held — it may issue the
+ * non-blocking client calls (call_async/notify/cancel) but, like every
+ * reader-thread callback, must not block or call request/wait (it runs
+ * on the reader thread; see the contract in cmcp_client.h). */
 static int dispatch_progress_notification(cmcp_client_t *c,
                                            const cmcp_json_t *params) {
     if (!params || params->type != CMCP_JSON_OBJECT) return 0;

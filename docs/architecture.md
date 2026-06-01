@@ -517,10 +517,40 @@ guards the active list — saves a second mutex), writes it into
 `params._meta.progressToken` so the server's
 `cmcp_handler_progress` echoes it back, and parks the per-call
 callback on the record. The reader walks the active list on every
-`notifications/progress`, fires the matching `fn` (briefly under
-`list_mu`), and returns 1 so the caller skips the generic handler
-fallthrough. When the call completes, the subscription tears down
-with the record — no late callback after `wait` returns.
+`notifications/progress`, reads the matching `(fn, ud)` out under
+`list_mu`, releases the lock, then fires `fn` — so the callback does
+NOT run with `list_mu` held, and returns 1 so the caller skips the
+generic handler fallthrough. When the call completes, the subscription
+tears down with the record — no late callback after `wait` returns.
+
+### Client thread-safety contract
+
+The public surface of `cmcp_client.h` is documented in full there; the
+machinery above is *why* it holds. In short:
+
+- **Concurrent host threads** may share one client for `request`,
+  `call_async`, `notify`, `cancel`, and the typed wrappers — id
+  allocation (pending-table mutex), the active list (`list_mu`), and the
+  transport writer (per-transport mutex) are each internally locked.
+- **`wait` is single-owner per id.** The completion record is consumed
+  and freed by the one waiter; a second waiter on the same id is a
+  use-after-free. Every `call_async` id must eventually be waited on,
+  even after `cancel` (otherwise the record lingers until
+  `cmcp_client_free`).
+- **Callbacks run on the reader thread**, serialized. They share that
+  thread with response delivery, so a blocking or slow handler (sampling
+  doing an LLM round-trip, elicitation prompting a user) stalls every
+  response and notification until it returns. From inside a callback the
+  *non-blocking* calls (`call_async`, `notify`, `cancel`) are safe — they
+  don't wait on the reader and, as noted above, the progress dispatch no
+  longer holds `list_mu` when it calls user code — but the *blocking*
+  pair (`request`, `wait`) self-deadlocks, because the thread that would
+  complete them is the one running the callback.
+- **Setup vs. live:** handler/capability setters other than `set_roots`
+  (which is `roots_mu`-guarded) are not synchronized against a running
+  reader — set them before traffic. `cmcp_client_free` is single-thread,
+  no-other-call-in-flight; it wakes+joins the reader, then reaps
+  outstanding completions.
 
 ### Reader-thread shutdown
 

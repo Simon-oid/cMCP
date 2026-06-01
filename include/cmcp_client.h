@@ -11,10 +11,12 @@
  * `cmcp_client_request` is sync sugar over the async pair.
  *
  * Client-side handlers (notification routing, sampling, elicitation)
- * run on the reader thread; they must not call back into the same
- * client. `cmcp_client_set_roots` advertises filesystem scope to the
- * server; `cmcp_client_cancel` issues a `notifications/cancelled` for
- * an in-flight call.
+ * run on the reader thread; from inside one, non-blocking calls are
+ * fine but the blocking pair (request/wait) deadlocks — see the
+ * "Thread-safety contract" section below for the full rules.
+ * `cmcp_client_set_roots` advertises filesystem scope to the server;
+ * `cmcp_client_cancel` issues a `notifications/cancelled` for an
+ * in-flight call.
  *
  * For multi-server agents see `cmcp_session.h`, which aggregates
  * several already-handshaken clients under a single primitive
@@ -35,6 +37,72 @@ typedef struct cmcp_client cmcp_client_t;
  * cmcp_session.h's references to cmcp_client_t resolve cleanly when a
  * consumer #includes cmcp_client.h before (or instead of) cmcp_session.h. */
 #include "cmcp_session.h"
+
+/* ====================================================================== */
+/* Thread-safety contract                                                  */
+/* ====================================================================== */
+/* A cmcp_client_t owns one background reader thread (demuxing responses
+ * and dispatching server-initiated traffic). The rules below are the
+ * AS-BUILT guarantees — what the current implementation actually makes
+ * safe — not aspirations. Audited against src/client.c + src/rpc.c.
+ *
+ * SAFE FROM MULTIPLE HOST THREADS, concurrently, on the same client:
+ *   - cmcp_client_request, cmcp_client_call_async, cmcp_client_notify,
+ *     cmcp_client_cancel, and the typed wrappers (tool_call, *_list,
+ *     resource_read, prompt_get, ...). Id allocation (pending-table
+ *     mutex), the in-flight list (list_mu), and the transport writer
+ *     (per-transport write mutex) are each internally locked, and no
+ *     frame is ever written half-interleaved.
+ *   - cmcp_client_wait — but only on DISTINCT ids per thread (see below).
+ *   - The post-handshake read-backs (server_name/_version/_protocol) and
+ *     cmcp_client_set_roots / notify_roots_changed (roots_mu-guarded,
+ *     because the reader consults roots when answering roots/list).
+ *
+ * SINGLE-OWNER RULES — not enforced; violating them is a use-after-free
+ * or a leak, not a graceful error:
+ *   - At most ONE thread may wait on a given id. The id returned by
+ *     call_async is owned by one waiter; two waiters on the same id race
+ *     to consume-and-free the completion record. Hand the id to one
+ *     thread.
+ *   - Every id from call_async must eventually be waited on, EVEN after
+ *     cmcp_client_cancel. Cancel removes the entry from the pending
+ *     table and wakes the waiter (which then returns CMCP_ECANCELLED and
+ *     reclaims the record); a cancelled-but-never-waited call's record
+ *     is reclaimed only at cmcp_client_free.
+ *
+ * CALLBACKS (notification / sampling / elicitation / progress handlers)
+ * all run ON THE READER THREAD:
+ *   - They are serialized — never two at once — so they need no locking
+ *     against each other. But they share the reader thread with response
+ *     delivery: a callback that blocks or runs long stalls ALL responses
+ *     and notifications for this client until it returns. A sampling or
+ *     elicitation handler doing real work (LLM round-trip, interactive
+ *     prompt) holds up the whole connection meanwhile — keep it quick or
+ *     hand the work to another thread and return.
+ *   - REENTRANCY: a callback MUST NOT call a *blocking* API on the same
+ *     client — cmcp_client_request or cmcp_client_wait — because their
+ *     completion depends on the reader thread, which is the very thread
+ *     running the callback. That self-wait deadlocks. The *non-blocking*
+ *     APIs (cmcp_client_call_async, cmcp_client_notify,
+ *     cmcp_client_cancel) ARE safe to call from a callback: they don't
+ *     wait on the reader and don't run under a lock the dispatch path
+ *     still holds.
+ *
+ * SETUP / TEARDOWN:
+ *   - Handler/capability setters other than set_roots
+ *     (set_notification_handler, set_sampling_handler,
+ *     set_elicitation_handler, set_capabilities, set_log_level) are NOT
+ *     synchronized against a live reader. Configure them during setup,
+ *     before connect / before traffic flows — not concurrently with
+ *     active dispatch.
+ *   - cmcp_client_free must be called by exactly one thread with no
+ *     other thread inside any client call; it wakes and joins the reader,
+ *     then cancels and frees any still-outstanding completions.
+ *
+ * cmcp_session_t (cmcp_session.h) inherits this contract through the
+ * clients it aggregates, but the session object's own bookkeeping is not
+ * separately locked: drive a given session from a single host thread.
+ */
 
 /* ====================================================================== */
 /* Lifecycle                                                               */
