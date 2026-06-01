@@ -184,6 +184,9 @@ static int fail(cmcp_schema_error_t *err, const path_buf_t *p,
     char msg[256];
     va_list ap;
     va_start(ap, fmt);
+    /* ap is initialised by va_start directly above; the analyzer loses
+     * track of it through the variadic boundary (false positive).
+     * NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) */
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
     err->message = xstrdup(msg);

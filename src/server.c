@@ -1771,9 +1771,12 @@ static void rlimit_as_init(void) {
     struct rlimit rl;
     if (getrlimit(RLIMIT_AS, &rl) != 0) return;
 
-    /* Cap in bytes, guarding against overflow on the multiply. */
-    rlim_t want = (rlim_t)mb * 1024u * 1024u;
-    if ((long)(want / (1024u * 1024u)) != mb) return;  /* overflowed */
+    /* Cap in bytes, guarding against overflow on the multiply. The MiB
+     * factor is rlim_t-wide so the multiply happens in the wide type,
+     * not int (clang-tidy bugprone-implicit-widening-of-multiplication). */
+    const rlim_t MiB = (rlim_t)1024 * 1024;
+    rlim_t want = (rlim_t)mb * MiB;
+    if ((long)(want / MiB) != mb) return;  /* overflowed */
 
     /* Never raise above the current hard limit; never raise an already
      * lower soft limit. We only ever TIGHTEN. */

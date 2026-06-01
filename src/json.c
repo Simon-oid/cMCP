@@ -177,6 +177,8 @@ static int arr_grow(cmcp_json_t *arr, size_t want) {
     if (want <= arr->arr.cap) return 0;
     size_t cap = arr->arr.cap ? arr->arr.cap : 4;
     while (cap < want) cap *= 2;
+    /* Array of cmcp_json_t* — sizeof the element pointer is intended.
+     * NOLINTNEXTLINE(bugprone-sizeof-expression) */
     cmcp_json_t **n = realloc(arr->arr.items, cap * sizeof *n);
     if (!n) return -1;
     arr->arr.items = n;
@@ -201,6 +203,8 @@ static int obj_grow(cmcp_json_t *obj, size_t want) {
     size_t        *nl = realloc(obj->obj.key_lens, cap * sizeof *nl);
     if (!nl) return -1;
     obj->obj.key_lens = nl;
+    /* Array of cmcp_json_t* — sizeof the element pointer is intended.
+     * NOLINTNEXTLINE(bugprone-sizeof-expression) */
     cmcp_json_t  **nv = realloc(obj->obj.values,   cap * sizeof *nv);
     if (!nv) return -1;
     obj->obj.values = nv;

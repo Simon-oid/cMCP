@@ -121,9 +121,16 @@ typedef struct {
 } conn_budget_t;
 
 /* Wait until fd is readable (subject to budget), then recv. Same return
- * shape as recv(): >0 bytes, 0 peer-closed, -1 error (errno set; uses
- * ETIMEDOUT to signal idle/deadline expiry so the caller can map it
- * to a `408 Request Timeout`). Updates the deadline in-place. */
+ * shape as recv() but with a dedicated timeout sentinel instead of an
+ * errno contract: >0 bytes, 0 peer-closed, BUDGET_TIMEOUT (idle/deadline
+ * expiry → caller maps to `408 Request Timeout`), BUDGET_ERR (any other
+ * hard error). Returning the timeout via the value, not errno, means
+ * callers never read errno across this wrapper — which was fragile (a
+ * future -1 path that forgot to set errno would read a stale value) and
+ * which the static analyzer (rightly) could not prove safe. Updates the
+ * deadline in-place. */
+#define BUDGET_ERR     ((ssize_t)-1)
+#define BUDGET_TIMEOUT ((ssize_t)-2)
 static ssize_t budgeted_recv(int fd, void *buf, size_t n,
                               conn_budget_t *b) {
     int wait_ms = b->idle_ms > 0 ? b->idle_ms : -1;
@@ -149,18 +156,18 @@ static ssize_t budgeted_recv(int fd, void *buf, size_t n,
     if (rv < 0) {
         /* EINTR loops at the caller's discretion; everything else is a
          * hard error. */
-        return -1;
+        return BUDGET_ERR;
     }
     if (rv == 0) {
-        errno = ETIMEDOUT;
-        return -1;
+        return BUDGET_TIMEOUT;
     }
     if (p.revents & (POLLERR | POLLHUP | POLLNVAL)) {
         /* Peer error / hangup before any bytes — treat as clean close
          * so the caller distinguishes from "transport corrupted." */
         return 0;
     }
-    return recv(fd, buf, n, 0);
+    ssize_t r = recv(fd, buf, n, 0);
+    return r < 0 ? BUDGET_ERR : r;
 }
 
 /* ====================================================================== */
@@ -189,7 +196,7 @@ static int read_headers_block(int fd, conn_budget_t *budget,
         }
         ssize_t n = budgeted_recv(fd, buf + len, cap - 1 - len, budget);
         if (n < 0) {
-            int rc = (errno == ETIMEDOUT) ? CMCP_ETIMEOUT : CMCP_EIO;
+            int rc = (n == BUDGET_TIMEOUT) ? CMCP_ETIMEOUT : CMCP_EIO;
             free(buf); return rc;
         }
         if (n == 0) { free(buf); return CMCP_EIO; }
@@ -230,7 +237,7 @@ static int read_exact(int fd, conn_budget_t *budget, size_t len,
     while (have < len) {
         ssize_t n = budgeted_recv(fd, buf + have, len - have, budget);
         if (n < 0) {
-            int rc = (errno == ETIMEDOUT) ? CMCP_ETIMEOUT : CMCP_EIO;
+            int rc = (n == BUDGET_TIMEOUT) ? CMCP_ETIMEOUT : CMCP_EIO;
             free(buf); return rc;
         }
         if (n == 0) { free(buf); return CMCP_EIO; }
