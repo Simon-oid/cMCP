@@ -401,7 +401,8 @@ coverage:
 #   2. scan-build    (clang static analyzer driving a full build;
 #                     interprocedural path-sensitive analysis)
 #   3. cppcheck      (independent open-source analyzer; suppressions
-#                     in .cppcheck-suppressions)
+#                     passed inline via --suppress= in analyze-cppcheck,
+#                     each with its rationale — see that target)
 #
 # Each tool gets the same source set: src/*.c plus the reference-binary
 # entry points under tools/ (excluding crag-mcp, which depends on the
@@ -443,8 +444,22 @@ analyze-cppcheck:
 	@# by constParameter*/constVariable* suggestions — useful as a future
 	@# const-correctness sweep but not a bug class for this gate. Re-enable
 	@# if a more aggressive review pass wants it.
+	@#
+	@# Suppressions are passed inline (--suppress=) rather than via a
+	@# --suppressions-list file: cppcheck versions disagree on how the
+	@# file's blank/comment lines parse (newer ones reject them with
+	@# "Failed to add suppression. No id."), so the file form is not
+	@# CI-portable. Rationale per id (triaged 2026-05-26):
+	@#   unusedFunction        — public-API symbols in include/cmcp_*.h are
+	@#                            exported for consumers cppcheck can't see.
+	@#   missingInclude(System)— noisy when cppcheck can't find libcurl /
+	@#                            pthread headers; the compiler is authority.
+	@#   unmatchedSuppression  — don't fail when a suppression stops matching.
 	@cppcheck --enable=warning,performance,portability \
-	    --suppressions-list=.cppcheck-suppressions \
+	    --suppress=unusedFunction \
+	    --suppress=missingInclude \
+	    --suppress=missingIncludeSystem \
+	    --suppress=unmatchedSuppression \
 	    --inline-suppr \
 	    --error-exitcode=1 \
 	    --quiet \
