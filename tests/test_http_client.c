@@ -659,6 +659,75 @@ static void test_client_sends_protocol_version(void) {
 }
 
 /* ====================================================================== */
+/* P7 second-probe leg: the typed tool-call API (by-value result + opaque  */
+/* handle, v0.9.0) over the HTTP client transport. The original host-probe */
+/* was stdio-only; the libcurl client + background SSE reader thread was    */
+/* never exercised by the new API. This is the falsification pass — does    */
+/* the struct/handle surface compose with the HTTP demux path?              */
+/* ====================================================================== */
+
+/* content[0].text out of a by-value tool result (OK branch). */
+static char *result_text_http(const cmcp_tool_result_t *res) {
+    if (res->outcome != CMCP_TOOL_OK || !res->result) return NULL;
+    const cmcp_json_t *arr = cmcp_json_object_get(res->result, "content");
+    if (!arr || arr->type != CMCP_JSON_ARRAY || arr->arr.len == 0) return NULL;
+    const cmcp_json_t *item = arr->arr.items[0];
+    if (!item || item->type != CMCP_JSON_OBJECT) return NULL;
+    const cmcp_json_t *t = cmcp_json_object_get(item, "text");
+    if (!t || t->type != CMCP_JSON_STRING) return NULL;
+    return strdup(t->str.s);
+}
+
+static cmcp_json_t *echo_args(const char *msg) {
+    cmcp_json_t *a = cmcp_json_new_object();
+    cmcp_json_object_set(a, "message", cmcp_json_new_string(msg));
+    return a;
+}
+
+static void test_typed_tool_api_over_http(void) {
+    fixture_t f;
+    TEST_ASSERT(fixture_up(&f) == 0);
+
+    /* (1) Sync by-value call over HTTP. */
+    cmcp_tool_result_t r = cmcp_client_tool_call(f.cli, "echo",
+                                                 echo_args("sync-http"));
+    TEST_ASSERT(r.outcome == CMCP_TOOL_OK);
+    char *t = result_text_http(&r);
+    TEST_ASSERT(t && strcmp(t, "sync-http") == 0);
+    free(t);
+    cmcp_tool_result_clear(&r);
+
+    /* (2) Async fan of two, reaped in reverse — exercises the handle +
+     * the SSE/libcurl reader-thread demux under the new API. */
+    cmcp_tool_handle_t h1 = cmcp_client_tool_call_async(f.cli, "echo",
+                                                        echo_args("first"));
+    cmcp_tool_handle_t h2 = cmcp_client_tool_call_async(f.cli, "echo",
+                                                        echo_args("second"));
+    TEST_ASSERT(cmcp_tool_handle_valid(h1) && cmcp_tool_handle_valid(h2));
+    TEST_ASSERT(h1.client == f.cli && h2.client == f.cli);
+
+    cmcp_tool_result_t r2 = cmcp_client_tool_wait(h2);
+    cmcp_tool_result_t r1 = cmcp_client_tool_wait(h1);
+    char *t2 = result_text_http(&r2);
+    char *t1 = result_text_http(&r1);
+    TEST_ASSERT(t2 && strcmp(t2, "second") == 0);
+    TEST_ASSERT(t1 && strcmp(t1, "first")  == 0);
+    free(t1); free(t2);
+    cmcp_tool_result_clear(&r1);
+    cmcp_tool_result_clear(&r2);
+
+    /* (3) Protocol error path over HTTP: unknown tool → -32602 on the
+     * error channel (not a tool-level isError). */
+    cmcp_tool_result_t re = cmcp_client_tool_call(f.cli, "ghost", NULL);
+    TEST_ASSERT(re.outcome == CMCP_TOOL_ERR_PROTOCOL);
+    TEST_ASSERT(re.error != NULL);
+    TEST_ASSERT(re.error->code == CMCP_RPC_INVALID_PARAMS);
+    cmcp_tool_result_clear(&re);
+
+    fixture_down(&f);
+}
+
+/* ====================================================================== */
 
 int main(void) {
     fprintf(stderr, "test_http_client:\n");
@@ -669,6 +738,7 @@ int main(void) {
     TEST_RUN(test_close_unblocks_reader);
     TEST_RUN(test_post_503_surfaces_eagain);
     TEST_RUN(test_client_sends_protocol_version);
+    TEST_RUN(test_typed_tool_api_over_http);
 
     TEST_DONE();
 }
