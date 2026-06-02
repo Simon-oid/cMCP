@@ -61,15 +61,22 @@ jobs:
 
       # Pages-specific artifact format. Only built for the deploy
       # job below; PRs skip this step so they don't try to publish.
+      # Also skipped while the repo is private — Pages publishing from a
+      # private repo needs a paid plan, so the deploy job below can't run
+      # and this artifact would be wasted. Re-enables automatically if the
+      # repo is made public.
       - name: Upload Pages artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/api/html/
 
   deploy:
     name: deploy to GitHub Pages
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Private repos cannot publish Pages on a free plan, so this job would
+    # 404 on every push. Skip it while private (run still goes green) and
+    # let it re-enable automatically if the repo becomes public.
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.repository.private }}
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
