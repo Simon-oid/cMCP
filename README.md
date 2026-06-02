@@ -249,7 +249,7 @@ See [`CHANGELOG.md`](CHANGELOG.md) for the release log and
 
 ```bash
 make            # libs (core/server/client) + cmcp-inspect + filesystem-mcp + cmcp-tee + examples
-make test       # build and run the test binaries — currently 2826 assertions across 22 binaries
+make test       # build and run the test binaries — currently 2826 assertions across 27 binaries
 make valgrind   # same, under valgrind (leak-free)
 make test-asan  # full rebuild under -fsanitize=address,undefined; runs suite
 make test-tsan  # full rebuild under -fsanitize=thread; runs suite
@@ -460,17 +460,23 @@ src/          json, rpc, schema, types, http_parser,
               → libcmcp_core.a
               server.c, worker.c → libcmcp_server.a
               client.c, session.c → libcmcp_client.a
+build/        generated objects + archives (gitignored); `make clean` wipes it
 tools/        cmcp-inspect (CLI), filesystem-mcp + crag-mcp (reference servers),
-              cmcp-tee (wire-capture proxy for replay-gate fixtures)
-examples/     echo-server, minimal-client
-tests/        one binary per test_*.c (22 total), all use tests/test.h
+              cmcp-tee (wire-capture proxy for replay-gate fixtures),
+              dogfood-crag-host (real-agent-in-loop host probe)
+examples/     echo-server, minimal-client, host-probe;
+              install-smoke/ (consumer build smoke-test, Make + CMake)
+tests/        one binary per test_*.c (27 total), all use tests/test.h
 tests/soak/   long-running stability harness (Tier 5.6)
 fuzz/         libFuzzer harnesses + seed corpora (Tier 5.4)
+bench/        microbenchmarks + perf-regression baselines (Tier 7.1);
+              bench/compare/ cross-language harness, bench/profile/ callgrind+massif
 conformance/  cross-check vs MCP TS SDK; replay-based regression gate
               over captured wire transcripts; agent playbooks
-scripts/      tooling (spec-version drift watch)
-docs/         architecture, schema-conformance, agentic-readiness plan,
-              spec-version-upgrade checklist
+packaging/    pkg-config (.pc.in) + CMake package-config templates
+scripts/      tooling (spec-version drift watch, coverage delta)
+docs/         see docs/README.md — architecture, schema, threat model,
+              perf, nightly-gate guides, versioning policy
 ```
 
 Architecture, threading model, and ownership rules are in

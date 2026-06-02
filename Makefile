@@ -32,13 +32,18 @@ CORE_SRC   := $(wildcard $(CORE_CANDIDATES))
 SERVER_SRC := $(wildcard $(SERVER_CANDIDATES))
 CLIENT_SRC := $(wildcard $(CLIENT_CANDIDATES))
 
-CORE_OBJ   := $(CORE_SRC:.c=.o)
-SERVER_OBJ := $(SERVER_SRC:.c=.o)
-CLIENT_OBJ := $(CLIENT_SRC:.c=.o)
+# All generated objects + archives land under build/ so the repo root and
+# src/ stay free of build artifacts. Reference binaries still build in-tree
+# next to their sources — tests exec sibling binaries by relative path.
+BUILD_DIR  := build
 
-CORE_LIB   := libcmcp_core.a
-SERVER_LIB := libcmcp_server.a
-CLIENT_LIB := libcmcp_client.a
+CORE_OBJ   := $(CORE_SRC:src/%.c=$(BUILD_DIR)/%.o)
+SERVER_OBJ := $(SERVER_SRC:src/%.c=$(BUILD_DIR)/%.o)
+CLIENT_OBJ := $(CLIENT_SRC:src/%.c=$(BUILD_DIR)/%.o)
+
+CORE_LIB   := $(BUILD_DIR)/libcmcp_core.a
+SERVER_LIB := $(BUILD_DIR)/libcmcp_server.a
+CLIENT_LIB := $(BUILD_DIR)/libcmcp_client.a
 
 # Link order: consumers (server/client) before provider (core), so the
 # single-pass linker can resolve core symbols pulled in by server.o and
@@ -90,8 +95,11 @@ $(SERVER_LIB): $(SERVER_OBJ)
 $(CLIENT_LIB): $(CLIENT_OBJ)
 	$(AR) rcs $@ $^
 
-src/%.o: src/%.c
+$(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(BUILD_DIR):
+	@mkdir -p $@
 
 $(INSPECT_BIN): $(INSPECT_SRC) $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
@@ -370,7 +378,7 @@ coverage:
 	    CFLAGS="$(COV_BASE_CFLAGS)" LDFLAGS="$(COV_LDFLAGS)"
 	@mkdir -p $(COV_DIR)
 	@echo "=== lcov: capture (src/ only) ==="
-	@lcov --rc geninfo_unexecuted_blocks=1 --capture --directory src \
+	@lcov --rc geninfo_unexecuted_blocks=1 --capture --directory $(BUILD_DIR) \
 	      --output-file $(COV_DIR)/coverage.info --quiet \
 	      --ignore-errors mismatch,gcov,unused,negative,inconsistent
 	@lcov --remove $(COV_DIR)/coverage.info \
@@ -562,37 +570,40 @@ PUBLIC_HEADERS := $(wildcard include/cmcp*.h)
 # and shared link targets can coexist in one tree.
 ENABLE_SHARED ?= 0
 
-CORE_PIC_OBJ   := $(CORE_SRC:.c=.pic.o)
-SERVER_PIC_OBJ := $(SERVER_SRC:.c=.pic.o)
-CLIENT_PIC_OBJ := $(CLIENT_SRC:.c=.pic.o)
+CORE_PIC_OBJ   := $(CORE_SRC:src/%.c=$(BUILD_DIR)/%.pic.o)
+SERVER_PIC_OBJ := $(SERVER_SRC:src/%.c=$(BUILD_DIR)/%.pic.o)
+CLIENT_PIC_OBJ := $(CLIENT_SRC:src/%.c=$(BUILD_DIR)/%.pic.o)
 
-CORE_SO   := libcmcp_core.so.$(VERSION)
-SERVER_SO := libcmcp_server.so.$(VERSION)
-CLIENT_SO := libcmcp_client.so.$(VERSION)
+CORE_SO   := $(BUILD_DIR)/libcmcp_core.so.$(VERSION)
+SERVER_SO := $(BUILD_DIR)/libcmcp_server.so.$(VERSION)
+CLIENT_SO := $(BUILD_DIR)/libcmcp_client.so.$(VERSION)
 
 CORE_SONAME   := libcmcp_core.so.$(VERSION_MAJOR)
 SERVER_SONAME := libcmcp_server.so.$(VERSION_MAJOR)
 CLIENT_SONAME := libcmcp_client.so.$(VERSION_MAJOR)
 
-src/%.pic.o: src/%.c
+$(BUILD_DIR)/%.pic.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -fPIC -c -o $@ $<
 
+# Dev/soname symlinks live alongside the real .so inside build/, so their
+# targets are bare filenames (notdir) — a build/-prefixed target would point
+# at build/build/… from within the directory.
 $(CORE_SO): $(CORE_PIC_OBJ)
 	$(CC) -shared -Wl,-soname,$(CORE_SONAME) -o $@ $^ $(LDLIBS)
-	@ln -sf $(CORE_SO) $(CORE_SONAME)
-	@ln -sf $(CORE_SO) libcmcp_core.so
+	@ln -sf $(notdir $(CORE_SO)) $(BUILD_DIR)/$(CORE_SONAME)
+	@ln -sf $(notdir $(CORE_SO)) $(BUILD_DIR)/libcmcp_core.so
 
 $(SERVER_SO): $(SERVER_PIC_OBJ) $(CORE_SO)
 	$(CC) -shared -Wl,-soname,$(SERVER_SONAME) -o $@ $(SERVER_PIC_OBJ) \
-	    -L. -lcmcp_core $(LDLIBS)
-	@ln -sf $(SERVER_SO) $(SERVER_SONAME)
-	@ln -sf $(SERVER_SO) libcmcp_server.so
+	    -L$(BUILD_DIR) -lcmcp_core $(LDLIBS)
+	@ln -sf $(notdir $(SERVER_SO)) $(BUILD_DIR)/$(SERVER_SONAME)
+	@ln -sf $(notdir $(SERVER_SO)) $(BUILD_DIR)/libcmcp_server.so
 
 $(CLIENT_SO): $(CLIENT_PIC_OBJ) $(CORE_SO)
 	$(CC) -shared -Wl,-soname,$(CLIENT_SONAME) -o $@ $(CLIENT_PIC_OBJ) \
-	    -L. -lcmcp_core $(LDLIBS)
-	@ln -sf $(CLIENT_SO) $(CLIENT_SONAME)
-	@ln -sf $(CLIENT_SO) libcmcp_client.so
+	    -L$(BUILD_DIR) -lcmcp_core $(LDLIBS)
+	@ln -sf $(notdir $(CLIENT_SO)) $(BUILD_DIR)/$(CLIENT_SONAME)
+	@ln -sf $(notdir $(CLIENT_SO)) $(BUILD_DIR)/libcmcp_client.so
 
 ifeq ($(ENABLE_SHARED),1)
 SHARED_LIBS := $(if $(CORE_OBJ),$(CORE_SO)) \
@@ -634,12 +645,13 @@ install-libs: $(BUILT_LIBS) $(if $(filter 1,$(ENABLE_SHARED)),$(SHARED_LIBS))
 	done
 ifeq ($(ENABLE_SHARED),1)
 	@for so in $(SHARED_LIBS); do \
-	    base=$$(echo $$so | sed -E 's/\.so\.[0-9][0-9.]*$$/.so/'); \
-	    soname=$$(echo $$so | sed -E 's/(\.so\.[0-9]+).*$$/\1/'); \
-	    echo "  install $$so + soname + dev-link -> $(DESTDIR)$(LIBDIR)/"; \
+	    f=$$(basename $$so); \
+	    base=$$(echo $$f | sed -E 's/\.so\.[0-9][0-9.]*$$/.so/'); \
+	    soname=$$(echo $$f | sed -E 's/(\.so\.[0-9]+).*$$/\1/'); \
+	    echo "  install $$f + soname + dev-link -> $(DESTDIR)$(LIBDIR)/"; \
 	    $(INSTALL_PROGRAM) $$so "$(DESTDIR)$(LIBDIR)/"; \
-	    ln -sf $$so "$(DESTDIR)$(LIBDIR)/$$soname"; \
-	    ln -sf $$so "$(DESTDIR)$(LIBDIR)/$$base"; \
+	    ln -sf $$f "$(DESTDIR)$(LIBDIR)/$$soname"; \
+	    ln -sf $$f "$(DESTDIR)$(LIBDIR)/$$base"; \
 	done
 endif
 
@@ -739,19 +751,18 @@ install-smoke: all
 	@./examples/install-smoke/run.sh
 
 clean:
-	rm -f $(CORE_OBJ) $(SERVER_OBJ) $(CLIENT_OBJ) \
-	      $(CORE_PIC_OBJ) $(SERVER_PIC_OBJ) $(CLIENT_PIC_OBJ) \
-	      $(CORE_LIB) $(SERVER_LIB) $(CLIENT_LIB) \
-	      libcmcp_core.so* libcmcp_server.so* libcmcp_client.so* \
-	      $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
+	rm -rf $(BUILD_DIR)
+	rm -f $(INSPECT_BIN) $(CRAG_MCP_BIN) $(FS_MCP_BIN) $(TEE_BIN) \
 	      $(EXAMPLE_BINS) $(TEST_BIN) $(CONF_C_BIN) \
 	      $(FUZZ_BINS) $(SOAK_BIN) $(SOAK_HTTP_BINS) $(BENCH_BINS) $(COMPARE_BIN) \
 	      $(BENCH_DIR)/results.csv $(COMPARE_DIR)/results.csv \
 	      tools/crag-mcp/*.o tools/cmcp-inspect/*.o \
 	      tools/filesystem-mcp/*.o examples/*.o \
 	      cmcp-*.tar.gz
+	@# Legacy artifacts from before objects + archives moved under build/.
+	@rm -f src/*.o src/*.pic.o libcmcp_*.a libcmcp_*.so*
 	@find . -name '*.gcno' -delete -o -name '*.gcda' -delete 2>/dev/null || true
-	@rm -rf $(COV_DIR) build/ docs/api/
+	@rm -rf $(COV_DIR) docs/api/
 
 .PHONY: all test valgrind test-asan test-tsan coverage \
         analyze analyze-clang-tidy analyze-scan-build analyze-cppcheck \
