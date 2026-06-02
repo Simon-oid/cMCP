@@ -1133,6 +1133,44 @@ static void test_accept_rate_disabled_passes_all(void) {
     unsetenv("CMCP_HTTP_ACCEPT_RATE");
 }
 
+/* Bind-address default: a NULL/empty host must bind loopback, NOT the
+ * wildcard (0.0.0.0) — MCP's server-side localhost obligation. Regression
+ * for the council verdict (2026-06-01): the API previously passed NULL
+ * straight to getaddrinfo with AI_PASSIVE, binding all interfaces. We
+ * assert the NULL default is reachable on the IPv4 loopback and actually
+ * serves an HTTP response. The companion non-loopback-bind stderr warning
+ * is a side-effect verified by inspection, not asserted here. */
+static void test_bind_default_is_loopback(void) {
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_server_t *s = cmcp_server_new("bind-default-test", "0.1.0");
+    cmcp_transport_t *t = cmcp_transport_http_listen(NULL, port);  /* NULL host */
+    TEST_ASSERT(t != NULL);
+
+    server_arg_t arg = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &arg);
+
+    /* Reachable on the IPv4 loopback the default must have bound. */
+    int fd = open_client(port);
+    TEST_ASSERT(fd >= 0);
+    const char *req = "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    TEST_ASSERT(send_all(fd, req, strlen(req)) == 0);
+    char *resp = NULL; size_t rlen = 0;
+    TEST_ASSERT(recv_all(fd, &resp, &rlen) == 0);
+    /* Any HTTP status line proves the loopback default served us (GET /
+     * is a 404 from the router — that's fine; it proves reachability). */
+    TEST_ASSERT(rlen >= 8 && strncmp(resp, "HTTP/1.1", 8) == 0);
+    free(resp);
+    close(fd);
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+}
+
 /* ====================================================================== */
 
 int main(void) {
@@ -1157,6 +1195,7 @@ int main(void) {
     TEST_RUN(test_slowloris_deadline);
     TEST_RUN(test_accept_rate_limit_503);
     TEST_RUN(test_accept_rate_disabled_passes_all);
+    TEST_RUN(test_bind_default_is_loopback);
 
     TEST_DONE();
 }

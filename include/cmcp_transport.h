@@ -161,6 +161,16 @@ cmcp_transport_t *cmcp_transport_stdio_new_fds(int read_fd, int write_fd);
  * behind nginx/caddy), no HTTP keep-alive (one request per
  * connection), Content-Length only (no chunked transfer encoding).
  *
+ * `host` selects the bind address. A NULL or empty `host` binds the
+ * loopback interface (127.0.0.1) — a safe default that is unreachable
+ * off-box. Pass an explicit address (e.g. "0.0.0.0" or "::") to listen
+ * on a public interface; if you do so without setting
+ * CMCP_HTTP_ALLOWED_ORIGINS, the transport emits a one-shot stderr
+ * warning, since a non-loopback bind with no Origin allow-list has no
+ * DNS-rebinding defense. The transport owns a single listen fd and binds
+ * the first address `getaddrinfo` returns for `host`, so prefer a literal
+ * address over a name that resolves to several families.
+ *
  * Returns NULL on bind/listen failure (e.g. port in use, permission
  * denied). The transport begins accepting immediately. */
 cmcp_transport_t *cmcp_transport_http_listen(const char *host,

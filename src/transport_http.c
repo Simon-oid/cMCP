@@ -68,6 +68,12 @@
 
 #define HTTP_MAX_HEADERS_BYTES   ((size_t)16 * 1024)         /* 16 KiB request line + headers */
 #define HTTP_MAX_BODY_BYTES      ((size_t)4 * 1024 * 1024)   /* 4 MiB body */
+
+/* File-local sentinel for "Content-Length exceeds HTTP_MAX_BODY_BYTES".
+ * Distinct from every cmcp_err_t value (those are 0..-13) so the caller
+ * can map it to `413 Payload Too Large` rather than folding it into the
+ * generic `400 Bad Request` path — matches threat-model.md row 1.2. */
+#define HTTP_ETOOLARGE  (-200)
 #define HTTP_LISTEN_BACKLOG      16
 #define HTTP_ACCEPT_POLL_MS      250            /* shutdown polling cadence */
 #define HTTP_SSE_REPLAY_DEFAULT  256            /* events kept for resumption */
@@ -269,9 +275,11 @@ static int http_read_request(int fd, conn_budget_t *budget,
     if (cl) {
         char *end = NULL;
         long long v = strtoll(cl, &end, 10);
-        if (v < 0 || end == cl || *end != '\0' ||
-            (size_t)v > HTTP_MAX_BODY_BYTES) {
+        if (v < 0 || end == cl || *end != '\0') {
             free(block); http_request_clear(out); return CMCP_EPROTOCOL;
+        }
+        if ((size_t)v > HTTP_MAX_BODY_BYTES) {
+            free(block); http_request_clear(out); return HTTP_ETOOLARGE;
         }
         body_len = (size_t)v;
     }
@@ -396,6 +404,28 @@ static void mint_session_id(char out[37]) {
         raw[4], raw[5], raw[6], raw[7],
         raw[8], raw[9], raw[10], raw[11],
         raw[12], raw[13], raw[14], raw[15]);
+}
+
+/* Is the address currently bound to `fd` a loopback address? Used only
+ * to decide whether to warn about a LAN-exposed bind. getsockname after a
+ * successful bind+listen can't fail for our purposes; on the off chance it
+ * does, we treat the result as loopback (no warning) — failing safe toward
+ * silence rather than a spurious scare. Covers both IPv4 (127.0.0.0/8) and
+ * IPv6 (::1), so checking the *actual* bound address sidesteps the
+ * NULL→string-substitution IPv6 footgun entirely. */
+static int bound_addr_is_loopback(int fd) {
+    struct sockaddr_storage ss;
+    socklen_t slen = sizeof ss;
+    if (getsockname(fd, (struct sockaddr *)&ss, &slen) != 0) return 1;
+    if (ss.ss_family == AF_INET) {
+        const struct sockaddr_in *s4 = (const struct sockaddr_in *)&ss;
+        return (ntohl(s4->sin_addr.s_addr) >> 24) == 127;
+    }
+    if (ss.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)&ss;
+        return IN6_IS_ADDR_LOOPBACK(&s6->sin6_addr);
+    }
+    return 0;
 }
 
 /* ====================================================================== */
@@ -900,6 +930,11 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
         if (rc == CMCP_EUNSUPPORTED) {
             reply_error(fd, 501, "Not Implemented",
                          "chunked transfer encoding not supported\n");
+        } else if (rc == HTTP_ETOOLARGE) {
+            /* Content-Length past HTTP_MAX_BODY_BYTES (4 MiB). 413 is the
+             * spec code for an over-cap body (threat-model.md row 1.2). */
+            reply_error(fd, 413, "Payload Too Large",
+                         "request body exceeds maximum size\n");
         } else if (rc == CMCP_ETIMEOUT) {
             /* Slowloris / deadline: peer dribbled bytes (or stalled
              * entirely) past the configured budget. 408 is the spec
@@ -1343,8 +1378,23 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
     char port_buf[8];
     snprintf(port_buf, sizeof port_buf, "%u", port);
 
+    /* Bind-address default (MCP server-side localhost obligation). A
+     * NULL/empty host means "no preference" — which for a no-TLS MCP
+     * server must mean loopback, NOT the wildcard.
+     *
+     * We resolve "127.0.0.1" rather than "localhost": this transport owns
+     * a single listen fd (the loop below binds the first address that
+     * works and stops), so it can bind exactly one address. "localhost"
+     * resolves to both 127.0.0.1 and ::1, and which one we'd bind would
+     * depend on the host resolver's ordering — a ::1-only bind would then
+     * silently refuse an IPv4 client. 127.0.0.1 is the universally-present
+     * loopback and is deterministic. A host that needs IPv6 loopback
+     * passes "::1" explicitly; one that wants every interface passes
+     * "0.0.0.0" / "::". (Verdict: council, 2026-06-01.) */
+    const char *node = (host && *host) ? host : "127.0.0.1";
+
     struct addrinfo *res = NULL;
-    int gai = getaddrinfo(host && *host ? host : NULL, port_buf, &hints, &res);
+    int gai = getaddrinfo(node, port_buf, &hints, &res);
     if (gai != 0 || !res) return NULL;
 
     int fd = -1;
@@ -1379,6 +1429,22 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
         size_t n = strlen(envv);
         impl->allowed_origins = (char *)malloc(n + 1);
         if (impl->allowed_origins) memcpy(impl->allowed_origins, envv, n + 1);
+    }
+
+    /* A caller who explicitly binds beyond loopback (e.g. "0.0.0.0") with
+     * no Origin allow-list set has opened a DNS-rebinding surface. We warn
+     * rather than refuse: binding a non-loopback interface behind the
+     * TLS-terminating reverse proxy the threat model assumes is a
+     * legitimate, supported deployment — refusing it would be the
+     * transport enforcing host policy. The warning surfaces the
+     * misconfiguration without dictating one. (Verdict: council, 2026-06-01.) */
+    if (!impl->allowed_origins && !bound_addr_is_loopback(fd)) {
+        fprintf(stderr,
+            "cmcp_transport_http_listen: bound a non-loopback address with no "
+            "CMCP_HTTP_ALLOWED_ORIGINS set — the server is reachable beyond "
+            "localhost with no DNS-rebinding (Origin) defense. Set "
+            "CMCP_HTTP_ALLOWED_ORIGINS, or bind 127.0.0.1, or front it with a "
+            "reverse proxy.\n");
     }
 
     /* Snapshot the per-connection read-budget knobs (Tier 6 axis 6.5.1).

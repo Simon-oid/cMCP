@@ -28,6 +28,7 @@ tools/dogfood-crag-host/dogfood-crag-host
 # Example binaries
 examples/echo-server
 examples/minimal-client
+examples/host-probe
 
 # Compiled test binaries (source is tests/test_*.c, binaries are tests/test_<name>)
 tests/test_*
