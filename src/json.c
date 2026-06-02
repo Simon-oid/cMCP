@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
@@ -177,7 +178,11 @@ cmcp_json_t *cmcp_json_new_string(const char *s) {
 static int arr_grow(cmcp_json_t *arr, size_t want) {
     if (want <= arr->arr.cap) return 0;
     size_t cap = arr->arr.cap ? arr->arr.cap : 4;
-    while (cap < want) cap *= 2;
+    while (cap < want) {
+        if (cap > SIZE_MAX / 2) return -1;     /* doubling would overflow */
+        cap *= 2;
+    }
+    if (cap > SIZE_MAX / sizeof(cmcp_json_t *)) return -1;
     /* Array of cmcp_json_t* — sizeof the element pointer is intended.
      * NOLINTNEXTLINE(bugprone-sizeof-expression) */
     cmcp_json_t **n = realloc(arr->arr.items, cap * sizeof *n);
@@ -197,7 +202,13 @@ int cmcp_json_array_append(cmcp_json_t *arr, cmcp_json_t *v) {
 static int obj_grow(cmcp_json_t *obj, size_t want) {
     if (want <= obj->obj.cap) return 0;
     size_t cap = obj->obj.cap ? obj->obj.cap : 4;
-    while (cap < want) cap *= 2;
+    while (cap < want) {
+        if (cap > SIZE_MAX / 2) return -1;     /* doubling would overflow */
+        cap *= 2;
+    }
+    /* keys (char*), key_lens (size_t), values (cmcp_json_t*) — bound the
+     * largest element size so none of the three reallocs can overflow. */
+    if (cap > SIZE_MAX / sizeof(size_t)) return -1;
     char         **nk = realloc(obj->obj.keys,     cap * sizeof *nk);
     if (!nk) return -1;
     obj->obj.keys = nk;
@@ -526,6 +537,7 @@ static int parse_string_body(parser_t *p, char **out, size_t *out_len) {
     if (!buf) return -1;
 #define APPEND(c) do {                                                         \
     if (len + 1 >= cap) {                                                      \
+        if (cap > SIZE_MAX / 2) { free(buf); return -1; }  /* no overflow */   \
         size_t ncap = cap * 2;                                                 \
         char *nb = realloc(buf, ncap);                                         \
         if (!nb) { free(buf); return -1; }                                     \

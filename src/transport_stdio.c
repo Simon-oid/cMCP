@@ -1,10 +1,11 @@
-/* getline(), fdopen() — POSIX.1-2008. */
+/* fdopen() — POSIX.1-2008. */
 #define _POSIX_C_SOURCE 200809L
 
 #include "cmcp.h"
 #include "cmcp_transport.h"
 
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,17 +20,85 @@ typedef struct {
     pthread_mutex_t write_mu;
 } stdio_impl_t;
 
+/* ---------------------------------------------------------------------- *
+ * Frame-size cap (stdio analogue of the HTTP body cap).
+ *
+ * getline() grows its buffer without limit, so a peer streaming bytes
+ * with no newline can drive unbounded allocation until the process OOMs.
+ * That matters in both wire roles: cmcp_client_connect_stdio reads a
+ * forked server's stdout through this same path, so a hostile/buggy MCP
+ * server could OOM the *client*. We cap the per-frame size like the HTTP
+ * transport caps the request body.
+ *
+ *   CMCP_STDIO_MAX_FRAME   default 16 MiB   (<=0 disables)
+ *
+ * Snapshotted once via pthread_once — zero per-read getenv() cost.
+ * Over-budget frame → CMCP_EPROTOCOL (matching the HTTP overflow path).
+ * ---------------------------------------------------------------------- */
+#define CMCP_STDIO_MAX_FRAME_DEFAULT  ((size_t)16 * 1024 * 1024)
+
+static size_t        g_stdio_max_frame = CMCP_STDIO_MAX_FRAME_DEFAULT;
+static pthread_once_t g_stdio_caps_once = PTHREAD_ONCE_INIT;
+
+static void stdio_caps_init(void) {
+    const char *v = getenv("CMCP_STDIO_MAX_FRAME");
+    if (v && *v) {
+        char *end; long long x = strtoll(v, &end, 10);
+        if (end != v && *end == '\0') {
+            g_stdio_max_frame = (x <= 0) ? 0 : (size_t)x;
+        }
+    }
+}
+
+static size_t stdio_max_frame(void) {
+    pthread_once(&g_stdio_caps_once, stdio_caps_init);
+    return g_stdio_max_frame;
+}
+
+/* Bounded line read: like getline() into s->line_buf/s->line_cap, but
+ * refuses to grow past `max_frame` data bytes (newline excluded). The
+ * buffer persists across calls so steady-state reads don't re-allocate.
+ * Returns the line length (incl. trailing newline if one was read),
+ * -1 on EOF/error with nothing buffered, or -2 when the cap is hit. */
+static ssize_t stdio_getline_bounded(stdio_impl_t *s, size_t max_frame) {
+    size_t len = 0;
+    for (;;) {
+        if (len + 2 > s->line_cap) {
+            size_t ncap = s->line_cap ? s->line_cap * 2 : 256;
+            if (ncap < len + 2) ncap = len + 2;
+            if (max_frame > 0 && ncap > max_frame + 2) ncap = max_frame + 2;
+            char *nb = realloc(s->line_buf, ncap);
+            if (!nb) return -1;
+            s->line_buf = nb;
+            s->line_cap = ncap;
+        }
+        int ch = getc(s->in);
+        if (ch == EOF) {
+            if (len == 0) return -1;     /* nothing read → EOF/error */
+            break;                       /* final line, no trailing \n */
+        }
+        s->line_buf[len++] = (char)ch;
+        if (ch == '\n') break;
+        if (max_frame > 0 && len > max_frame) return -2;   /* over cap */
+    }
+    s->line_buf[len] = '\0';
+    return (ssize_t)len;
+}
+
 /* ---------------------------------------------------------------------- */
 
 static int stdio_read(cmcp_transport_t *t, char **out_buf, size_t *out_len) {
     stdio_impl_t *s = (stdio_impl_t *)t->impl;
     if (!out_buf || !out_len) return CMCP_EINVAL;
 
+    size_t max_frame = stdio_max_frame();
+
     /* Skip blank lines: peers SHOULD NOT emit them, but tolerate them
      * since some intermediaries (terminals, line editors) might. */
     for (;;) {
-        ssize_t n = getline(&s->line_buf, &s->line_cap, s->in);
-        if (n < 0) return CMCP_EIO;     /* EOF or read error */
+        ssize_t n = stdio_getline_bounded(s, max_frame);
+        if (n == -2) return CMCP_EPROTOCOL;  /* frame exceeds cap */
+        if (n < 0)  return CMCP_EIO;         /* EOF or read error */
 
         /* Strip trailing newline if present. */
         if (n > 0 && s->line_buf[n - 1] == '\n') {

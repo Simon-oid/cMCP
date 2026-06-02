@@ -186,7 +186,7 @@ static ssize_t budgeted_recv(int fd, void *buf, size_t n,
 static int read_headers_block(int fd, conn_budget_t *budget,
                                char **out_buf, size_t *out_len,
                                size_t *out_body_offset) {
-    size_t cap = 4096, len = 0;
+    size_t cap = 4096, len = 0, scanned = 0;
     char *buf = (char *)malloc(cap);
     if (!buf) return CMCP_ENOMEM;
 
@@ -209,8 +209,15 @@ static int read_headers_block(int fd, conn_budget_t *budget,
         len += (size_t)n;
         buf[len] = '\0';
 
-        /* Look for terminator anywhere in the freshly extended buffer. */
-        char *eoh = strstr(buf, "\r\n\r\n");
+        /* Scan only the freshly arrived bytes, overlapping the previous
+         * tail by 3 so a terminator split across two recv() chunks isn't
+         * missed (3 = max(len("\r\n\r\n"), len("\n\n")) - 1). The header
+         * block is capped at HTTP_MAX_HEADERS_BYTES, so this is about not
+         * rescanning settled bytes, not a scaling win. */
+        size_t from = (scanned > 3) ? scanned - 3 : 0;
+
+        /* Look for terminator. */
+        char *eoh = strstr(buf + from, "\r\n\r\n");
         if (eoh) {
             *out_buf = buf;
             *out_len = len;
@@ -219,13 +226,14 @@ static int read_headers_block(int fd, conn_budget_t *budget,
         }
         /* Also tolerate bare-LF terminators (\n\n) — some test clients
          * use them. */
-        char *eoh2 = strstr(buf, "\n\n");
+        char *eoh2 = strstr(buf + from, "\n\n");
         if (eoh2) {
             *out_buf = buf;
             *out_len = len;
             *out_body_offset = (size_t)(eoh2 - buf) + 2;
             return CMCP_OK;
         }
+        scanned = len;
     }
 }
 
