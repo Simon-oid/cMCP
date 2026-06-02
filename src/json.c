@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <math.h>
 #include <pthread.h>
 #include "cmcp_json.h"
@@ -653,8 +654,19 @@ static cmcp_json_t *parse_number(parser_t *p) {
         return cmcp_json_new_double(d);
     } else {
         char *end;
+        errno = 0;
         long long i = strtoll(tmp, &end, 10);
         if (end == tmp) return NULL;
+        if (errno == ERANGE) {
+            /* Integer literal outside long long range. JSON does not bound
+             * integer magnitude, so promote to double rather than silently
+             * clamping to LLONG_MAX/MIN — matches the all-numbers-are-IEEE-
+             * double behaviour of the JS/TS reference SDK. The magnitude is
+             * preserved approximately; callers reading it as an int still
+             * see a defined CMCP_JSON_DOUBLE rather than a bogus clamp. */
+            double d = strtod(tmp, &end);
+            return cmcp_json_new_double(d);
+        }
         return cmcp_json_new_int(i);
     }
 }

@@ -720,6 +720,31 @@ static void test_pattern_invalid_regex_silently_accepts(void) {
     cmcp_json_free(s); cmcp_json_free(v);
 }
 
+static void test_pattern_cache_consistent_across_calls(void) {
+    /* The compiled-regex cache must be transparent: repeated validation of
+     * the same pattern (and patternProperties) yields identical verdicts,
+     * with no cross-call state bleed. Exercises the cache hit path many
+     * times for the same pattern text. */
+    cmcp_json_t *s  = J("{\"pattern\":\"^[A-Z][a-z]+$\"}");
+    cmcp_json_t *ok = J("\"Hello\"");
+    cmcp_json_t *bad = J("\"hello\"");
+    for (int i = 0; i < 100; i++) {
+        TEST_ASSERT(cmcp_schema_validate(s, ok, NULL) == CMCP_OK);
+        TEST_ASSERT(cmcp_schema_validate(s, bad, NULL) == CMCP_ESCHEMA);
+    }
+    cmcp_json_free(s); cmcp_json_free(ok); cmcp_json_free(bad);
+
+    cmcp_json_t *pp = J("{\"patternProperties\":{\"^x_\":{\"type\":\"integer\"}},"
+                        "\"additionalProperties\":false}");
+    cmcp_json_t *pok = J("{\"x_a\":1,\"x_b\":2}");
+    cmcp_json_t *pbad = J("{\"x_a\":\"nope\"}");
+    for (int i = 0; i < 100; i++) {
+        TEST_ASSERT(cmcp_schema_validate(pp, pok, NULL) == CMCP_OK);
+        TEST_ASSERT(cmcp_schema_validate(pp, pbad, NULL) == CMCP_ESCHEMA);
+    }
+    cmcp_json_free(pp); cmcp_json_free(pok); cmcp_json_free(pbad);
+}
+
 static void test_multipleof_integer(void) {
     cmcp_json_t *s = J("{\"multipleOf\":3}");
     cmcp_json_t *ok = J("9");
@@ -1196,6 +1221,7 @@ int main(void) {
     TEST_RUN(test_pattern);
     TEST_RUN(test_pattern_does_not_apply_to_non_strings);
     TEST_RUN(test_pattern_invalid_regex_silently_accepts);
+    TEST_RUN(test_pattern_cache_consistent_across_calls);
     TEST_RUN(test_multipleof_integer);
     TEST_RUN(test_multipleof_fraction);
     TEST_RUN(test_exclusive_bounds);

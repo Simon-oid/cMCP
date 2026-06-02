@@ -52,6 +52,27 @@ static void test_parse_double(void) {
     cmcp_json_free(v);
 }
 
+static void test_parse_int_overflow_promotes_to_double(void) {
+    /* An integer literal outside long long range must NOT silently clamp to
+     * LLONG_MAX/MIN. JSON does not bound integer magnitude, so it is promoted
+     * to a double (matches the all-numbers-are-IEEE-double JS/TS SDK). */
+    cmcp_json_t *v = cmcp_json_parse_cstr("99999999999999999999");
+    TEST_ASSERT(v && v->type == CMCP_JSON_DOUBLE);
+    TEST_ASSERT(cmcp_json_double(v) > 9.0e19);
+    cmcp_json_free(v);
+
+    v = cmcp_json_parse_cstr("-99999999999999999999");
+    TEST_ASSERT(v && v->type == CMCP_JSON_DOUBLE);
+    TEST_ASSERT(cmcp_json_double(v) < -9.0e19);
+    cmcp_json_free(v);
+
+    /* A value right at the int64 boundary still parses as a real int. */
+    v = cmcp_json_parse_cstr("9223372036854775807");
+    TEST_ASSERT(v && v->type == CMCP_JSON_INT);
+    TEST_ASSERT(cmcp_json_int(v) == 9223372036854775807LL);
+    cmcp_json_free(v);
+}
+
 static void test_parse_int_vs_double_distinction(void) {
     /* Critical for JSON-RPC IDs: 7 must round-trip as 7, not 7.0. */
     cmcp_json_t *v = cmcp_json_parse_cstr("7");
@@ -548,6 +569,7 @@ int main(void) {
     TEST_RUN(test_parse_bools);
     TEST_RUN(test_parse_int);
     TEST_RUN(test_parse_double);
+    TEST_RUN(test_parse_int_overflow_promotes_to_double);
     TEST_RUN(test_parse_int_vs_double_distinction);
     TEST_RUN(test_parse_string);
     TEST_RUN(test_parse_string_escapes);

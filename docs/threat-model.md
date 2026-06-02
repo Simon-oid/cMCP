@@ -71,7 +71,7 @@ session integrity.
 | 1.7 | Cross-version handshake confusion | S/T | 🟢 The server echoes its own `protocolVersion` and lets the client decide; only missing/malformed → `-32602` (matches the spec's "client decides whether to disconnect" rule). |
 | 1.8 | Hostile peer holds an SSE GET stream open | D | 🟡 SSE replay buffer is per-session bounded (`CMCP_HTTP_SSE_REPLAY_BUFFER`, default 256, capped 65536). Idle-timeout on the read side from 1.4 covers the request setup; the long-lived SSE write side closes when the session closes. |
 | 1.9 | Capability advertisement spoofing | S | ⛔ The peer's advertised capabilities are *informational input*, not authority. Server-side decisions are made against the registry, not the peer's claim. |
-| 1.10 | Untrusted `inputSchema` triggers regex DoS | D | 🟡 6.7: regex uses POSIX ERE (`REG_EXTENDED | REG_NOSUB`). POSIX ERE has predictable complexity for ASCII patterns; no backtracking-disaster path comparable to ECMAScript regex with nested quantifiers. Pathological POSIX patterns are still possible — bounded by 1.4's idle timeout. |
+| 1.10 | Untrusted `inputSchema` triggers regex DoS | D | 🟡 6.7: regex uses POSIX ERE (`REG_EXTENDED | REG_NOSUB`). POSIX ERE has predictable complexity for ASCII patterns; no backtracking-disaster path comparable to ECMAScript regex with nested quantifiers. Compiled patterns are cached (see 3.6) so a hot tool does not recompile per call. Pathological POSIX patterns are still possible — bounded by 1.4's idle timeout. |
 | 1.11 | Header injection via CRLF in returned values | T | 🟢 `http_write_response` writes only fixed status, content-type, and length; no caller-controlled headers. SSE event framing only emits `data:`/`id:` and escapes nothing dangerous. |
 | 1.12 | `Mcp-Session-Id` guess / forge | S | 🟢 Session ids are 128-bit-equivalent (UUIDv4 minted from `/dev/urandom`) and compared by exact string match. |
 
@@ -122,7 +122,7 @@ cancellation propagation.
 | 3.3 | Worker pool starvation | D | 🟢 `CMCP_WORKERS` (default 4, clamped 1..64) bounds the worker count. Each tools/call gets one worker; pool exhaustion → request waits in the queue, never spawns new threads. |
 | 3.4 | Handler leaks memory cumulatively | D | ⛔ cMCP doesn't track handler heap usage. The host is responsible for monitoring its own RSS. |
 | 3.5 | Handler is fed unvalidated `arguments` | T/E | 🟢 Schema validator (6.7) runs *before* dispatch. Tools that opt out via `input_schema = NULL` accept whatever the peer sent — that's the explicit contract. |
-| 3.6 | Schema validator pulls in regex compile per call | D | 🟡 Patterns are compiled on every validate call (no schema cache yet). For high-throughput tools this is a per-call cost; bounded by the request-rate caps in 1.5 and the validator's predictable POSIX-ERE complexity. Schema-compile caching deferred to 6.6. |
+| 3.6 | Schema validator pulls in regex compile per call | D | 🟢 6.6: `pattern` / `patternProperties` regexes are compiled once and cached by pattern text in a process-global, mutex-guarded table (`src/schema.c`). Patterns come from author-registered `inputSchema`s, so the distinct set is small and bounded; repeat validations hit the cache instead of recompiling. The cache never evicts (held allocations stay reachable, so no leak), falling back to compile-use-free per call only if it ever fills. Still bounded by the request-rate caps in 1.5 and POSIX-ERE's predictable complexity. |
 
 ---
 

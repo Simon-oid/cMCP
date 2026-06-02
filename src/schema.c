@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <regex.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -269,26 +270,93 @@ static int check_const(const cmcp_json_t *schema, const cmcp_json_t *value,
 /* String keywords                                                         */
 /* ====================================================================== */
 
+/* Compiled-regex cache for `pattern` / `patternProperties`. Those regexes
+ * come from a tool's registered inputSchema (author-controlled and static
+ * for the process lifetime), so the distinct-pattern set is small and
+ * bounded. Compiling per validate() call was avoidable work under load
+ * (threat-model 1.10 / deferred item 6.6); cache the compiled form keyed by
+ * pattern text.
+ *
+ * The cache never evicts and never frees, so a regex_t pointer handed out
+ * under the lock stays valid for the whole process — which lets regexec()
+ * run OUTSIDE the lock (POSIX permits concurrent regexec on an unmodified
+ * regex_t, and existing slots are never mutated, only appended past). If the
+ * cache ever fills (a pathological schema set), we fall back to compile-use-
+ * free per call so correctness never depends on cache capacity. Held
+ * allocations are reachable via the static array, so neither valgrind
+ * (definite-only) nor LSan flags them. */
+#define SCHEMA_REGEX_CACHE_CAP 256
+
+static struct {
+    char    *pat;
+    regex_t  re;
+} g_regex_cache[SCHEMA_REGEX_CACHE_CAP];
+static size_t          g_regex_cache_len = 0;
+static pthread_mutex_t g_regex_cache_mu  = PTHREAD_MUTEX_INITIALIZER;
+
+/* Match `text` against POSIX ERE `pat` via the process regex cache.
+ * Returns 1 on match, 0 on no match, -1 if `pat` is not a valid regex.
+ * JSON values may contain embedded NULs; POSIX regex APIs are NUL-
+ * terminated, so a NUL in `text` truncates the comparison — accepted,
+ * since tool-input strings carrying NULs are already a wire oddity. */
+static int schema_regex_match(const char *pat, const char *text) {
+    const regex_t *re = NULL;
+    regex_t local;
+    int have_local = 0;
+
+    pthread_mutex_lock(&g_regex_cache_mu);
+    for (size_t i = 0; i < g_regex_cache_len; i++) {
+        if (strcmp(g_regex_cache[i].pat, pat) == 0) {
+            re = &g_regex_cache[i].re;
+            break;
+        }
+    }
+    if (!re) {
+        if (g_regex_cache_len < SCHEMA_REGEX_CACHE_CAP) {
+            size_t slot = g_regex_cache_len;
+            if (regcomp(&g_regex_cache[slot].re, pat,
+                        REG_EXTENDED | REG_NOSUB) != 0) {
+                pthread_mutex_unlock(&g_regex_cache_mu);
+                return -1;
+            }
+            g_regex_cache[slot].pat = xstrdup(pat);
+            if (!g_regex_cache[slot].pat) {
+                regfree(&g_regex_cache[slot].re);
+                pthread_mutex_unlock(&g_regex_cache_mu);
+                return -1;
+            }
+            g_regex_cache_len++;
+            re = &g_regex_cache[slot].re;
+        } else {
+            if (regcomp(&local, pat, REG_EXTENDED | REG_NOSUB) != 0) {
+                pthread_mutex_unlock(&g_regex_cache_mu);
+                return -1;
+            }
+            have_local = 1;
+            re = &local;
+        }
+    }
+    pthread_mutex_unlock(&g_regex_cache_mu);
+
+    int matched = regexec(re, text, 0, NULL, 0) == 0;
+    if (have_local) regfree(&local);
+    return matched ? 1 : 0;
+}
+
 static int check_pattern(const cmcp_json_t *schema, const cmcp_json_t *value,
                           path_buf_t *path, cmcp_schema_error_t *err) {
     if (value->type != CMCP_JSON_STRING) return CMCP_OK;
     const cmcp_json_t *pat = cmcp_json_object_get(schema, "pattern");
     if (!pat || pat->type != CMCP_JSON_STRING) return CMCP_OK;
 
-    /* POSIX ERE — see docs/schema-conformance.md for flavour notes.
-     * JSON values may contain embedded NULs; POSIX regex APIs are NUL-
-     * terminated. We accept the truncation here because tool-input
-     * strings carrying NULs would already be a wire oddity. */
-    regex_t re;
-    int rc = regcomp(&re, pat->str.s, REG_EXTENDED | REG_NOSUB);
-    if (rc != 0) {
+    /* POSIX ERE — see docs/schema-conformance.md for flavour notes. */
+    int m = schema_regex_match(pat->str.s, value->str.s);
+    if (m < 0) {
         /* Schema author error — invalid regex. Per spec we still
          * validate the rest of the schema; this keyword is dropped. */
         return CMCP_OK;
     }
-    int matched = regexec(&re, value->str.s, 0, NULL, 0) == 0;
-    regfree(&re);
-    if (!matched) {
+    if (m == 0) {
         return fail(err, path, "pattern", "string does not match pattern");
     }
     return CMCP_OK;
@@ -391,12 +459,7 @@ static int key_covered(const cmcp_json_t *schema, const char *key) {
     const cmcp_json_t *pp = cmcp_json_object_get(schema, "patternProperties");
     if (pp && pp->type == CMCP_JSON_OBJECT) {
         for (size_t i = 0; i < pp->obj.len; i++) {
-            regex_t re;
-            if (regcomp(&re, pp->obj.keys[i], REG_EXTENDED | REG_NOSUB) != 0)
-                continue;
-            int m = regexec(&re, key, 0, NULL, 0) == 0;
-            regfree(&re);
-            if (m) return 1;
+            if (schema_regex_match(pp->obj.keys[i], key) == 1) return 1;
         }
     }
     return 0;
@@ -494,19 +557,13 @@ static int check_object(validate_ctx_t *ctx,
         int matched_pp = 0;
         if (pp && pp->type == CMCP_JSON_OBJECT) {
             for (size_t j = 0; j < pp->obj.len; j++) {
-                regex_t re;
-                if (regcomp(&re, pp->obj.keys[j], REG_EXTENDED | REG_NOSUB) != 0)
-                    continue;
-                int m = regexec(&re, key, 0, NULL, 0) == 0;
-                regfree(&re);
-                if (m) {
-                    matched_pp = 1;
-                    const cmcp_json_t *ps = pp->obj.values[j];
-                    size_t saved = path_push_prop(path, key);
-                    int rc = validate(ctx, ps, child, path, err);
-                    path_pop(path, saved);
-                    if (rc != CMCP_OK) return rc;
-                }
+                if (schema_regex_match(pp->obj.keys[j], key) != 1) continue;
+                matched_pp = 1;
+                const cmcp_json_t *ps = pp->obj.values[j];
+                size_t saved = path_push_prop(path, key);
+                int rc = validate(ctx, ps, child, path, err);
+                path_pop(path, saved);
+                if (rc != CMCP_OK) return rc;
             }
         }
 

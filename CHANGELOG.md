@@ -4,6 +4,38 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## [Unreleased] — deep-analysis hardening pass
+
+A security/robustness review (LLM Council in the loop on the bind-default
+call) turned up four real findings; this wave lands all four. No public
+API or wire-format change — protocol version stays `2025-11-25`.
+
+### Changed
+
+- **HTTP server defaults to a loopback bind.** `cmcp_transport_http_listen`
+  now resolves `127.0.0.1` when `host` is NULL/empty instead of the
+  all-interfaces wildcard, so an unconfigured server is unreachable
+  off-box (DNS-rebinding defense-in-depth alongside the existing
+  `CMCP_HTTP_ALLOWED_ORIGINS` allow-list). A deterministic literal is
+  used rather than `localhost` because the transport owns a single
+  listen fd and binds the first `getaddrinfo` result. An explicit
+  non-loopback bind with no allow-list set now emits a one-shot stderr
+  warning. (threat-model 1.6)
+- **Oversize request bodies return `413 Payload Too Large`** instead of a
+  generic protocol error, matching the threat model's contract. A
+  malformed `Content-Length` still yields a protocol error. (threat-model
+  1.2)
+- **Integer literals outside `long long` range promote to double** rather
+  than silently clamping to `LLONG_MAX`/`MIN`. JSON does not bound integer
+  magnitude; the value is preserved approximately, matching the
+  all-numbers-are-IEEE-double behaviour of the JS/TS reference SDK.
+- **Compiled `pattern` / `patternProperties` regexes are cached** by
+  pattern text in a process-global, mutex-guarded table, eliminating the
+  per-validate `regcomp`/`regfree`. Thread-safe (concurrent `regexec` on
+  unmodified cached entries), leak-clean (never-evicting, reachable from a
+  static root), with a compile-use-free fallback if the cache ever fills.
+  (threat-model 3.6 / 6.6 — previously deferred)
+
 ## v0.9.0 — P7 typed tool-call redesign (struct + handle) (2026-06-01)
 
 A single pre-1.0 **breaking** wave on the client-side typed tool-call
