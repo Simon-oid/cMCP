@@ -50,11 +50,13 @@ Three scores lead each item:
   structural (`~0.033` = ranked #1 by both retrievers, `~0.016` = by
   one), so it **cannot** be read as relevance — that's what `cos` is for.
 
-Results are gated on `cos`: a chunk below the cutoff (default `0.50`,
-see `CRAG_MIN_COSINE`) is dropped as the one-retriever floor rather than
-a real match. If every hit falls below it, the tool returns a single
-`(no chunk cleared the relevance threshold)` item — a valid, non-error
-answer to a query nothing matches.
+Results are gated on `cos`: a chunk below the cutoff is dropped as the
+one-retriever floor rather than a real match. The cutoff is **calibrated
+per embedding model** (see [Relevance gating](#relevance-gating)) — bge-m3
+sits ~0.2 lower than mxbai, so a single global number wrongly refuses real
+matches on one of them. If every hit falls below it, the tool returns a
+single `(no chunk cleared the relevance threshold)` item — a valid,
+non-error answer to a query nothing matches.
 
 Default `k` is 5; the server also clamps to `[1, 20]` defensively.
 
@@ -121,15 +123,32 @@ this — pick one combination and keep it.
 cutoff, so a query that matches nothing returns an explicit "no match"
 instead of the junk the fusion ranking would otherwise surface.
 
-| Variable          | Meaning                                       | Default |
-|-------------------|-----------------------------------------------|---------|
-| `CRAG_MIN_COSINE` | Minimum cosine for a result to count as a hit | `0.50`  |
+**The right cutoff depends on the embedding model, not the query.** The
+cosine floor that separates a genuine match from one-retriever noise is a
+property of the embedder's geometry, and the two embedders cRAG targets
+sit ~0.2 apart (both measured on the Italian municipal fixture):
 
-The default is calibrated for `mxbai-embed-large` (genuine matches land
-at cosine 0.62–0.72, irrelevant queries still score 0.30–0.41 — that
-model has a high cosine floor). A different embedding model has a
-different floor — recalibrate. Set `CRAG_MIN_COSINE` to a value `<= -1`
-to disable gating and return raw fusion-ranked results.
+| Embedder (`CRAG_EMBED_MODEL`) | Genuine    | Irrelevant | Cutoff |
+|-------------------------------|------------|------------|--------|
+| `mxbai-embed-large`           | 0.62–0.72  | 0.30–0.41  | `0.50` |
+| `bge-m3` (Italian default)    | 0.43–0.58  | 0.24–0.32  | `0.38` |
+| *anything else*               | —          | —          | `0.50` (default; please calibrate) |
+
+So the gate is resolved automatically from the embedder:
+
+| Variable          | Meaning                                                  | Default            |
+|-------------------|----------------------------------------------------------|--------------------|
+| `CRAG_EMBED_MODEL`| Selects the calibrated cutoff from the table above       | `0.50` if unknown  |
+| `CRAG_MIN_COSINE` | Explicit override; always wins. `<= -1` disables gating  | per-model table    |
+
+A single global `0.50` silently dropped ~40% of genuine `bge-m3` matches
+(its whole distribution sits lower) — the bug this table fixes. Set
+`CRAG_EMBED_MODEL` to the model you indexed with and the gate calibrates
+itself; reach for `CRAG_MIN_COSINE` only to override or to add a model the
+table doesn't know yet. The calibration is pinned by a hermetic test
+(`tests/test_crag_cutoff.c`, runs in `make test`) so it can't regress
+unnoticed; the measured bands live in `tools/crag-mcp/crag_cutoff.{h,c}`.
+At startup the server logs which cutoff it chose and why.
 
 ## Quick start
 

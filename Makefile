@@ -119,9 +119,10 @@ examples/%: examples/%.c $(BUILT_LIBS)
 # requires cRAG to be present at $(CRAG_DIR).
 crag-mcp: $(CRAG_MCP_BIN)
 
-$(CRAG_MCP_BIN): $(CRAG_MCP_SRC) $(BUILT_LIBS)
+$(CRAG_MCP_BIN): $(CRAG_MCP_SRC) tools/crag-mcp/crag_cutoff.c \
+                 tools/crag-mcp/crag_cutoff.h $(BUILT_LIBS)
 	@test -d $(CRAG_DIR) || { echo "cRAG not found at $(CRAG_DIR) — set CRAG_DIR=..."; exit 1; }
-	$(CC) $(CFLAGS) -I$(CRAG_DIR)/include -o $@ $< \
+	$(CC) $(CFLAGS) -I$(CRAG_DIR)/include -o $@ $< tools/crag-mcp/crag_cutoff.c \
 	    $(BUILT_LIBS) \
 	    $(filter-out $(CRAG_DIR)/src/main.o, $(wildcard $(CRAG_DIR)/src/*.o)) \
 	    $(CRAG_DIR)/third_party/sqlite3.o \
@@ -308,6 +309,15 @@ tests/test_fs_server: tests/test_fs_server.c $(BUILT_LIBS) $(FS_MCP_BIN)
 # test_tee_frame_cap execs the built cmcp-tee binary (B.2 cap regression).
 tests/test_tee_frame_cap: tests/test_tee_frame_cap.c $(BUILT_LIBS) $(TEE_BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+# test_crag_cutoff pins crag-mcp's per-embedder relevance-gate calibration.
+# crag_cutoff.c is a pure unit (no cRAG/curl deps), so this test stays
+# hermetic and runs in every `make test` — the gate can't silently regress.
+# -I for the header; no cMCP libs needed, but $(BUILT_LIBS) is harmless and
+# keeps the link line uniform with the generic rule.
+tests/test_crag_cutoff: tests/test_crag_cutoff.c tools/crag-mcp/crag_cutoff.c \
+                        tools/crag-mcp/crag_cutoff.h
+	$(CC) $(CFLAGS) -Itools/crag-mcp -o $@ $< tools/crag-mcp/crag_cutoff.c
 
 tests/%: tests/%.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)

@@ -40,8 +40,11 @@
  *   OPENAI_API_KEY       for openai backend
  *
  * Environment specific to this server:
- *   CRAG_MIN_COSINE      crag_search relevance gate (default: 0.50;
- *                        <= -1 disables gating)
+ *   CRAG_MIN_COSINE      crag_search relevance gate. Explicit override,
+ *                        always wins (<= -1 disables gating). When unset,
+ *                        the gate is calibrated per embedding model from
+ *                        CRAG_EMBED_MODEL (bge-m3 -> 0.38, mxbai -> 0.50,
+ *                        else 0.50 default). See crag_cutoff.{h,c}.
  */
 
 #include "cmcp.h"
@@ -52,6 +55,9 @@
 #include "crag.h"
 #include "embed.h"
 #include "store.h"
+
+/* Per-embedder relevance-gate calibration (pure, hermetically tested). */
+#include "crag_cutoff.h"
 
 #include <curl/curl.h>
 #include <stdio.h>
@@ -100,18 +106,13 @@ static cmcp_json_t *single_text_array(const char *text) {
 #define CRAG_SEARCH_DEFAULT_K  5
 #define CRAG_SEARCH_MAX_K      20
 
-/* Minimum cosine similarity for a hybrid-search result to count as a
- * real match. The RRF fusion score cannot be thresholded — its range is
- * structural (~0.033 = ranked #1 by both retrievers, ~0.016 = by one) —
- * so we gate on the raw cosine, a calibrated [-1,1] relevance.
- *
- * 0.50 was calibrated against mxbai-embed-large, which has a high cosine
- * floor: genuine matches land at 0.62-0.72, while irrelevant queries
- * still score ~0.30-0.41. 0.50 sits in the gap with margin on both
- * sides. A different embedding model will need a different cutoff —
- * override with CRAG_MIN_COSINE (mirrors cRAG's own CRAG_GEN_MIN_SCORE
- * convention); set it <= -1 to disable gating entirely. */
-#define CRAG_SEARCH_MIN_COSINE  0.50f
+/* The minimum cosine similarity for a hybrid-search result to count as a
+ * real match is resolved at startup into ctx->min_cosine. The RRF fusion
+ * score cannot be thresholded — its range is structural (~0.033 = ranked
+ * #1 by both retrievers, ~0.016 = by one) — so we gate on the raw cosine,
+ * a calibrated [-1,1] relevance. The cutoff is model-dependent (mxbai's
+ * floor sits ~0.2 above bge-m3's); crag_resolve_min_cosine() picks it from
+ * CRAG_EMBED_MODEL unless CRAG_MIN_COSINE overrides. See crag_cutoff.{h,c}. */
 
 static int crag_search_handler(const cmcp_json_t *args, void *userdata,
                                 cmcp_handler_ctx_t *hctx,
@@ -301,19 +302,39 @@ int main(int argc, char **argv) {
     crag_mcp_ctx_t ctx = {0};
     ctx.db_path = resolve_db_path(argc, argv);
 
-    /* Relevance gate for hybrid search. CRAG_MIN_COSINE overrides the
-     * compiled-in default; a malformed or above-1 value is rejected and
-     * the default kept. A value <= -1 disables gating. */
-    ctx.min_cosine = CRAG_SEARCH_MIN_COSINE;
-    const char *mc = getenv("CRAG_MIN_COSINE");
-    if (mc && *mc) {
-        char *end = NULL;
-        float v = strtof(mc, &end);
-        if (end != mc && *end == '\0' && v <= 1.0f)
-            ctx.min_cosine = v;
+    /* Relevance gate for hybrid search. Precedence: an explicit, valid
+     * CRAG_MIN_COSINE wins; otherwise the cutoff is calibrated per embedding
+     * model from CRAG_EMBED_MODEL; otherwise a conservative default. A
+     * malformed or above-1 CRAG_MIN_COSINE is rejected (warned) and we fall
+     * back to the model/default. A value <= -1 disables gating. */
+    const char *mc    = getenv("CRAG_MIN_COSINE");
+    const char *model = getenv("CRAG_EMBED_MODEL");
+    crag_cutoff_src_t cutoff_src;
+    int mc_invalid = 0;
+    ctx.min_cosine = crag_resolve_min_cosine(mc, model, &cutoff_src, &mc_invalid);
+    if (mc_invalid)
+        fprintf(stderr,
+                "crag-mcp: ignoring invalid CRAG_MIN_COSINE '%s'\n", mc);
+    switch (cutoff_src) {
+    case CRAG_CUTOFF_SRC_ENV:
+        if (ctx.min_cosine <= -1.0f)
+            fprintf(stderr, "crag-mcp: relevance gate DISABLED "
+                            "(CRAG_MIN_COSINE=%.3f)\n", (double)ctx.min_cosine);
         else
-            fprintf(stderr,
-                    "crag-mcp: ignoring invalid CRAG_MIN_COSINE '%s'\n", mc);
+            fprintf(stderr, "crag-mcp: relevance gate cosine >= %.3f "
+                            "(CRAG_MIN_COSINE)\n", (double)ctx.min_cosine);
+        break;
+    case CRAG_CUTOFF_SRC_MODEL:
+        fprintf(stderr, "crag-mcp: relevance gate cosine >= %.3f "
+                        "(calibrated for embedder '%s')\n",
+                (double)ctx.min_cosine, model ? model : "");
+        break;
+    case CRAG_CUTOFF_SRC_DEFAULT:
+        fprintf(stderr, "crag-mcp: relevance gate cosine >= %.3f (default; "
+                        "embedder '%s' is uncalibrated — set CRAG_MIN_COSINE "
+                        "if matches are wrongly dropped)\n",
+                (double)ctx.min_cosine, (model && *model) ? model : "unset");
+        break;
     }
 
     if (store_open(ctx.db_path, &ctx.store) != 0) {
