@@ -161,7 +161,18 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
     if (n == 0) {
         free(results); free(scores);
         *out_is_error = 0;
-        *out_content = single_text_array("(no matching chunks)");
+        /* Distinguish an empty index from a genuine no-match (F1): an
+         * empty index means retrieval is structurally broken (wrong --db
+         * path, failed ingest), which the host must not mistake for "the
+         * query had no answer." store_stats is cheap. */
+        crag_store_stats_t stats = {0};
+        if (store_stats(&ctx->store, &stats) == 0 && stats.chunks == 0) {
+            *out_content = single_text_array(
+                "(index is empty — 0 chunks; check the --db path / ingest, "
+                "this is NOT a no-match result)");
+        } else {
+            *out_content = single_text_array("(no matching chunks)");
+        }
         return CMCP_OK;
     }
 
@@ -210,15 +221,19 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
     }
     free(results); free(scores);
 
-    /* Every hit fell below the relevance gate: report "no match"
-     * explicitly rather than returning the junk the fusion ranking
-     * would otherwise surface. Not an error — an empty result is a
-     * valid answer to a query nothing matches. */
+    /* Nothing emitted: either the index is empty, or every hit fell
+     * below the relevance gate. These are very different facts for the
+     * host — an empty index means retrieval is structurally broken
+     * (misconfigured DB, failed ingest), not that the query had no
+     * match — so report them distinctly (F1). */
     if (emitted == 0) {
         cmcp_json_free(arr);
         *out_is_error = 0;
-        *out_content  = single_text_array(
-            "(no chunk cleared the relevance threshold)");
+        /* n>0 here, so the index is non-empty: every hit fell below the
+         * relevance gate. (Empty-index is handled at the n==0 branch.) */
+        *out_content = single_text_array(
+            "(no chunk cleared the relevance threshold — the index is "
+            "non-empty but nothing matched this query)");
         return CMCP_OK;
     }
 
@@ -372,11 +387,21 @@ int main(int argc, char **argv) {
                         "special syntax). Returns up to k chunks ranked by "
                         "relevance, one text content item per chunk, each "
                         "prefixed with `[cos … bm25 … fusion …] <path>` "
-                        "followed by the chunk body verbatim. Weak matches "
-                        "are filtered by an operator-tuned cosine gate, so "
-                        "a response of `(no chunk cleared the relevance "
-                        "threshold)` means the index has no strong match "
-                        "for this query — not that the index is empty.",
+                        "followed by the chunk body verbatim. "
+                        "IMPORTANT — this is a RETRIEVER, not a relevance "
+                        "judge: it returns the nearest chunks, NOT a verdict "
+                        "that they answer your question. A coarse cosine gate "
+                        "drops only far-off-topic matches; for a query in the "
+                        "corpus's domain whose specific fact is absent, it "
+                        "WILL still return plausible-looking but wrong chunks "
+                        "(measured: unrelated same-domain queries score "
+                        "cos 0.45–0.60). YOU must read the chunks and decide "
+                        "whether the asked-for fact is actually present, and "
+                        "refuse/abstain if not — do not assume a returned "
+                        "chunk is an answer. `(no chunk cleared the relevance "
+                        "threshold)` means only that nothing passed the coarse "
+                        "gate — not that the index is empty (use crag_stats to "
+                        "check emptiness).",
         .input_schema =
             "{"
               "\"type\":\"object\","
