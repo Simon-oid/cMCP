@@ -1,7 +1,7 @@
 --------------------------------------------------------------------------------
 Command:            bench/bench_server_inline
-Massif arguments:   --pages-as-heap=no --massif-out-file=/home/platys/cMCP/bench/profile/baseline/heap-massif.out
-ms_print arguments: /home/platys/cMCP/bench/profile/baseline/heap-massif.out
+Massif arguments:   --pages-as-heap=no --massif-out-file=/home/user/cMCP/bench/profile/baseline/heap-massif.out
+ms_print arguments: /home/user/cMCP/bench/profile/baseline/heap-massif.out
 --------------------------------------------------------------------------------
 
 

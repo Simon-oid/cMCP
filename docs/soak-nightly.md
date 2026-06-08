@@ -69,7 +69,7 @@ directories.
 Recommended `crontab -e` line for a local Linux box (02:00 daily):
 
 ```
-0 2 * * * cd /home/platys/cMCP && tests/soak/nightly.sh >/dev/null 2>&1
+0 2 * * * cd /home/user/cMCP && tests/soak/nightly.sh >/dev/null 2>&1
 ```
 
 The script tees everything into `log.txt` already; the redirect just
@@ -77,7 +77,7 @@ silences cron's `MAILTO` plumbing. To get notified on failure, drop in
 a one-liner check after the run:
 
 ```
-5 8 * * * test -f /home/platys/.cmcp-soak/$(date +\%F)/PASSED || \
+5 8 * * * test -f /home/user/.cmcp-soak/$(date +\%F)/PASSED || \
           notify-send -u critical 'cMCP soak FAILED'
 ```
 

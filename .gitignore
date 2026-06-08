@@ -120,3 +120,16 @@ CLAUDE.md
 TODO.md
 todo.md
 notes.md
+
+# Local dev artefacts — not part of the public deliverable. Kept out of
+# git so an accidental `git add` can't sweep them into a public repo.
+# (gitignore comments must be on their own line, never trailing a pattern.)
+.obsidian/
+# stray nested Obsidian vault
+cMCP/
+# generated /graphify output (large; includes cost.json)
+graphify-out/
+# cRAG SQLite index — runtime data, may hold indexed content
+tools/crag-mcp/crag.db
+# internal research note (IT)
+docs/Testare RAG e MCP_ Guida Dettagliata.md

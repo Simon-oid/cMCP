@@ -15,7 +15,7 @@ output is **this doc**, not a binary anybody links.
 ```sh
 # corpus (cMCP's own docs/ — 9 markdown files, 126 chunks, 1024-dim)
 CRAG_EMBED_BACKEND=ollama CRAG_EMBED_MODEL=mxbai-embed-large \
-  ../cRAG/crag index /home/platys/cMCP/docs \
+  ../cRAG/crag index /home/user/cMCP/docs \
     --db /tmp/cmcp-dogfood/cmcp-docs.db --ext md --workers 2
 
 # build
