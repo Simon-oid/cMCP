@@ -18,6 +18,15 @@ quirks and answers the question the design plan posed for axis 6.6.2:
 | `package.json` | Pinned `@modelcontextprotocol/sdk` + `zod` for the TS server. |
 | `requirements.txt` | Pinned `mcp` for the Python server. |
 | `run.sh` | Orchestrator: probes for `node` / Python venv, runs each available impl, concatenates rows into `results.csv`, prints aligned summary. |
+| `ci-report.sh` | Turns a finished run into a Markdown comparison report (throughput / latency / idle-RSS, with ratios vs cMCP). Run locally after `make bench-compare`, or let the `bench-compare` GitHub Action append it to the run summary. |
+
+The [`bench-compare`](../../.github/workflows/bench-compare.yml) workflow
+(weekly + manual `workflow_dispatch`) keeps this comparison from going
+stale: it runs the bench on a CI runner and publishes `ci-report.sh`'s
+table to the run summary + a CSV artifact. It deliberately does **not**
+commit anything — runner numbers are noisy, so the snapshot in
+[`docs/testing-overview.md`](../../docs/testing-overview.md) stays the
+canonical reference.
 
 `results.csv` is produced by `make bench-compare` and is gitignored
 (numbers vary per machine, per kernel, per build flags). The

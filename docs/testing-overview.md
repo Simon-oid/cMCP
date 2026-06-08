@@ -199,7 +199,9 @@ zero third-party dependencies.
   stdio/HTTP frame caps (OOM).
 
 > Numbers vary per machine/kernel/build; regenerate with
-> `make bench-compare`. Wire-compatibility with the reference SDK is
+> `make bench-compare`. The `bench-compare` CI workflow (weekly + manual)
+> re-runs this comparison and posts a fresh table to its run summary, so
+> it never goes stale. Wire-compatibility with the reference SDK is
 > separately gated by `make conformance` (both directions).
 
 ---

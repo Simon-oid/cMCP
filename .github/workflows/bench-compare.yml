@@ -1,0 +1,77 @@
+# bench-compare — keep the cMCP-vs-reference-SDK comparison from going
+# stale. Runs `make bench-compare` (cMCP client, subprocess server swapped
+# per impl) plus a fresh idle-RSS measurement, and publishes the result as
+# a Markdown table in the run summary + a downloadable CSV artifact.
+#
+# It does NOT commit anything: CI-runner perf numbers are noisy and
+# machine-dependent (the repo gitignores results.csv for that reason), so
+# the published snapshot in docs/testing-overview.md stays the canonical
+# reference. This workflow is the always-fresh, on-demand view — open the
+# run, read the summary; a relative-standing regression is visible there.
+
+name: bench-compare
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Measured iterations per impl'
+        required: false
+        default: '10000'
+  schedule:
+    # Mondays 04:23 UTC — weekly is plenty for a drift tripwire, and the
+    # off-the-hour minute dodges the scheduler's congested :00 slot.
+    - cron: '23 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-compare-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: cMCP vs TS/Python SDK
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CMCP_BENCH_N: ${{ github.event.inputs.iterations || '10000' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install TypeScript SDK (server side)
+        run: npm install --prefix bench/compare
+
+      - name: Install Python SDK (server side)
+        run: |
+          python3 -m venv bench/compare/.venv
+          bench/compare/.venv/bin/pip install --upgrade pip
+          bench/compare/.venv/bin/pip install -r bench/compare/requirements.txt
+
+      - name: Build + run the comparison
+        run: |
+          make bench-compare-build
+          make bench-compare
+
+      - name: Compose comparison report
+        run: |
+          bash bench/compare/ci-report.sh | tee bench/compare/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-compare-results
+          path: |
+            bench/compare/results.csv
+            bench/compare/report.md
+          retention-days: 90
