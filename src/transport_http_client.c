@@ -42,6 +42,100 @@
 #include <strings.h>
 #include <time.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+/* ====================================================================== */
+/* SSRF egress guard (axis G.2)                                            */
+/* ====================================================================== */
+/* cmcp_transport_http_connect dials whatever URL it is handed. A hostile
+ * MCP server — or a poisoned OAuth/discovery document (see the threat
+ * model in docs/, guide Ch.6.1) — can point the client at link-local,
+ * cloud-metadata, or private addresses to coax it into Server-Side
+ * Request Forgery: http://169.254.169.254/ for cloud IAM credentials,
+ * an intranet admin panel, an unauthenticated Redis on 127.0.0.1, etc.
+ * We refuse to *connect* to such addresses by default.
+ *
+ * The check runs in libcurl's CURLOPT_OPENSOCKETFUNCTION, which fires
+ * with the *resolved* peer address immediately before connect(). Vetting
+ * the resolved address — not the URL hostname — is what defeats DNS
+ * rebinding: a name that resolved public at validation time but flips to
+ * 169.254.x.x by connect time is still caught here, on every attempt.
+ *
+ * Loopback (127/8, ::1) is deliberately NOT blocked: a server you spawned
+ * on your own machine is inside your trust boundary, it is the dominant
+ * legitimate local-server case, and the whole HTTP test/soak/conformance
+ * infrastructure dials 127.0.0.1. The blocked set is the "egress to
+ * someone else's internal network" class: cloud metadata + link-local,
+ * RFC1918, CGNAT, ULA.
+ *
+ * Default-on. CMCP_HTTP_ALLOW_PRIVATE=1 disables the guard entirely for
+ * an intranet MCP server you own. Snapshotted once via pthread_once
+ * (zero per-connection getenv cost). */
+
+static int            g_allow_private      = 0;
+static pthread_once_t  g_allow_private_once = PTHREAD_ONCE_INIT;
+
+static void allow_private_init(void) {
+    const char *v = getenv("CMCP_HTTP_ALLOW_PRIVATE");
+    /* Truthy = set and not an obvious off value ("0"/"n"/"f"...). */
+    if (v && *v && *v != '0' && *v != 'n' && *v != 'N' &&
+        *v != 'f' && *v != 'F')
+        g_allow_private = 1;
+}
+
+static int allow_private(void) {
+    pthread_once(&g_allow_private_once, allow_private_init);
+    return g_allow_private;
+}
+
+/* 1 if `sa` is in a range we refuse to dial. Loopback is allowed (see
+ * the block comment above). IPv4-mapped IPv6 (::ffff:a.b.c.d) is
+ * unwrapped and re-checked as IPv4. Unknown address families are refused
+ * (fail-closed). Non-static + cmcp_-prefixed so tests can drive it
+ * without a network; not declared in any public header. */
+int cmcp_http_addr_blocked(const struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+        uint32_t a  = ntohl(((const struct sockaddr_in *)sa)->sin_addr.s_addr);
+        uint8_t  o1 = (uint8_t)(a >> 24), o2 = (uint8_t)(a >> 16);
+        if (o1 == 10)                         return 1; /* 10/8        RFC1918    */
+        if (o1 == 192 && o2 == 168)           return 1; /* 192.168/16  RFC1918    */
+        if (o1 == 172 && (o2 & 0xf0) == 16)   return 1; /* 172.16/12   RFC1918    */
+        if (o1 == 169 && o2 == 254)           return 1; /* 169.254/16  link-local + cloud metadata */
+        if (o1 == 100 && (o2 & 0xc0) == 64)   return 1; /* 100.64/10   CGNAT      */
+        return 0;                                        /* 127/8 loopback + public: allowed */
+    }
+    if (sa->sa_family == AF_INET6) {
+        const uint8_t *b = ((const struct sockaddr_in6 *)sa)->sin6_addr.s6_addr;
+        static const uint8_t v4map[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+        if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return 1; /* fe80::/10 link-local */
+        if ((b[0] & 0xfe) == 0xfc) return 1;             /* fc00::/7  ULA     */
+        if (memcmp(b, v4map, 12) == 0) {                 /* ::ffff:v4 → recheck */
+            struct sockaddr_in v4;
+            memset(&v4, 0, sizeof v4);
+            v4.sin_family = AF_INET;
+            memcpy(&v4.sin_addr.s_addr, b + 12, 4);
+            return cmcp_http_addr_blocked((const struct sockaddr *)&v4);
+        }
+        return 0;                                        /* ::1 loopback + public: allowed */
+    }
+    return 1;
+}
+
+/* libcurl CURLOPT_OPENSOCKETFUNCTION: vet the resolved peer, then make
+ * the socket exactly as libcurl's default would. Returning
+ * CURL_SOCKET_BAD aborts the connection (surfaces as a curl error, which
+ * write_fn/the SSE loop already map to a transport error). */
+static curl_socket_t guarded_opensocket(void *clientp, curlsocktype purpose,
+                                        struct curl_sockaddr *address) {
+    (void)clientp;
+    if (purpose == CURLSOCKTYPE_IPCXN && !allow_private() &&
+        cmcp_http_addr_blocked(&address->addr))
+        return CURL_SOCKET_BAD;
+    return socket(address->family, address->socktype, address->protocol);
+}
+
 /* ====================================================================== */
 /* Frame queue                                                              */
 /* ====================================================================== */
@@ -230,6 +324,8 @@ static int do_post(http_client_impl_t *impl,
     curl_easy_setopt(c, CURLOPT_HEADERDATA,     &ps);
     curl_easy_setopt(c, CURLOPT_TIMEOUT,        30L);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL,       1L);
+    curl_easy_setopt(c, CURLOPT_OPENSOCKETFUNCTION, guarded_opensocket);
+    curl_easy_setopt(c, CURLOPT_OPENSOCKETDATA,     NULL);
 
     CURLcode rc = curl_easy_perform(c);
     long status = 0;
@@ -492,6 +588,8 @@ static void *sse_thread_main(void *arg) {
         curl_easy_setopt(c, CURLOPT_NOPROGRESS,       0L);
         curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, sse_progress_cb);
         curl_easy_setopt(c, CURLOPT_XFERINFODATA,     impl);
+        curl_easy_setopt(c, CURLOPT_OPENSOCKETFUNCTION, guarded_opensocket);
+        curl_easy_setopt(c, CURLOPT_OPENSOCKETDATA,     NULL);
 
         CURLcode perform_rc = curl_easy_perform(c);
         long status = 0;
