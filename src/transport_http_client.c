@@ -90,21 +90,29 @@ static int allow_private(void) {
     return g_allow_private;
 }
 
-/* 1 if `sa` is in a range we refuse to dial. Loopback is allowed (see
- * the block comment above). IPv4-mapped IPv6 (::ffff:a.b.c.d) is
- * unwrapped and re-checked as IPv4. Unknown address families are refused
- * (fail-closed). Non-static + cmcp_-prefixed so tests can drive it
- * without a network; not declared in any public header. */
+/* 1 if a host-byte-order IPv4 address is in a range we refuse to dial.
+ * Loopback (127/8) and public addresses are allowed; see the block
+ * comment above for why loopback is in. */
+static int v4_host_blocked(uint32_t a) {
+    uint8_t o1 = (uint8_t)(a >> 24), o2 = (uint8_t)(a >> 16);
+    if (o1 == 10)                       return 1; /* 10/8        RFC1918    */
+    if (o1 == 192 && o2 == 168)         return 1; /* 192.168/16  RFC1918    */
+    if (o1 == 172 && (o2 & 0xf0) == 16) return 1; /* 172.16/12   RFC1918    */
+    if (o1 == 169 && o2 == 254)         return 1; /* 169.254/16  link-local + cloud metadata */
+    if (o1 == 100 && (o2 & 0xc0) == 64) return 1; /* 100.64/10   CGNAT      */
+    return 0;
+}
+
+/* 1 if `sa` is in a range we refuse to dial. IPv4-mapped IPv6
+ * (::ffff:a.b.c.d) is unwrapped and re-checked as IPv4 — by reading the
+ * embedded bytes directly (no recursion, no sockaddr re-cast), which
+ * keeps the address-family read unambiguous for the optimizer. Unknown
+ * families are refused (fail-closed). Non-static + cmcp_-prefixed so
+ * tests can drive it without a network; not in any public header. */
 int cmcp_http_addr_blocked(const struct sockaddr *sa) {
     if (sa->sa_family == AF_INET) {
-        uint32_t a  = ntohl(((const struct sockaddr_in *)sa)->sin_addr.s_addr);
-        uint8_t  o1 = (uint8_t)(a >> 24), o2 = (uint8_t)(a >> 16);
-        if (o1 == 10)                         return 1; /* 10/8        RFC1918    */
-        if (o1 == 192 && o2 == 168)           return 1; /* 192.168/16  RFC1918    */
-        if (o1 == 172 && (o2 & 0xf0) == 16)   return 1; /* 172.16/12   RFC1918    */
-        if (o1 == 169 && o2 == 254)           return 1; /* 169.254/16  link-local + cloud metadata */
-        if (o1 == 100 && (o2 & 0xc0) == 64)   return 1; /* 100.64/10   CGNAT      */
-        return 0;                                        /* 127/8 loopback + public: allowed */
+        return v4_host_blocked(
+            ntohl(((const struct sockaddr_in *)sa)->sin_addr.s_addr));
     }
     if (sa->sa_family == AF_INET6) {
         const uint8_t *b = ((const struct sockaddr_in6 *)sa)->sin6_addr.s6_addr;
@@ -112,11 +120,9 @@ int cmcp_http_addr_blocked(const struct sockaddr *sa) {
         if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return 1; /* fe80::/10 link-local */
         if ((b[0] & 0xfe) == 0xfc) return 1;             /* fc00::/7  ULA     */
         if (memcmp(b, v4map, 12) == 0) {                 /* ::ffff:v4 → recheck */
-            struct sockaddr_in v4;
-            memset(&v4, 0, sizeof v4);
-            v4.sin_family = AF_INET;
-            memcpy(&v4.sin_addr.s_addr, b + 12, 4);
-            return cmcp_http_addr_blocked((const struct sockaddr *)&v4);
+            uint32_t a = ((uint32_t)b[12] << 24) | ((uint32_t)b[13] << 16) |
+                         ((uint32_t)b[14] <<  8) |  (uint32_t)b[15];
+            return v4_host_blocked(a);
         }
         return 0;                                        /* ::1 loopback + public: allowed */
     }
