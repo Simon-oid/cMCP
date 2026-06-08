@@ -144,24 +144,63 @@ graph LR
 
 ---
 
-## 3. Performance (guide Ch.4)
+## 3. cMCP vs the state of the art (guide Ch.4)
 
-Steady-state stdio `tools/call` throughput, single host ↔ server pair.
-Per the guide's metric priority (Ch.4.2), reliability is primary and
-latency is comfortably inside the sub-millisecond band that disappears
-inside an LLM inference cycle.
+Measured head-to-head against the **official reference SDKs**: the same
+cMCP client, the same `tools/call echo` workload over stdio, with the
+subprocess server swapped per row (`make bench-compare`, this machine,
+2026-06-08, 10 000 iterations after 1 000 warmup). Per the guide's metric
+priority (Ch.4.2), latency sits far inside the sub-millisecond band that
+disappears inside an LLM inference cycle.
 
-| Implementation | calls/s | Relative throughput |
-|---|---:|:--|
-| **cMCP** | **50 487** | `████████████████████████████████████████` 1.0× |
-| TypeScript SDK | ~8 700 | `███████` 0.17× |
-| Python SDK | ~1 074 | `█` 0.02× |
+### Throughput — calls/s (higher is better)
 
-- **Latency:** p50 = 19 µs · p99 = 27 µs
-- **Speedup:** 5.8× the TS reference SDK, 47× the Python SDK
+| Server | calls/s | vs cMCP | |
+|---|---:|---:|:--|
+| **cMCP** (C11) | **43 494** | **1.0×** | `████████████████████████████████████████` |
+| TypeScript SDK (Node) | 8 035 | 0.18× | `███████` |
+| Python SDK (FastMCP) | 974 | 0.02× | `█` |
+
+→ cMCP sustains **5.4× the TypeScript SDK** and **45× the Python SDK**.
+
+### Per-call latency — µs (lower is better)
+
+| Server | p50 | p99 | mean |
+|---|---:|---:|---:|
+| **cMCP** | **21** | **31** | **22** |
+| TypeScript SDK | 95 | 189 | 123 |
+| Python SDK | 994 | 1 315 | 1 025 |
+
+### Idle memory footprint — RSS (lower is better)
+
+| Server | idle RSS | vs cMCP | |
+|---|---:|---:|:--|
+| **cMCP** (328 KB static binary) | **2.2 MB** | **1.0×** | `█` |
+| Python SDK (FastMCP) | 60 MB | 27× | `███████████████████████████` |
+| TypeScript SDK (Node) | 74 MB | 33× | `█████████████████████████████████` |
+
+### Why the gap
+
+| | cMCP | TypeScript SDK | Python SDK |
+|---|---|---|---|
+| Language / runtime | C11, native | Node.js | CPython |
+| Third-party deps | none* | npm (`sdk`, `zod`) | pip (`mcp`/FastMCP) |
+| Server artifact | 328 KB static binary | runtime + `node_modules` | interpreter + venv |
+| Conformance | cross-checked vs the TS reference SDK, both wire roles | reference | — |
+
+\* libcurl is linked only by the HTTP *client*; a stdio server carries
+zero third-party dependencies.
+
+- **cMCP's pure in-process ceiling** (no subprocess, inline pipe pair) is
+  **50 487 calls/s at p50 = 19 µs** — the cross-SDK rows above each pay
+  one subprocess hop so all three are measured identically.
 - **Resilience knobs (Ch.4.1 spike/idle traffic):** HTTP accept-rate
   token bucket, per-recv idle timeout + cumulative deadline (slowloris),
   stdio/HTTP frame caps (OOM).
+
+> Numbers vary per machine/kernel/build; regenerate with
+> `make bench-compare`. Wire-compatibility with the reference SDK is
+> separately gated by `make conformance` (both directions).
 
 ---
 
