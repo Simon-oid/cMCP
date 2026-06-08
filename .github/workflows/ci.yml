@@ -25,7 +25,7 @@ jobs:
       matrix:
         target: [test, test-asan, test-tsan]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -73,7 +73,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build + coverage dependencies
         run: |
@@ -88,7 +88,7 @@ jobs:
       - name: Restore coverage baseline (Tier 7.4)
         id: restore-cov
         if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: coverage-baseline/summary.txt
           key: coverage-baseline-main-${{ github.event.pull_request.base.sha }}
@@ -169,7 +169,7 @@ jobs:
 
       - name: Cache coverage baseline (Tier 7.4)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: coverage-baseline/summary.txt
           key: coverage-baseline-main-${{ github.sha }}
@@ -177,7 +177,7 @@ jobs:
       # Upload the genhtml output so reviewers can browse line-by-line.
       # Retention is the default (90 days) — coverage HTML is small.
       - name: Upload coverage HTML
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: coverage/html/
@@ -187,7 +187,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build + analysis dependencies
         run: |
@@ -208,7 +208,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build + bench dependencies
         run: |
@@ -261,7 +261,7 @@ jobs:
       # required because a bare leading `!` is a YAML tag indicator.
       - name: Upload bench run CSVs
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-runs
           path: |
@@ -273,7 +273,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       # cmake is the only non-default dep on top of ci's libcurl baseline.
       # The smoke harness gates both pkg-config + CMake find_package wiring,

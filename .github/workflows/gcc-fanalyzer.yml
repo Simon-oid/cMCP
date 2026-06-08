@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
@@ -49,7 +49,7 @@ jobs:
 
       - name: Upload full log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fanalyzer-log
           path: /tmp/fanalyzer.log

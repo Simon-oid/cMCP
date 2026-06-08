@@ -38,14 +38,14 @@ jobs:
     env:
       CMCP_BENCH_N: ${{ github.event.inputs.iterations || '10000' }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
 
@@ -68,7 +68,7 @@ jobs:
           bash bench/compare/ci-report.sh | tee bench/compare/report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-compare-results
           path: |

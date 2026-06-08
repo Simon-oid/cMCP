@@ -45,10 +45,10 @@ jobs:
     # slower than the ~minutes it takes natively, but well inside this.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Build + test on aarch64
-        uses: uraimo/run-on-arch-action@v2
+        uses: uraimo/run-on-arch-action@v3
         with:
           arch: aarch64
           # Debian bookworm == current stable, matching the by-hand
