@@ -1,0 +1,362 @@
+\documentclass[10pt]{article}
+
+\usepackage[a4paper,margin=22mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{secblue}{HTML}{1F4E8C}
+\definecolor{rulegrey}{HTML}{888888}
+\definecolor{codebg}{HTML}{F1F5F9}
+
+\titleformat{\section}{\large\bfseries\color{secblue}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{secblue}}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{12pt}{5pt}
+\titlespacing*{\subsection}{0pt}{8pt}{3pt}
+
+\captionsetup{font=small,labelfont=bf,labelsep=period}
+\setlist[itemize]{leftmargin=1.4em,itemsep=2pt,topsep=3pt}
+\renewcommand{\arraystretch}{1.15}
+
+% inline code
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+% ---------------------------------------------------------------- title block
+\begin{center}
+  {\LARGE\bfseries cMCP --- Engineering Report}\\[4pt]
+  {\normalsize A from-scratch Model Context Protocol implementation in pure C11,\\
+   measured for spec conformance, performance, and hardening}\\[6pt]
+  {\small\color{rulegrey} Generated 2026-06-09 \quad\textbullet\quad
+   pure C11, three static link targets, no third-party JSON / MCP SDK}
+\end{center}
+\vspace{-2pt}
+{\color{secblue}\hrule height 1.2pt}
+\vspace{6pt}
+
+% ================================================================= 1
+\section{Executive summary}
+
+cMCP is a from-scratch implementation of the Model Context Protocol (MCP) in
+pure C11. It is a \emph{library}, not an application: it ships three static
+link targets (\code{libcmcp\_core.a}, \code{libcmcp\_server.a},
+\code{libcmcp\_client.a}) plus reference binaries. The JSON parser, JSON-RPC
+framing, JSON-Schema subset validator, and all three transports are
+hand-rolled; the only third-party dependency is \code{libcurl}, linked by the
+HTTP \emph{client} alone. This report states what the implementation actually
+does on the wire, how fast it is against the official reference SDKs, and how
+it behaves under an adversarial peer --- and is careful about \emph{what} each
+claim licenses.
+
+\begin{itemize}
+  \item \textbf{It is spec-faithful, and that is measured, not asserted.}
+    cMCP is cross-checked against the TypeScript reference SDK in
+    \emph{both} wire roles --- cMCP-client driving a TS server (32 assertions)
+    and a TS client driving a cMCP server (8 checks) --- plus a captured-wire
+    replay gate and a weekly spec-drift watch against the upstream spec.
+  \item \textbf{It is fast where it matters and tiny at rest.} On the one
+    apples-to-apples workload (\code{tools/call echo} over stdio, same client,
+    server swapped) cMCP sustains \textbf{43\,494 calls/s} --- \textbf{5.4$\times$}
+    the TypeScript SDK and \textbf{45$\times$} the Python SDK --- at a p50 of
+    \textbf{21\,\textmu s}. A stdio server idles at \textbf{2.2\,MB} RSS, $27$--$33\times$
+    lighter than the interpreted SDKs, from a 328\,KB static binary.
+  \item \textbf{It is hardened against a hostile peer.} A STRIDE threat model
+    drives concrete controls: an SSRF egress guard (DNS-rebinding-safe),
+    schema validation \emph{before} dispatch, parse depth/element caps, stdio
+    and HTTP frame caps, slowloris timeouts plus an accept-rate token bucket,
+    and a credential log-redactor. Each maps to a named test.
+  \item \textbf{The full quality gate passes clean.} 3\,885 assertions across
+    30 test binaries, green under Valgrind, ASan/UBSan, and ThreadSanitizer;
+    four libFuzzer harnesses; and a soak driver that shows no drift over long
+    stdio and HTTP runs. Every gate is wired into CI.
+  \item \textbf{It is scoped for stdio-primary, single-tenant embedding.}
+    The design point is a host process (\textbf{butlerbot}) linking the client
+    library to drive tools over stdio. HTTP is supported and hardened, but the
+    network surface is \emph{defensive depth}; TLS and application-layer
+    authentication are deliberately the reverse proxy's job (\S6), not a
+    ``later'' item.
+\end{itemize}
+
+% ================================================================= 2
+\section{Conformance: spec-faithful on the wire}
+
+For a protocol library the central quality question is not ``does it run'' but
+``does it produce \emph{exactly} the bytes the spec requires, and interoperate
+with an independent implementation.'' cMCP answers this with cross-implementation
+checks in both directions rather than self-consistency alone.
+
+\begin{itemize}
+  \item \textbf{cMCP client vs.\ TS reference server} (\code{make conformance},
+    32 assertions): the cMCP async client runs the full handshake against the
+    official TypeScript SDK server and exercises \code{tools/list},
+    \code{tools/call}, \code{resources}, and \code{prompts}.
+  \item \textbf{TS client vs.\ cMCP server} (8 checks): the reference TS client
+    drives the cMCP \code{echo-server}, confirming the cMCP \emph{server} side
+    is wire-compatible from the other direction.
+  \item \textbf{Replay regression gate} (\code{make replay}): real wire
+    transcripts captured through the \code{cmcp-tee} proxy are replayed and
+    diffed, so a framing change cannot regress silently.
+  \item \textbf{Spec-drift watch} (\code{make check-spec-drift}, weekly CI):
+    compares the pinned \code{CMCP\_PROTOCOL\_VERSION} against the upstream
+    spec directories and flags a divergence before it becomes a bug.
+\end{itemize}
+
+Two conformance details are worth calling out because they are easy to get
+wrong and are pinned by test:
+
+\textbf{Dual error channels.} A \code{tools/call} whose arguments fail schema
+validation surfaces as a \emph{tool-level} result
+(\code{\{isError:true, content:[\dots]\}}), not a JSON-RPC error --- matching
+the TS reference SDK and wire-compatible with it. The \code{-32602} error
+\emph{channel} instead carries protocol-level rejections (unknown tool,
+malformed \code{protocolVersion}). A correct host must check both channels;
+cMCP pins this with \code{test\_schema} and the host-probe.
+
+\textbf{Version-tolerant handshake.} cMCP pins one protocol version per release
+but does not abort when a peer advertises a different one: per spec the server
+responds with success and advertises its own version, and the client captures
+the server's version and lets the host decide whether to disconnect. Only a
+missing or malformed \code{protocolVersion} yields a hard error.
+
+\textbf{Schema is a documented subset.} The validator covers \code{type}
+(incl.\ array-of-types), \code{properties}, \code{required},
+\code{additionalProperties:false}, \code{enum}, \code{minLength}/\code{maxLength}
+(Unicode code points), \code{minimum}/\code{maximum}, and \code{items}. It does
+\emph{not} implement \code{\$ref}, \code{oneOf}/\code{anyOf}/\code{allOf},
+\code{format}, or \code{pattern} in v0.1 --- a deliberate, documented scope
+(\code{docs/schema-conformance.md}), not a silent gap.
+
+% ================================================================= 3
+\section{Performance vs.\ the state of the art}
+
+The comparison below is deliberately apples-to-apples: the \emph{same} cMCP
+client issues the \emph{same} \code{tools/call echo} workload over stdio, and
+only the subprocess server is swapped per row. All three implementations pay
+exactly one subprocess hop, so the measurement isolates the server runtime.
+Numbers are 10\,000 iterations after a 1\,000-iteration warmup on the
+development machine (\code{make bench-compare}, 2026-06-08).
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.92\linewidth]{fig_throughput.png}
+  \caption{Throughput on the one apples-to-apples engine comparison. Green is
+  this work; grey are the official reference SDKs running the identical
+  client and workload.}
+\end{figure}
+
+\begin{table}[ht]
+  \centering
+  \caption{Throughput, latency, and idle footprint. Latency is per round-trip;
+  RSS is an idle stdio server.}
+  \begin{tabular}{l r r r r r}
+    \toprule
+    Server & calls/s & vs cMCP & p50 (\textmu s) & p99 (\textmu s) & idle RSS \\
+    \midrule
+    \textbf{cMCP} (C11)      & \textbf{43\,494} & \textbf{1.0$\times$} & \textbf{21} & \textbf{31}   & \textbf{2.2\,MB} \\
+    TypeScript SDK (Node)    & 8\,035           & 0.18$\times$         & 95          & 189           & 74\,MB \\
+    Python SDK (FastMCP)     & 974              & 0.02$\times$         & 994         & 1\,315        & 60\,MB \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.78\linewidth]{fig_latency.png}\\[2pt]
+  \includegraphics[width=0.78\linewidth]{fig_rss.png}
+  \caption{Per-call latency (log axis) and idle memory footprint. cMCP's p99
+  (31\,\textmu s) sits below the other implementations' p50; its idle RSS is a
+  rounding error next to an interpreter and its \code{node\_modules}/venv.}
+\end{figure}
+
+\subsection{Why the gap --- and what the comparison licenses}
+
+The spread is a \emph{runtime} story, not a protocol one. cMCP is native C11
+with no interpreter, no GC, and (for a stdio server) zero third-party
+dependencies: the server artifact is a 328\,KB static binary. The TypeScript
+SDK carries a Node runtime plus \code{node\_modules} (\code{sdk}, \code{zod});
+the Python SDK carries CPython plus a venv. The honest reading is that this is
+an \textbf{engine / footprint comparison}, exactly the regime where a compiled
+language wins, and \emph{not} a claim of feature parity --- the reference SDKs
+ship a richer ecosystem (decorators, type-driven schema, framework
+integrations) that cMCP intentionally does not. What the chart does license is
+the deployment claim: at the \emph{butlerbot} embedding point, the protocol
+layer costs microseconds and a couple of megabytes, so it disappears inside an
+LLM inference cycle.
+
+For reference, cMCP's pure in-process ceiling (no subprocess, inline pipe pair)
+is \textbf{50\,487 calls/s at p50 = 19\,\textmu s}; the cross-SDK rows each pay
+the subprocess hop so all three are measured identically. Because hardware and
+kernel move these numbers, a weekly \code{bench-compare} CI job re-runs the
+comparison and posts a fresh table to its run summary, so the published
+snapshot never silently goes stale.
+
+% ================================================================= 4
+\section{Test posture and quality gates}
+
+cMCP's suites map onto the standard Unit $\rightarrow$ Integration $\rightarrow$
+Evaluation pyramid, with a security/hardening axis that cuts across all layers.
+The hermetic \code{make test} run is 3\,885 assertions across 30 binaries.
+
+\begin{figure}[ht]
+  \centering
+  \includegraphics[width=0.92\linewidth]{fig_pyramid.png}
+  \caption{Where the assertions live. L3 (cross-implementation evaluation) is
+  opt-in --- it needs Node and network --- so it is excluded from the hermetic
+  count and reported separately in \S2.}
+\end{figure}
+
+\begin{table}[ht]
+  \centering
+  \caption{Quality gates, all wired into CI; green as of 2026-06-08.}
+  \begin{tabular}{l l l}
+    \toprule
+    Gate & Command & What it proves \\
+    \midrule
+    Unit + integration   & \code{make test}            & 3\,885 assertions / 30 binaries \\
+    Memory safety        & \code{make valgrind}        & leak-free, no invalid access \\
+    ASan + UBSan         & \code{make test-asan}       & no heap / undefined-behaviour errors \\
+    ThreadSanitizer      & \code{make test-tsan}       & no data races \\
+    Fuzzing              & \code{make fuzz-smoke}      & 4 libFuzzer harnesses (json/rpc/schema/http) \\
+    Wire regression      & \code{make replay}          & captured-transcript replay diff \\
+    Soak (stdio + HTTP)  & \code{make soak}            & no drift over long runs \\
+    Cross-impl conformance & \code{make conformance}   & matches TS reference SDK, both roles \\
+    Spec-drift watch     & \code{make check-spec-drift}& pinned protocol vs.\ upstream spec \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The integration tier is not mocked: \code{test\_stdio\_roundtrip} actually
+\code{fork()}s a child server and runs a real handshake, and
+\code{test\_client\_server} wires real \code{cmcp\_server\_run} instances onto
+pipe pairs to exercise the async client and multi-server session end-to-end.
+The concurrency model under test is one reader thread per transport, handlers
+on a small worker pool, and a single writer mutex per transport --- TSan-clean.
+
+% ================================================================= 5
+\section{Robustness and security (hardening)}
+
+cMCP is a protocol library, so the trust model is precise: the host is trusted
+(cMCP runs in its address space), but the \emph{peer} on the other end of a
+transport may be hostile or buggy and its input is untrusted. The hardening
+maps a STRIDE threat catalogue onto concrete, individually-tested controls.
+
+\begin{table}[ht]
+  \centering
+  \caption{Threat $\rightarrow$ control $\rightarrow$ test. Every control is
+  reachable from an environment knob and pinned by a named suite.}
+  \begin{tabular}{p{0.30\linewidth} p{0.42\linewidth} p{0.20\linewidth}}
+    \toprule
+    Threat & Control & Test \\
+    \midrule
+    SSRF via discovery & egress guard on the \emph{resolved} peer (rejects
+      metadata / link-local / RFC1918 / CGNAT / ULA); DNS-rebinding-safe
+      & \code{test\_http\_ssrf\_guard} \\
+    DNS rebinding & \code{Origin} allow-list on the HTTP server
+      & \code{test\_http\_server} \\
+    Insecure deserialization & schema validation \emph{before} dispatch; parse
+      depth + per-container element caps
+      & \code{test\_schema}, \code{test\_hostile\_peer} \\
+    Memory-bomb / OOM & stdio frame cap, HTTP body cap, handler \code{RLIMIT\_AS}
+      & \code{test\_stdio\_frame\_cap}, \code{test\_handler\_rlimit} \\
+    Slowloris / spike & accept-rate token bucket, per-recv idle timeout +
+      cumulative deadline
+      & \code{test\_hardening\_cross\_knob} \\
+    Credential leakage & log redactor over credential-shaped keys
+      & \code{test\_http\_auth}, \code{test\_logging} \\
+    Malformed / hostile peer & bounded parsers, fail-closed framing
+      & \code{test\_hostile\_peer} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The controls are layered front-to-back: a request crosses the \code{Origin}
+allow-list and SSRF guard, then frame / body / depth / element caps, then
+schema validation, then rate-limit and idle/deadline timeouts, before a handler
+runs on the worker pool under \code{RLIMIT\_AS}; anything the handler logs
+passes the credential redactor on the way out. Each is governed by a snapshot-once
+environment knob (e.g.\ \code{CMCP\_HTTP\_ALLOW\_PRIVATE},
+\code{CMCP\_JSON\_MAX\_DEPTH}, \code{CMCP\_STDIO\_MAX\_FRAME},
+\code{CMCP\_HTTP\_ACCEPT\_RATE}, \code{CMCP\_LOG\_REDACT}), so an operator can
+tune or disable a control for an environment they own without recompiling.
+Beyond the unit gates, four libFuzzer harnesses drive the JSON, JSON-RPC,
+schema, and HTTP-head parsers against curated corpora, and the soak driver runs
+the stdio and HTTP servers for long windows (with optional server respawn) to
+prove no leak or drift accumulates.
+
+% ================================================================= 6
+\section{Operating envelope --- scope and deliberate non-goals}
+
+A report owes an honest answer to ``what is this \emph{not} for.'' cMCP's design
+point is a host process linking the client library to drive one or more MCP
+servers over stdio, single-tenant. The network surface exists and is hardened,
+but two large areas are deliberately out of scope --- by architecture, not by
+omission.
+
+\textbf{TLS is terminator-only.} cMCP links no TLS library. A protocol library
+is the wrong layer to own cert rotation, OCSP stapling, and session resumption;
+the state-of-the-art shape for a JSON-RPC server is behind nginx / caddy /
+Envoy, which already do TLS, HTTP/2, and rate-limiting better than a
+single-purpose library could, and linking a TLS stack would force one
+implementation choice on every downstream. This is an architectural decision
+for cMCP's lifetime, not a ``TLS later'' position; the proxy recipes (including
+\code{X-Forwarded-Proto} trust) live in \code{docs/deployment-tls.md}.
+
+\textbf{Application-layer authentication is the terminator's job.} OAuth\,2.1 /
+API keys / mTLS user identification happen at the proxy; cMCP receives the
+already-authenticated request and trusts it. Likewise out of scope: handler-level
+resource exhaustion (disk, egress, child processes --- the handler decides
+what is safe), cryptographic correctness beyond the single CSPRNG read used to
+mint session ids, and timing side channels (constant-time session-id compare is
+not implemented, a documented low-risk gap that requires near-position
+privilege to exploit).
+
+cMCP is intentionally \emph{not} cRAG-shaped: cRAG is one example consumer
+(wrapped by the in-tree \code{crag-mcp} reference server), not a privileged
+dependency, and no cRAG-specific code path lives inside \code{src/}.
+
+% ================================================================= 7
+\section{Methodology and honest caveats}
+
+\begin{itemize}
+  \item \textbf{Performance numbers are machine-specific.} They come from
+    \code{make bench-compare} on the development box; kernel, build flags, and
+    hardware move them. The weekly \code{bench-compare} CI job re-runs the
+    comparison so the snapshot stays current; treat absolute values as
+    indicative and the \emph{ratios} as the durable signal.
+  \item \textbf{The cross-SDK comparison is engine-level.} All three rows run
+    the identical client and workload and pay one subprocess hop, so the
+    comparison is fair --- but it measures runtime and footprint, not feature
+    parity. The reference SDKs offer ecosystem conveniences cMCP does not.
+  \item \textbf{L3 evaluation is opt-in.} The cross-implementation conformance
+    and replay checks need Node and network, so they sit outside the hermetic
+    \code{make test} gate and are reported separately. The 3\,885-assertion
+    figure is the offline floor, not the ceiling.
+  \item \textbf{The schema validator is a documented v0.1 subset.} Unsupported
+    keywords (\code{\$ref}, \code{oneOf}/\code{anyOf}/\code{allOf},
+    \code{format}, \code{pattern}) are listed, not silently dropped.
+  \item \textbf{The threat model is stdio-primary.} HTTP-axis controls
+    (SSRF, origin, slowloris, accept-rate) are defensive depth for a surface
+    that, in the target deployment, sits behind a trusted terminator.
+\end{itemize}
+
+\vfill
+{\color{rulegrey}\hrule height 0.6pt}
+\vspace{4pt}
+{\small\color{rulegrey}
+cMCP --- pure C11, three static link targets, no third-party JSON / MCP SDK.
+All figures reproducible: \code{make test}, \code{make bench-compare},
+\code{make conformance}, \code{make replay}.}
+
+\end{document}

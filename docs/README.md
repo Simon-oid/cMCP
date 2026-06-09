@@ -25,7 +25,7 @@ Design notes, operational guides, and policy for the cMCP library. Start with
 
 ## Quality gates (nightly / CI)
 
-- [`testing-overview.md`](testing-overview.md) — visual map of the test pyramid, assertion counts, quality gates, performance, and security controls (framed against the RAG/MCP testing guide).
+- [`cmcp-engineering-report.pdf`](cmcp-engineering-report.pdf) — the headline engineering report: spec conformance (cross-impl vs the TS reference SDK), performance vs the official SDKs, test posture + quality gates, hardening, and operating envelope. Source in `cmcp-engineering-report.tex`; rebuild with `scripts/build-report.sh`.
 - [`fuzz-nightly.md`](fuzz-nightly.md) — nightly libFuzzer baselines + weekly corpus fold (Tier 7.2).
 - [`soak-nightly.md`](soak-nightly.md) — long-running stability soak (Tier 7.3).
 - [`coverage-policy.md`](coverage-policy.md) — coverage targets and the delta gate (Tier 7.4).

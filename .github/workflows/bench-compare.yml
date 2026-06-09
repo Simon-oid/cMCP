@@ -5,7 +5,7 @@
 #
 # It does NOT commit anything: CI-runner perf numbers are noisy and
 # machine-dependent (the repo gitignores results.csv for that reason), so
-# the published snapshot in docs/testing-overview.md stays the canonical
+# the published snapshot in docs/cmcp-engineering-report.pdf stays the canonical
 # reference. This workflow is the always-fresh, on-demand view — open the
 # run, read the summary; a relative-standing regression is visible there.
 

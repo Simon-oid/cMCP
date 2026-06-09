@@ -10,7 +10,7 @@
 #
 # Numbers are indicative — CI runners are shared/virtualised, so absolute
 # throughput varies run to run. The canonical published numbers come from
-# a controlled box (see docs/testing-overview.md); this report exists so
+# a controlled box (see docs/cmcp-engineering-report.pdf, §3); this report exists so
 # the comparison never goes stale and a relative-standing change is visible.
 
 set -u
@@ -67,7 +67,7 @@ END {
 
     print "## cMCP vs reference SDKs — `make bench-compare` (" date ", CI runner)"
     print ""
-    print "_Indicative: CI runners are shared/virtualised. Canonical numbers live in docs/testing-overview.md._"
+    print "_Indicative: CI runners are shared/virtualised. Canonical numbers live in docs/cmcp-engineering-report.pdf (section 3)._"
     print ""
 
     print "### Throughput — calls/s (higher is better)"

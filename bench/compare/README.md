@@ -25,8 +25,8 @@ The [`bench-compare`](../../.github/workflows/bench-compare.yml) workflow
 stale: it runs the bench on a CI runner and publishes `ci-report.sh`'s
 table to the run summary + a CSV artifact. It deliberately does **not**
 commit anything — runner numbers are noisy, so the snapshot in
-[`docs/testing-overview.md`](../../docs/testing-overview.md) stays the
-canonical reference.
+[`docs/cmcp-engineering-report.pdf`](../../docs/cmcp-engineering-report.pdf)
+(section 3) stays the canonical reference.
 
 `results.csv` is produced by `make bench-compare` and is gitignored
 (numbers vary per machine, per kernel, per build flags). The
