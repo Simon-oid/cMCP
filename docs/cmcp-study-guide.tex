@@ -1,0 +1,777 @@
+\documentclass[10pt]{article}
+
+\usepackage[a4paper,margin=22mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{fancyvrb}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{secblue}{HTML}{1F4E8C}
+\definecolor{rulegrey}{HTML}{888888}
+\definecolor{codebg}{HTML}{F1F5F9}
+
+\titleformat{\part}{\Large\bfseries\color{secblue}}{Part \thepart.}{0.6em}{}
+\titleformat{\section}{\large\bfseries\color{secblue}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{secblue}}{\thesubsection}{0.6em}{}
+\titlespacing*{\section}{0pt}{12pt}{5pt}
+\titlespacing*{\subsection}{0pt}{8pt}{3pt}
+
+\captionsetup{font=small,labelfont=bf,labelsep=period}
+\setlist[itemize]{leftmargin=1.4em,itemsep=2pt,topsep=3pt}
+\setlist[enumerate]{leftmargin=1.6em,itemsep=2pt,topsep=3pt}
+\renewcommand{\arraystretch}{1.15}
+
+% inline code
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+% verbatim diagram block on a light background
+\DefineVerbatimEnvironment{diag}{Verbatim}{fontsize=\scriptsize,frame=single,
+  framerule=0.3pt,rulecolor=\color{rulegrey},xleftmargin=4pt,xrightmargin=4pt}
+\DefineVerbatimEnvironment{ccode}{Verbatim}{fontsize=\footnotesize,frame=leftline,
+  framerule=1.2pt,rulecolor=\color{secblue},xleftmargin=8pt}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\begin{document}
+
+% ---------------------------------------------------------------- title block
+\begin{center}
+  {\LARGE\bfseries cMCP --- Study Guide}\\[4pt]
+  {\normalsize The Model Context Protocol, and how a from-scratch C11 library implements it.\\
+   A document to \emph{learn} the protocol and to \emph{read} this codebase.}\\[6pt]
+  {\small\color{rulegrey} Generated 2026-06-09 \quad\textbullet\quad
+   cMCP \code{v0.9.0} \quad\textbullet\quad protocol \code{2025-11-25} \quad\textbullet\quad pure C11}
+\end{center}
+\vspace{-2pt}
+{\color{secblue}\hrule height 1.2pt}
+\vspace{6pt}
+
+{\small\textbf{How to read this.} Part~I teaches the Model Context Protocol from
+first principles --- no C required, MCP as a specification. Part~II walks the
+cMCP source tree layer by layer and shows \emph{where} each protocol concept is
+implemented. Part~III is a guided reading order plus hands-on exercises. If you
+already know MCP, skim Part~I for cMCP's vocabulary and jump to Part~II. The
+companion documents are \code{docs/architecture.md} (the ``why'' of the
+partitioning, in prose) and \code{docs/cmcp-engineering-report.tex} (the
+\emph{measured} conformance / performance / hardening claims). This guide is the
+\emph{didactic} layer over both.}
+
+\tableofcontents
+\vspace{4pt}
+{\color{rulegrey}\hrule height 0.6pt}
+
+% =====================================================================
+\part{The Model Context Protocol}
+
+% ---------------------------------------------------------------------
+\section{What MCP is, and the problem it solves}
+
+A large language model is a function from text to text. To do anything in the
+world --- read a file, search a corpus, call an API --- it needs an external
+program to act on its behalf and feed results back into its context window. Before
+MCP, every host application (an IDE, a chat client, an agent) invented its own
+bespoke plugin protocol, and every tool author re-implemented against each host.
+That is an $M\times N$ integration problem.
+
+The \textbf{Model Context Protocol} (introduced by Anthropic as an open standard)
+collapses it to $M+N$: tools speak one protocol, hosts speak one protocol, and
+any host can drive any tool. The common analogy is ``a USB-C port for AI
+applications'' --- a single physical shape that many devices plug into.
+
+\textbf{Three roles.} An MCP deployment has exactly three kinds of participant:
+
+\begin{itemize}
+  \item \textbf{Host} --- the application the user interacts with, and the thing
+    that owns the LLM (e.g.\ Claude Desktop, an IDE, or cMCP's target consumer,
+    the \emph{butlerbot} agent). The host decides which servers to connect to and
+    whether to honour a server's requests.
+  \item \textbf{Client} --- the connector \emph{inside} the host that maintains a
+    \emph{one-to-one} session with a single server. A host with three servers
+    runs three clients. In cMCP this is \code{libcmcp\_client.a}.
+  \item \textbf{Server} --- a separate program that exposes capabilities (tools,
+    resources, prompts) over the protocol. In cMCP this is
+    \code{libcmcp\_server.a}; the reference servers are \code{filesystem-mcp} and
+    \code{crag-mcp}.
+\end{itemize}
+
+\begin{diag}
+   +------------------------- Host application -------------------------+
+   |   LLM   <-->   client A   <-->   client B   <-->   client C        |
+   +------------------|---------------|----------------|----------------+
+                      |               |                |  (one client per server,
+                      v               v                v   a 1:1 session each)
+                  Server A        Server B         Server C
+                (filesystem)     (retrieval)       (custom)
+\end{diag}
+
+The key mental model: the \textbf{client/server link is symmetric in machinery
+but asymmetric in role}. Both sides frame the same JSON-RPC, negotiate
+capabilities, and can send unsolicited messages --- but the server \emph{offers}
+primitives and the client \emph{drives} them. cMCP exploits this directly: $\sim$60\%
+of the code (framing, schema, transport, capability structs) is shared in
+\code{libcmcp\_core.a}, and only the asymmetric halves live in the server and
+client libraries.
+
+% ---------------------------------------------------------------------
+\section{The JSON-RPC 2.0 foundation}
+
+Every MCP message is a JSON-RPC 2.0 object. There are exactly three shapes, and
+understanding them is most of understanding the wire.
+
+\begin{enumerate}
+  \item \textbf{Request} --- carries \code{"id"}, \code{"method"}, optional
+    \code{"params"}. Demands a response. \emph{Example:}
+    \code{\{"jsonrpc":"2.0","id":7,"method":"tools/call","params":\{\dots\}\}}
+  \item \textbf{Response} --- carries the same \code{"id"} and \emph{either}
+    \code{"result"} (success) \emph{or} \code{"error"} (never both).
+  \item \textbf{Notification} --- a request with \emph{no} \code{"id"}. Fire and
+    forget; no response is ever sent. \emph{Example:}
+    \code{notifications/initialized}, \code{notifications/cancelled}.
+\end{enumerate}
+
+\textbf{The id space.} Ids match responses to requests. Each session has a
+single monotonic id space. The side that \emph{sends} a request owns the id and
+correlates the inbound response by it. Because both sides may send requests
+(the server can ask the host for an LLM completion, see \S5), there are
+\emph{two} id spaces per session --- one per direction --- and they are
+independent.
+
+\textbf{Error codes.} JSON-RPC defines a standard set, all reused by MCP:
+
+\begin{center}\small
+\begin{tabular}{r l l}
+\toprule
+Code & Name & Meaning \\
+\midrule
+\code{-32700} & Parse error      & Invalid JSON received \\
+\code{-32600} & Invalid request  & Not a valid Request object (e.g.\ a batch, which MCP forbids) \\
+\code{-32601} & Method not found & Unknown method, or a default-deny decline \\
+\code{-32602} & Invalid params   & Bad/missing params (e.g.\ malformed \code{protocolVersion}) \\
+\code{-32603} & Internal error   & Server-side failure (e.g.\ structured output fails its schema) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{No batching.} JSON-RPC 2.0 permits arrays of messages; MCP \emph{removed}
+batch support (since spec \code{2025-06-18}). A conformant implementation parses a
+batch only so it can reject it cleanly with \code{-32600}.
+
+\textbf{The dual error-channel subtlety (load-bearing).} There are \emph{two}
+distinct ways a \code{tools/call} can ``fail,'' and a correct host must check
+both:
+\begin{itemize}
+  \item A \textbf{protocol-level} failure (unknown tool, malformed params) is a
+    JSON-RPC \code{error} object with code \code{-32602}/\code{-32601}.
+  \item A \textbf{tool-level} failure (the tool ran but its arguments were
+    invalid, or it errored semantically) is a \emph{successful} JSON-RPC
+    \code{result} whose body is
+    \code{\{isError:true, content:[\{text:"\dots"\}]\}}.
+\end{itemize}
+This split is deliberate in the spec: ``the tool could not be invoked'' is a
+protocol error; ``the tool ran and reports a problem'' is data the model should
+see. cMCP matches the TypeScript reference SDK here and pins it by test (\S13).
+
+% ---------------------------------------------------------------------
+\section{Lifecycle: handshake and capability negotiation}
+
+An MCP session has a strict opening sequence. Nothing operational happens until
+it completes.
+
+\begin{diag}
+   client                                                          server
+   ------                                                          ------
+   initialize (protocolVersion, clientInfo, capabilities) ------->
+                <------ result (protocolVersion, serverInfo, capabilities)
+   notifications/initialized ------------------------------------>
+   =================== session is now "ready"; normal traffic ===============
+\end{diag}
+
+\textbf{Step 1 --- \code{initialize}.} The client sends its protocol version, an
+\code{clientInfo} \code{\{name, version\}}, and a \emph{capabilities} object
+declaring what \emph{it} can do (sampling? roots? elicitation?). The server
+replies with its own version, \code{serverInfo}, and \emph{its} capabilities
+(tools? resources? prompts? logging?).
+
+\textbf{Step 2 --- \code{notifications/initialized}.} The client confirms it
+processed the result. Only now may either side issue operate-class requests. A
+server that receives, say, \code{tools/call} before \code{initialized} answers
+\code{-32600}.
+
+\textbf{Version tolerance (a common mistake).} The protocol version is a date
+string (cMCP pins \code{2025-11-25}). If the peer advertises a \emph{different}
+version, this is \textbf{not} a handshake failure: the spec says respond with
+success, advertise your own version, and let the \emph{other} side decide whether
+to disconnect. Only a \emph{missing or malformed} \code{protocolVersion} is a hard
+\code{-32602}. cMCP captures the peer's version (\code{cmcp\_client\_server\_protocol})
+and proceeds.
+
+\textbf{Capability negotiation is the contract.} A capability not advertised must
+not be used. If a server never declared \code{resources.subscribe}, the client
+must not call \code{resources/subscribe}; if a client never declared
+\code{sampling}, the server must not ask it for a completion. This is the
+mechanism that keeps both ends from sending messages the other isn't prepared to
+handle. Sub-capabilities (\code{listChanged}, \code{subscribe}, \code{logging})
+are opt-in flags nested under the top-level capability.
+
+% ---------------------------------------------------------------------
+\section{The three server primitives}
+
+A server exposes three kinds of thing. Each has a \code{*/list} method to
+enumerate it and a method to act on one. Knowing who controls each is the
+clarifying lens (the spec frames this as \emph{who is in the driver's seat}):
+
+\begin{center}\small
+\begin{tabular}{l l l l}
+\toprule
+Primitive & Control model & List & Act \\
+\midrule
+\textbf{Tools}     & model-controlled    & \code{tools/list}     & \code{tools/call} \\
+\textbf{Resources} & application-controlled & \code{resources/list} & \code{resources/read} \\
+\textbf{Prompts}   & user-controlled     & \code{prompts/list}   & \code{prompts/get} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Tools} are functions the \emph{model} chooses to invoke. Each carries a
+\code{name}, a human \code{description}, and an \code{inputSchema} (JSON Schema)
+describing its arguments. The model reads the schema, fills arguments, and the
+host issues \code{tools/call}. Results are a \code{content} array of typed items
+(\code{text}, \code{image}, \code{resource\_link}, \dots), optionally a typed
+\code{structuredContent} validated against an \code{outputSchema}.
+
+\textbf{Resources} are data the \emph{application} pulls into context --- a file,
+a database row, a diagnostics blob. Each has a \code{uri} (e.g.\
+\code{file:///path}, \code{crag://stats}). The host reads them with
+\code{resources/read}. A client may \code{resources/subscribe} to a URI and
+receive \code{notifications/resources/updated} when it changes (only if the
+server declared \code{resources.subscribe}).
+
+\textbf{Prompts} are reusable, parameterised message templates the \emph{user}
+invokes (think slash-commands). \code{prompts/list} enumerates them with a flat
+argument descriptor list \code{[\{name, description?, required?\}]} --- note this
+is \emph{not} full JSON Schema --- and \code{prompts/get} expands one with
+arguments into a message list.
+
+\textbf{list\_changed.} If a server's primitive set is dynamic, it declares
+\code{listChanged} and emits \code{notifications/tools/list\_changed} (etc.) so
+the client knows to re-list.
+
+% ---------------------------------------------------------------------
+\section{The reverse direction: server-initiated requests}
+
+MCP is bidirectional. Beyond responding to the client, a server can originate
+requests \emph{back to the host} --- this is what makes MCP an agent protocol
+rather than an RPC catalogue. There are three such directions, all gated by a
+\emph{client} capability:
+
+\begin{itemize}
+  \item \textbf{Sampling} (\code{sampling/createMessage}) --- the server asks the
+    host's LLM to produce a completion. Useful for a tool that wants to summarise
+    or re-reason over raw output before returning it. Gated by the client's
+    \code{sampling} capability; default-decline (\code{-32601}) if the host
+    registered no handler.
+  \item \textbf{Roots} (\code{roots/list}) --- the server asks the host which
+    filesystem paths / URIs are in scope. A filesystem-shaped server consults
+    this before touching anything. The host declares \code{roots} and may emit
+    \code{notifications/roots/list\_changed}.
+  \item \textbf{Elicitation} (\code{elicitation/create}) --- mid-tool-call, the
+    server asks the user for structured input: a confirmation, a missing
+    argument, a credential. The request carries a \code{requestedSchema}; the
+    host returns \code{\{action:"accept"|"decline"|"cancel", content\}}.
+\end{itemize}
+
+Two more cross-cutting mechanisms ride alongside:
+
+\begin{itemize}
+  \item \textbf{Progress} --- a long call attaches a \code{progressToken} (in
+    \code{params.\_meta}); the server emits \code{notifications/progress} carrying
+    that token, and the host correlates it to the originating call.
+  \item \textbf{Cancellation} --- either side may send
+    \code{notifications/cancelled \{requestId, reason?\}} to abandon an in-flight
+    request. It is \emph{cooperative}: the receiver should stop work, but a
+    response that crosses the cancel on the wire is simply dropped.
+  \item \textbf{Logging} --- with the \code{logging} capability, a server ships
+    structured \code{notifications/message \{level, logger?, data\}} events, and
+    the host dials the floor with \code{logging/setLevel}. Levels are the eight
+    RFC 5424 syslog levels.
+\end{itemize}
+
+\textbf{The trust model.} Every reverse request is default-deny. The host opts in
+\emph{per server} by registering a handler --- ``did the host bother to register a
+handler for this server?'' is the authorisation gate. There is no global
+allow-list; trust is decided one server at a time.
+
+% ---------------------------------------------------------------------
+\section{Transports}
+
+MCP separates message \emph{semantics} from message \emph{transport}. The spec
+defines two standard transports; cMCP implements both.
+
+\begin{itemize}
+  \item \textbf{stdio} --- the server is a subprocess; the host writes JSON-RPC to
+    its stdin and reads from its stdout, one message per line (newline-delimited).
+    \emph{stdout is sacred} --- any stray write corrupts the wire, so all logging
+    goes to stderr. This is the primary transport for local, single-tenant tools
+    and cMCP's design centre.
+  \item \textbf{Streamable HTTP} --- a single \code{/mcp} endpoint. The client
+    \code{POST}s a request and gets the response in the body; it may also open a
+    \code{GET} with \code{Accept: text/event-stream} to receive server-initiated
+    messages over Server-Sent Events (SSE). A session id (\code{Mcp-Session-Id}
+    header) is minted on the first \code{initialize} and threaded through
+    subsequent calls. SSE events carry monotonic ids so a dropped stream can
+    resume via \code{Last-Event-Id} (spec SEP-1699).
+\end{itemize}
+
+\textbf{Why stdio is the default for agents.} A local tool launched as a
+subprocess needs no ports, no auth, no TLS --- the OS process boundary \emph{is}
+the security boundary, and stdin/stdout are already private to the parent. HTTP
+matters for remote/shared servers but brings a network attack surface (\S12).
+
+% =====================================================================
+\part{Inside cMCP}
+
+% ---------------------------------------------------------------------
+\section{Build, link targets, and the six-layer pipeline}
+
+cMCP is one source tree compiled into three static libraries plus reference
+binaries. The partitioning mirrors the protocol's shared-machinery /
+asymmetric-role split from \S1.
+
+\begin{diag}
+  libcmcp_core.a    json + rpc + schema + types + transports        (shared ~60%)
+  libcmcp_server.a  + server.c + worker.c        (depends on core)   (server half)
+  libcmcp_client.a  + client.c + session.c       (depends on core)   (client half)
+\end{diag}
+
+Link order matters: consumers (server/client) before provider (core), so the
+linker resolves core symbols on the second pass. The Makefile handles it. The
+core libraries are dependency-free; only the HTTP \emph{client} links
+\code{libcurl}.
+
+\textbf{Build commands to know:}
+\begin{center}\small
+\begin{tabular}{l l}
+\toprule
+Command & Effect \\
+\midrule
+\code{make}            & libs + \code{cmcp-inspect} + \code{filesystem-mcp} + \code{cmcp-tee} + examples \\
+\code{make test}       & build and run every \code{tests/test\_*.c} (offline, hermetic) \\
+\code{make valgrind}   & same suite under Valgrind (leak-free) \\
+\code{make test-asan}  & rebuild under ASan/UBSan, run suite \\
+\code{make test-tsan}  & rebuild under ThreadSanitizer, run suite \\
+\code{make crag-mcp}   & build the cRAG reference server (needs sibling \code{../cRAG}) \\
+\code{make conformance}& cross-check vs the TS reference SDK (needs Node + network) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The request pipeline is six layers, each in its own module, each talking only to
+the layer directly below:
+
+\begin{diag}
+  +----------------------------------------------------------------+
+  |                      tools (handlers)                          |  <- user code
+  +----------------------------------------------------------------+
+  |  server.c - registry, dispatch    |  client.c - async client   |
+  |   + worker.c pool                 |   + session.c N-server mux  |
+  +----------------------------------------------------------------+
+  |  schema.c - JSON Schema subset (validates tools/call.arguments)|
+  +----------------------------------------------------------------+
+  |  rpc.c - JSON-RPC 2.0 framing, in-flight ID table              |
+  +----------------------------------------------------------------+
+  |  transport_stdio.c / transport_http.c / transport_http_client.c|
+  +----------------------------------------------------------------+
+  |  json.c - typed value tree, parser, emitter                    |
+  +----------------------------------------------------------------+
+\end{diag}
+
+The discipline is strict: the transport layer never inspects message content; the
+RPC layer never reads raw bytes; the schema layer never speaks JSON-RPC. That
+clean separation is what lets the same RPC core serve both halves and lets HTTP
+plug in on the same vtable as stdio.
+
+% ---------------------------------------------------------------------
+\section{Layer by layer}
+
+\subsection{json.c --- the value tree (\S6, layer 1)}
+
+A hand-written JSON parser/emitter over a discriminated-union value tree
+(\code{cmcp\_json\_t}). No third-party JSON library. Lifted from cRAG's
+\code{util.c} and extended with object/array constructors, escape-aware string
+emission (UTF-8 surrogate pairs, control bytes), and \emph{stable key ordering on
+emit} --- keys come out in insertion order. That last is not a JSON requirement
+but it makes wire frames byte-stable, which is what lets tests and the replay gate
+diff frames literally.
+
+Hardening lives here too: \code{CMCP\_JSON\_MAX\_DEPTH} (default 64) bounds
+recursion against stack exhaustion, and \code{CMCP\_JSON\_MAX\_ELEMENTS} (default
+65536) caps array/object size against memory bombs.
+
+\subsection{rpc.c --- JSON-RPC framing (layer 2)}
+
+A discriminated-union message type (\code{cmcp\_rpc\_message\_t}) covering
+request / response / notification, plus emit and parse. It parses batches only to
+reject them with \code{-32600} (\S2). The \emph{in-flight ID table}
+(\code{cmcp\_rpc\_pending\_t}) is the single monotonic id space: the client
+reserves an id before sending, the reader looks the id up on the inbound response
+and routes the parsed message to whoever waits. \code{CMCP\_RPC\_MAX\_INFLIGHT}
+(default 1024) caps outstanding ids.
+
+\subsection{schema.c --- the JSON Schema subset (layer 3)}
+
+The server validates inbound \code{tools/call.arguments} against the tool's
+registered \code{inputSchema} \emph{before} the handler runs --- so handlers only
+ever see well-formed input. The same validator runs \emph{outbound} when a handler
+attaches \code{structuredContent} against an \code{outputSchema} (mismatch ->
+\code{-32603}).
+
+Supported keywords: \code{type} (incl.\ array-of-types), \code{properties},
+\code{required}, \code{additionalProperties:false}, \code{enum},
+\code{minLength}/\code{maxLength} (Unicode code points), \code{minimum}/\code{maximum},
+\code{items}. \emph{Deliberately unsupported} in v0.1: \code{\$ref},
+\code{oneOf}/\code{anyOf}/\code{allOf}, \code{format}, \code{pattern}. This is a
+documented subset (\code{docs/schema-conformance.md}), not a silent gap --- those
+keywords would multiply validator complexity for cases real MCP tools don't need.
+
+Recall the dual channel from \S2: a \code{tools/call} \emph{argument} failure
+surfaces as a tool-level \code{\{isError:true\}} result, while protocol-level
+rejections use the \code{-32602} error channel.
+
+\subsection{transport\_*.c --- the vtable (layer 4)}
+
+All three transports implement one vtable, \code{cmcp\_transport\_t}:
+\code{read\_fn}, \code{write\_fn}, \code{close\_fn}, and an optional
+\code{wake\_fn}.
+
+\textbf{stdio} (\code{transport\_stdio.c}) --- newline-delimited JSON over a
+\code{(read\_fd, write\_fd)} pair. \code{getline()} for reads (tolerates blank
+lines, grows with the message); \code{fwrite + '\textbackslash n' + fflush} for
+writes under a per-transport mutex so a reply and a notification thread never
+interleave a frame. \code{CMCP\_STDIO\_MAX\_FRAME} (default 16~MiB) caps a frame
+so a peer streaming endlessly without a newline can't OOM the process --- this
+protects the \emph{client} too, since it reads a forked server's stdout through
+the same path.
+
+\textbf{HTTP server} (\code{transport\_http.c}) --- a hand-rolled HTTP/1.1 server
+on \code{socket()}/\code{accept()}. One \code{/mcp} endpoint: \code{POST} ->
+request/response, \code{GET} with SSE -> server-push channel. It bridges the
+synchronous \code{read->dispatch->write} server loop onto HTTP with a single-slot
+mailbox (there is only ever one logical session per transport). This is the one
+place the transport layer peeks the JSON-RPC body --- to tell a notification (202
+Accepted, no body) from a request (200 + body), since HTTP forces that decision.
+
+\textbf{HTTP client} (\code{transport\_http\_client.c}) --- the mirror, built on
+\code{libcurl}. Each \code{write\_fn} is a one-shot \code{POST} with its own easy
+handle (so concurrent host threads don't serialise), and a separate SSE thread
+long-polls \code{GET /mcp} for server-pushed frames, pushing both onto one read
+queue that \code{client.c} demultiplexes. The \code{wake\_fn} slot exists because
+this transport's \code{read\_fn} parks on a condvar, not a syscall (\S10).
+
+The HTTP parser itself lives in \code{http\_parser.c} / \code{cmcp\_http\_parser.h},
+extracted as its own translation unit so a libFuzzer harness can drive it without
+sockets.
+
+\subsection{server.c + worker.c --- the server half (layer 5)}
+
+\code{server.c} holds the tool / resource / prompt registries, the dispatch
+table, and the run loop. Built-in methods: the handshake, \code{ping} (answered
+\code{\{\}} \emph{before} the readiness gate so it works pre-handshake), all three
+\code{*/list} + act methods, \code{resources/subscribe}/\code{unsubscribe}, and
+\code{logging/setLevel}. Unknown methods -> \code{-32601}; operate-class methods
+before \code{initialize} -> \code{-32600}.
+
+Capabilities \code{tools}/\code{resources}/\code{prompts} are
+\emph{auto-advertised} whenever $\ge 1$ of that kind is registered;
+sub-capabilities (\code{subscribe}, \code{listChanged}, \code{logging}) stay
+opt-in via \code{cmcp\_server\_set\_capabilities}. The minimal server is small:
+
+\begin{ccode}
+cmcp_server_t *s = cmcp_server_new("echo", "1.0");
+cmcp_server_add_tool(s, "echo", "Echo text back",
+                     "{\"type\":\"object\",\"properties\":"
+                     "{\"text\":{\"type\":\"string\"}},"
+                     "\"required\":[\"text\"]}",
+                     echo_handler, NULL);
+cmcp_server_run_stdio(s);   /* blocks: read -> dispatch -> write */
+\end{ccode}
+
+\code{worker.c} is the handler thread pool. The three handler-\emph{invoking}
+methods (\code{tools/call}, \code{resources/read}, \code{prompts/get}) run on
+\code{CMCP\_WORKERS} threads (default 4) so a slow handler can't stall the read
+loop; everything else (handshake, lists, notifications) runs inline on the loop
+thread, so the lifecycle FSM needs no lock. See \S10 for the cancellation and
+timeout machinery.
+
+\subsection{client.c + session.c --- the client half (layer 5)}
+
+\code{client.c} is an async client with \emph{one reader thread} per
+\code{cmcp\_client\_t}. Host threads call \code{cmcp\_client\_call\_async} (returns
+an id) and later \code{cmcp\_client\_wait(id)}; \code{cmcp\_client\_request} is
+just those two fused. The reader demultiplexes inbound frames by kind: responses
+go to the matching pending entry; \code{notifications/progress} go to a per-call
+subscription if its token matches, else to the generic handler; reverse requests
+(\code{sampling}/\code{elicitation}/\code{roots}/\code{ping}) go to the registered
+host handler or default-decline.
+
+\code{session.c} aggregates $N$ already-handshaken clients under host-supplied
+names so a multi-server host sees one flat surface. Tools are namespaced
+\code{<server>:<tool>}; \code{resources/read} and \code{prompts/get} take an
+explicit \code{(server, uri|name)} pair (URIs already contain colons, so folding
+the server in would be ambiguous). List calls fan out async, fan in sequentially,
+and follow each server's \code{nextCursor} pagination automatically.
+
+% ---------------------------------------------------------------------
+\section{The threading model}
+
+This is the subtlest part of the codebase and the most worth studying.
+
+\textbf{Server side.} The run loop owns the transport on one thread: read, parse,
+dispatch. Dispatch forks two ways --- cheap/lifecycle methods run \emph{inline}
+(so the FSM is lock-free), and the three handler-invoking methods go to a bounded
+worker pool. The pool's submit \emph{blocks} when full, so backpressure
+propagates to the loop instead of growing memory.
+
+\textbf{Cooperative cancellation (a contract, not a kill).} There is deliberately
+no \code{pthread\_cancel} --- async-killing a thread that may hold the writer
+mutex or a \code{malloc} lock is unsafe in C. Instead an in-flight table maps
+\code{request id -> ctx}; \code{notifications/cancelled} or a 200ms watchdog (past
+\code{CMCP\_HANDLER\_TIMEOUT\_MS}, default 30s) only \emph{flag} a context. The
+handler contract is therefore load-bearing: \textbf{a handler MUST poll
+\code{cmcp\_handler\_cancelled()} in any loop or before any blocking step}. A
+handler that blocks forever burns its worker slot permanently; \code{CMCP\_WORKERS}
+such handlers deadlock the server.
+
+\textbf{Client side.} One reader, many waiters. Each call gets a completion record
+with its own mutex+condvar (localised wakeup, no thundering herd). Multiple async
+calls may be in flight and \code{wait} may be called in any order.
+
+\begin{diag}
+  caller thread(s)                   |  reader thread
+                                     |  for (;;) {
+  call_async:                        |     transport_read()
+    register pending id              |     rpc_parse()
+    alloc + link completion record   |     switch (kind):
+    send_message                     |       RESPONSE -> deliver by id, broadcast cv
+    return id                        |       NOTIFICATION -> progress sub? else notif_fn
+  wait(id):                          |       REQUEST -> ping/sampling/elicit/roots
+    cond_wait until done             |                  else -32601
+    move response out, free          |  }
+\end{diag}
+
+\textbf{Two shutdown subtleties worth internalising.} (1) On Linux, closing an fd
+does \emph{not} interrupt a \code{read()} already blocked on it. So the stdio
+reader is woken by a signal (\code{SIGUSR2}, non-restarting handler) that makes
+the syscall return \code{EINTR}; a \code{pthread\_tryjoin\_np} retry loop
+re-sends the signal to close a race window. (2) A transport whose \code{read\_fn}
+parks on a \emph{userspace} primitive (the HTTP client's condvar) can't be woken
+by a signal --- that's why the vtable has the optional \code{wake\_fn}, which
+stdio leaves NULL.
+
+\textbf{Callbacks run on the reader thread, serialised.} So a slow host callback
+(sampling doing an LLM round-trip) stalls inbound frames until it returns. From
+inside a callback the non-blocking calls (\code{call\_async}, \code{notify},
+\code{cancel}) are safe, but the blocking pair (\code{request}, \code{wait})
+self-deadlocks --- the thread that would complete them is the one running the
+callback.
+
+% ---------------------------------------------------------------------
+\section{Memory ownership}
+
+Manual \code{malloc}/\code{free} throughout; the rule is a single convention.
+
+\begin{center}\small
+\begin{tabular}{l l}
+\toprule
+Object & Who frees \\
+\midrule
+\code{cmcp\_json\_t*} passed into \code{*\_set}/\code{*\_request}/handlers & callee (library) \\
+\code{cmcp\_json\_t*} returned from \code{*\_get} & nobody --- borrowed, lives with parent \\
+\code{cmcp\_rpc\_message\_t} & holder; \code{cmcp\_rpc\_message\_clear} before scope exit \\
+Tool-handler \code{*out\_content} & library, after emitting the response \\
+Tool-handler \code{arguments} & caller (library) --- borrowed, handler must NOT free \\
+Owned transport (\code{connect\_stdio}) & client, on \code{client\_free} \\
+Spawned child process & client, reaped via SIGTERM + \code{waitpid} \\
+Clients added to a session & session, on \code{session\_free} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The convention: any function whose docs say ``consumed'' or ``takes ownership''
+is a transfer point. Everything else is borrowed. Negative return values are
+\code{cmcp\_err\_t} codes (\code{include/cmcp.h}); the library never \code{exit()}s
+--- a handler must survive a single bad call without taking the process down.
+
+% ---------------------------------------------------------------------
+\section{Security and hardening}
+
+cMCP's trust model is precise: the \emph{host} is trusted (cMCP runs in its
+address space), but the \emph{peer} on the other end of a transport may be hostile
+or buggy, and its input is untrusted. A STRIDE threat catalogue maps to concrete,
+individually-tested controls --- each reachable from a snapshot-once environment
+knob so an operator can tune or disable it without recompiling.
+
+\begin{center}\small
+\begin{tabular}{p{0.27\linewidth} p{0.46\linewidth} p{0.18\linewidth}}
+\toprule
+Threat & Control & Knob \\
+\midrule
+SSRF via discovery & egress guard on the \emph{resolved} peer; rejects
+  metadata/link-local/RFC1918/CGNAT/ULA; DNS-rebinding-safe & \code{CMCP\_HTTP\_ALLOW\_PRIVATE} \\
+DNS rebinding & \code{Origin} allow-list on the HTTP server & \code{CMCP\_HTTP\_ALLOWED\_ORIGINS} \\
+Insecure deserialization & schema validation \emph{before} dispatch; parse depth + element caps & \code{CMCP\_JSON\_MAX\_DEPTH/\_ELEMENTS} \\
+Memory bomb / OOM & stdio frame cap, HTTP body cap, handler \code{RLIMIT\_AS} & \code{CMCP\_STDIO\_MAX\_FRAME} \\
+Slowloris / spike & per-recv idle timeout, cumulative deadline, accept-rate token bucket & \code{CMCP\_HTTP\_ACCEPT\_RATE} \\
+Credential leakage & log redactor over credential-shaped keys & \code{CMCP\_LOG\_REDACT} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The controls are layered front-to-back: a request crosses the \code{Origin}
+allow-list and SSRF guard, then frame/body/depth/element caps, then schema
+validation, then rate-limit and idle/deadline timeouts, before a handler runs
+under \code{RLIMIT\_AS}; anything it logs passes the credential redactor on the
+way out.
+
+\textbf{Deliberate non-goals (scope, not omission).} cMCP links \emph{no} TLS
+library --- a protocol library is the wrong layer to own cert rotation; put
+nginx/caddy/Envoy in front (\code{docs/deployment-tls.md}). Application-layer auth
+(OAuth 2.1, API keys, mTLS) is the terminator's job; cMCP trusts the
+already-authenticated request. Out-of-process handler sandboxing is a separate
+deferred tier --- today's threat model is single-author tools, not untrusted
+third-party code. The network surface is \emph{defensive depth} for a deployment
+that is stdio-primary and single-tenant.
+
+% ---------------------------------------------------------------------
+\section{How correctness is proved}
+
+For a protocol library the central question is not ``does it run'' but ``does it
+emit \emph{exactly} the bytes the spec requires, and interoperate with an
+independent implementation.'' cMCP answers with cross-implementation checks in
+both wire roles, not self-consistency alone.
+
+\begin{itemize}
+  \item \textbf{cMCP client vs.\ TS reference server} and \textbf{TS client vs.\
+    cMCP server} (\code{make conformance}) --- both directions against the
+    official TypeScript SDK.
+  \item \textbf{Replay gate} (\code{make replay}) --- real wire transcripts,
+    captured through the \code{cmcp-tee} proxy, replayed and diffed so a framing
+    change can't regress silently.
+  \item \textbf{Spec-drift watch} (\code{make check-spec-drift}, weekly CI) ---
+    compares the pinned \code{CMCP\_PROTOCOL\_VERSION} against the upstream spec.
+  \item \textbf{Sanitisers + fuzzers} --- the suite runs clean under Valgrind,
+    ASan/UBSan, and ThreadSanitizer; four libFuzzer harnesses drive the JSON,
+    JSON-RPC, schema, and HTTP-head parsers; a soak driver proves no drift over
+    long stdio/HTTP runs.
+\end{itemize}
+
+The tests are not mocked: \code{test\_stdio\_roundtrip} actually \code{fork()}s a
+child server and runs a real handshake; \code{test\_client\_server} wires real
+\code{cmcp\_server\_run} instances onto pipe pairs to exercise the async client
+and multi-server session end-to-end. The suites map onto the classic
+Unit~$\rightarrow$~Integration~$\rightarrow$~Evaluation pyramid, with the security
+axis cutting across all layers.
+
+% =====================================================================
+\part{A guided study path}
+
+% ---------------------------------------------------------------------
+\section{Reading order}
+
+Read the code in the order data flows, bottom-up, with a header before each
+implementation:
+
+\begin{enumerate}
+  \item \code{include/cmcp.h} --- version, protocol, the \code{cmcp\_err\_t}
+    codes. Five minutes; it frames everything.
+  \item \code{include/cmcp\_json.h} then \code{src/json.c} --- the value tree is
+    the vocabulary every other layer speaks.
+  \item \code{include/cmcp\_types.h} + \code{src/rpc.c} --- the three message
+    shapes and the id table.
+  \item \code{include/cmcp\_schema.h} + \code{src/schema.c} --- alongside
+    \code{docs/schema-conformance.md} for the subset boundary.
+  \item \code{include/cmcp\_transport.h} + \code{src/transport\_stdio.c} --- the
+    vtable, on its simplest backend, before the HTTP backends.
+  \item \code{include/cmcp\_server.h} + \code{src/server.c} (then
+    \code{src/worker.c}) --- the registry, dispatch, and pool.
+  \item \code{include/cmcp\_client.h} + \code{src/client.c} (then
+    \code{include/cmcp\_session.h} + \code{src/session.c}) --- the reader-thread
+    demux and multi-server aggregator.
+  \item \code{examples/echo-server.c} + \code{examples/minimal-client.c} --- the
+    smallest end-to-end pair; trace a \code{tools/call} through every layer above.
+  \item Only then the HTTP backends (\code{transport\_http.c},
+    \code{transport\_http\_client.c}) --- the most machinery, least protocol.
+\end{enumerate}
+
+Keep \code{docs/architecture.md} open as the prose ``why'' companion to the
+headers' ``what.''
+
+% ---------------------------------------------------------------------
+\section{Hands-on exercises}
+
+\begin{enumerate}
+  \item \textbf{Build and self-test.} \code{make \&\& make test}. Then run one
+    binary directly, e.g.\ \code{./tests/test\_schema}, and open its source to see
+    the assertion style.
+  \item \textbf{Watch a real handshake.} Use \code{cmcp-inspect} to spawn
+    \code{filesystem-mcp}, run the handshake, and list its tools/resources. Read
+    the \code{initialize} exchange it prints.
+  \item \textbf{Capture the wire.} Put \code{cmcp-tee} between
+    \code{cmcp-inspect} and a server; inspect the JSONL log to see every frame in
+    both directions --- this is exactly what the replay gate diffs.
+  \item \textbf{Write a tool.} Add a second tool to \code{examples/echo-server.c}
+    with a non-trivial \code{inputSchema}, rebuild, and call it with deliberately
+    bad arguments. Confirm the failure arrives as a tool-level
+    \code{\{isError:true\}} result, \emph{not} a JSON-RPC error (\S2, \S9).
+  \item \textbf{Break a control.} Set \code{CMCP\_JSON\_MAX\_DEPTH=4} and feed a
+    deeply-nested object; watch the parser fail closed with \code{-32700}. Then
+    explore the other knobs in the \S12 table.
+  \item \textbf{Prove thread-safety.} Run \code{make test-tsan} and read
+    \code{tests/test\_client\_server.c} to see how concurrent async calls are
+    exercised.
+\end{enumerate}
+
+\textbf{Build this document:} \code{pdflatex docs/cmcp-study-guide.tex} (run twice
+so the table of contents resolves). It needs no external figures.
+
+% ---------------------------------------------------------------------
+\section{Glossary}
+
+\begin{description}[leftmargin=0pt,style=nextline,itemsep=2pt]
+  \item[Host] The user-facing application that owns the LLM and decides which
+    servers to trust.
+  \item[Client / Server] The two endpoints of one MCP session; client drives,
+    server offers. 1:1 per session.
+  \item[Capability] A declared feature, exchanged at \code{initialize};
+    unadvertised capabilities must not be used.
+  \item[Primitive] A tool, resource, or prompt --- the three things a server
+    exposes.
+  \item[Tool / Resource / Prompt] Model-controlled function / application-pulled
+    data / user-invoked template.
+  \item[Notification] An id-less JSON-RPC message; no response expected.
+  \item[Reverse request] A server-originated request to the host: sampling,
+    roots, or elicitation.
+  \item[Transport] The byte channel under JSON-RPC: stdio or Streamable HTTP.
+  \item[Handler] User code registered for a tool/resource/prompt; runs on a
+    worker thread under the cooperative-cancellation contract.
+  \item[Dual error channel] Protocol failures use JSON-RPC \code{error};
+    tool-run failures use an \code{isError:true} \emph{result}.
+\end{description}
+
+\vfill
+{\color{rulegrey}\hrule height 0.6pt}
+\vspace{4pt}
+{\small\color{rulegrey}
+cMCP --- pure C11, three static link targets, no third-party JSON / MCP SDK.
+Companion docs: \code{docs/architecture.md} (design rationale),
+\code{docs/cmcp-engineering-report.tex} (measured claims),
+\code{docs/schema-conformance.md} (validator subset).}
+
+\end{document}
