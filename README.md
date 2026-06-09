@@ -29,6 +29,29 @@ one example consumer and is built separately, behind an explicit
 
 ## Status
 
+**v0.9 — typed tool-call API redesign (P7, 2026-06-01).** A single
+pre-1.0 **breaking** wave on the client-side typed tool-call surface,
+collapsing five findings from the P6 host-probe — the first real
+stateful consumer of the client API — into one corrected call/handle
+shape. `cmcp_client_tool_call` now returns a `cmcp_tool_result_t` by
+value (no more eval-order-hazardous out-params);
+`cmcp_client_tool_call_async` hands back an opaque
+`cmcp_tool_handle_t` that binds id→client so a `tool_wait` can't be
+mis-routed across servers; cancellation gets its own
+`CMCP_TOOL_ERR_CANCELLED` outcome; and the session aggregator gains an
+async routed pair. All in-tree callers migrated in the same cut. Wire
+format and protocol version (`2025-11-25`) are unchanged — this is
+purely the C surface that exposes them.
+
+A follow-on hardening pass (in flight, see [`CHANGELOG.md`](CHANGELOG.md))
+adds a loopback-default HTTP bind, `413 Payload Too Large` on oversize
+bodies, double-promotion for out-of-range integer literals, and a
+compiled-regex cache for `pattern` validation. No public API or
+wire-format change.
+
+The v0.8 axes — the Tier 7 regression gates — are the foundation v0.9
+built on. They are summarised here:
+
 **v0.8 — Tier 7 closed (regression gates over the Tier 6 baselines, 2026-05-31).**
 The four Tier 7 axes deferred at v0.7.0 land in this cut: each one
 turns a Tier-6 baseline into a CI gate (or, for the long-haul axes,
@@ -422,7 +445,7 @@ make crag-mcp                           # needs ../cRAG built
 
 ## Protocol coverage
 
-Tracking [MCP spec date `2025-11-25`](https://modelcontextprotocol.io/specification/2025-11-25/) (pinned in `include/cmcp.h`). 2025-11-25 wire-behavior changes are landing across the Tier 6.1 sub-axes.
+Tracking [MCP spec date `2025-11-25`](https://modelcontextprotocol.io/specification/2025-11-25/) (pinned in `include/cmcp.h`); the `2025-11-25` wire-behavior changes and optional capabilities all landed in the Tier 6.1 bump. The table below records the version each feature first shipped in (protocol surface was complete by v0.4; later releases were hardening and quality gates).
 
 | Feature                                                    | v0.1 | v0.2 | v0.3 | v0.4 |
 |---|---|---|---|---|

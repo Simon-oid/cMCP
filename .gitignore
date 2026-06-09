@@ -133,3 +133,9 @@ graphify-out/
 tools/crag-mcp/crag.db
 # internal research note (IT)
 docs/Testare RAG e MCP_ Guida Dettagliata.md
+# Author's personal study guide — kept locally, never pushed. Not library
+# documentation; it teaches the protocol + walks the source for the author's
+# own use. The .tex source is gone; only the local PDF remains, ignored here
+# so an accidental `git add` can't sweep it back into the public repo.
+docs/cmcp-study-guide.pdf
+docs/cmcp-study-guide.tex

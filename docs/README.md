@@ -23,9 +23,12 @@ Design notes, operational guides, and policy for the cMCP library. Start with
 - [`perf-baselines.md`](perf-baselines.md) — captured throughput/latency baselines.
 - [`perf-regression-gate.md`](perf-regression-gate.md) — how `bench/` gates regressions (Tier 7.1).
 
+## Engineering report
+
+- [`cmcp-engineering-report.pdf`](cmcp-engineering-report.pdf) — the headline report: spec conformance (cross-impl vs the TS reference SDK), performance vs the official SDKs, test posture + quality gates, hardening, and operating envelope. A point-in-time snapshot; the live numbers and policy are in the topic-specific docs below.
+
 ## Quality gates (nightly / CI)
 
-- [`cmcp-engineering-report.pdf`](cmcp-engineering-report.pdf) — the headline engineering report: spec conformance (cross-impl vs the TS reference SDK), performance vs the official SDKs, test posture + quality gates, hardening, and operating envelope. Source in `cmcp-engineering-report.tex`; rebuild with `scripts/build-report.sh`.
 - [`fuzz-nightly.md`](fuzz-nightly.md) — nightly libFuzzer baselines + weekly corpus fold (Tier 7.2).
 - [`soak-nightly.md`](soak-nightly.md) — long-running stability soak (Tier 7.3).
 - [`coverage-policy.md`](coverage-policy.md) — coverage targets and the delta gate (Tier 7.4).
