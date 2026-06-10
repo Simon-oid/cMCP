@@ -10,6 +10,22 @@ A security/robustness review (LLM Council in the loop on the bind-default
 call) turned up four real findings; this wave lands all four. No public
 API or wire-format change — protocol version stays `2025-11-25`.
 
+### Fixed
+
+- **HTTP server no longer deadlocks on a malformed POST body.** The
+  Streamable-HTTP request↔response bridge classified any non-request body
+  as "no reply expected" and returned `202 Accepted`. But `server.c`
+  answers a batch, an unparseable body, or a JSON object that isn't a
+  valid JSON-RPC message with one error frame (`-32600`/`-32700`); that
+  frame was deposited into the response slot with no POST handler waiting
+  to take it, pinning `resp_present` and permanently hanging every
+  subsequent request on the transport. A single `{}` POST from any
+  session-holder bricked the server. `classify_body` now distinguishes a
+  genuine JSON-RPC *response* from a malformed body, and the 202 path is
+  taken only for true notifications and responses; everything else waits
+  for and returns the server's reply. Regression test
+  `test_malformed_body_does_not_deadlock`. (threat-model 1.13)
+
 ### Changed
 
 - **HTTP server defaults to a loopback bind.** `cmcp_transport_http_listen`

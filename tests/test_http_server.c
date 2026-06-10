@@ -415,6 +415,80 @@ static void test_malformed_request(void) {
     cmcp_server_free(s);
 }
 
+/* Regression: a POST whose body is valid JSON but not a valid JSON-RPC
+ * request (e.g. `{}`, a batch array, or unparseable JSON) must NOT be
+ * mis-routed to the no-reply 202 path. server.c answers every such body
+ * with exactly one error frame (-32600 / -32700); if the transport
+ * returned 202 without stealing that frame, resp_present stayed pinned
+ * and EVERY subsequent request on the transport deadlocked — a single
+ * `{}` POST from any session-holder permanently bricked the server.
+ * Each malformed body must get a real HTTP response, and a valid
+ * request afterwards must still succeed. */
+static void test_malformed_body_does_not_deadlock(void) {
+    unsetenv("CMCP_HTTP_ALLOWED_ORIGINS");
+    unsigned short port = pick_port();
+    TEST_ASSERT(port != 0);
+
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1", port);
+    cmcp_server_t *s = cmcp_server_new("http-srv", "0.1.0");
+    server_arg_t sa = { s, t, 0 };
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread_main, &sa);
+
+    /* Handshake → session id, then notifications/initialized. */
+    char *req = build_post(INIT_BODY, NULL);
+    char *resp = NULL; size_t rlen = 0;
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    char sid[64] = {0};
+    TEST_ASSERT(extract_header(resp, "Mcp-Session-Id", sid, sizeof sid) == 1);
+    free(resp);
+
+    req = build_post("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", sid);
+    do_request(port, req, &resp, &rlen);
+    free(req);
+    free(resp);
+
+    /* The malformed bodies that used to brick the transport. Each must
+     * draw a definitive HTTP status (not hang), and crucially the server
+     * must remain serviceable afterward. */
+    const char *bodies[] = {
+        "{}",                                   /* valid JSON, no jsonrpc   */
+        "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]", /* batch    */
+        "{ broken json",                         /* unparseable             */
+        "{\"jsonrpc\":\"2.0\",\"id\":9}",        /* no method, no result    */
+    };
+    for (size_t i = 0; i < sizeof bodies / sizeof bodies[0]; i++) {
+        req = build_post(bodies[i], sid);
+        resp = NULL; rlen = 0;
+        /* If the bug were present, do_request would block until the peer
+         * closes — but the server never closes a pinned slot, so the test
+         * harness/parent timeout would fire. A returned response proves
+         * no deadlock. */
+        TEST_ASSERT(do_request(port, req, &resp, &rlen) == 0);
+        TEST_ASSERT(strncmp(resp, "HTTP/1.1 ", 9) == 0);
+        /* Must not be the bogus no-reply ack. */
+        TEST_ASSERT(strncmp(resp, "HTTP/1.1 202", 12) != 0);
+        free(req);
+        free(resp);
+
+        /* Server still alive: a valid tools/list succeeds. */
+        const char *list_body =
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}";
+        req = build_post(list_body, sid);
+        resp = NULL; rlen = 0;
+        TEST_ASSERT(do_request(port, req, &resp, &rlen) == 0);
+        TEST_ASSERT(strncmp(resp, "HTTP/1.1 200 OK\r\n", 17) == 0);
+        free(req);
+        free(resp);
+    }
+
+    cmcp_transport_wake(t);
+    pthread_join(th, NULL);
+    cmcp_transport_close(t);
+    cmcp_server_free(s);
+}
+
 static void test_get_sse_handshake(void) {
     unsigned short port = pick_port();
     TEST_ASSERT(port != 0);
@@ -1186,6 +1260,7 @@ int main(void) {
     TEST_RUN(test_initialize_round_trip);
     TEST_RUN(test_session_id_required_after_init);
     TEST_RUN(test_malformed_request);
+    TEST_RUN(test_malformed_body_does_not_deadlock);
     TEST_RUN(test_get_sse_handshake);
     TEST_RUN(test_protocol_version_header);
     TEST_RUN(test_origin_allowlist);

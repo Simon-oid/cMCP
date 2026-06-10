@@ -629,6 +629,7 @@ static void reply_error(int fd, int status, const char *reason,
 typedef struct {
     int is_request;
     int is_notif;
+    int is_response;     /* JSON-RPC response: id + (result|error), no method */
     int method_is_init;
 } body_kind_t;
 
@@ -641,6 +642,11 @@ static body_kind_t classify_body(const char *body, size_t len) {
     if (method && method->type == CMCP_JSON_STRING) {
         if (id) k.is_request = 1; else k.is_notif = 1;
         if (strcmp(method->str.s, "initialize") == 0) k.method_is_init = 1;
+    } else if (id && (cmcp_json_object_get(j, "result") ||
+                       cmcp_json_object_get(j, "error"))) {
+        /* A well-formed JSON-RPC response (answer to a server→client
+         * request). server.c consumes it and writes nothing back. */
+        k.is_response = 1;
     }
     cmcp_json_free(j);
     return k;
@@ -768,11 +774,18 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     http_set_cur_headers(impl, req);     /* B.1: expose headers to handler */
     pthread_cond_signal(&impl->read_cv);
 
-    /* Notifications and JSON-RPC responses produce no upper-layer
-     * reply. Per spec, those POSTs get 202 Accepted with no body.
+    /* Only genuine notifications and JSON-RPC responses produce no
+     * upper-layer reply; per spec those POSTs get 202 Accepted with no
+     * body. Everything else — a request, a batch, or any malformed body
+     * — is answered by server.c with exactly one frame (the result, or a
+     * -32600/-32700 error), so we MUST wait for the response slot. The
+     * earlier `!is_request` heuristic mis-routed every malformed body to
+     * the 202 path: server.c then deposited an error frame that no POST
+     * handler ever stole, leaving resp_present pinned and permanently
+     * deadlocking every subsequent request on this transport.
      * Wait until server.c consumes the request (so we don't race the
      * close+free path) and then return 202. */
-    if (kind.is_notif || !kind.is_request) {
+    if (kind.is_notif || kind.is_response) {
         while (impl->req_present &&
                !atomic_load_explicit(&impl->shutting_down,
                                       memory_order_relaxed)) {

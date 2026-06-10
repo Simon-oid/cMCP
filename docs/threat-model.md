@@ -74,6 +74,7 @@ session integrity.
 | 1.10 | Untrusted `inputSchema` triggers regex DoS | D | 🟡 6.7: regex uses POSIX ERE (`REG_EXTENDED | REG_NOSUB`). POSIX ERE has predictable complexity for ASCII patterns; no backtracking-disaster path comparable to ECMAScript regex with nested quantifiers. Compiled patterns are cached (see 3.6) so a hot tool does not recompile per call. Pathological POSIX patterns are still possible — bounded by 1.4's idle timeout. |
 | 1.11 | Header injection via CRLF in returned values | T | 🟢 `http_write_response` writes only fixed status, content-type, and length; no caller-controlled headers. SSE event framing only emits `data:`/`id:` and escapes nothing dangerous. |
 | 1.12 | `Mcp-Session-Id` guess / forge | S | 🟢 Session ids are 128-bit-equivalent (UUIDv4 minted from `/dev/urandom`) and compared by exact string match. |
+| 1.13 | Malformed POST body deadlocks the request/response slot | D | 🟢 The transport's request↔response bridge takes the no-reply 202 path only for genuine notifications and JSON-RPC responses (`classify_body` `is_notif`/`is_response`). Every other body — a request, a batch, or any malformed/unparseable JSON — is answered by `server.c` with one error frame, which the POST handler waits for and returns; a previous `!is_request` heuristic mis-routed malformed bodies to 202, stranding the unstolen error frame in `resp_present` and permanently deadlocking every subsequent request on the transport. Regression: `tests/test_http_server.c::test_malformed_body_does_not_deadlock`. |
 
 ### Out of scope for B1
 
