@@ -17,6 +17,7 @@ Design notes, operational guides, and policy for the cMCP library. Start with
 
 - [`threat-model.md`](threat-model.md) — attack surface, trust boundaries, hardening knobs.
 - [`deployment-tls.md`](deployment-tls.md) — running the HTTP transport behind TLS.
+- [`case-study-symlink-escape.md`](case-study-symlink-escape.md) — how agent-in-the-loop testing found a sandbox-escape P0 in `filesystem-mcp`, and the regression net that pins the fix.
 
 ## Performance
 
