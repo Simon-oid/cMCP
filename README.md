@@ -327,17 +327,18 @@ consumers don't have to reinvent the flags:
 
 ## Status & roadmap
 
-Current release: **v0.9.0** (2026-06-01), pinned to MCP spec revision
+Current release: **v0.10.0** (2026-06-12), pinned to MCP spec revision
 `2025-11-25`. The protocol surface has been complete since v0.4;
-v0.5–v0.9 were hardening, quality gates, and host-API ergonomics
+everything after was hardening, quality gates, and host-API ergonomics
 driven by real consumers. The full per-release history — including
 the rationale behind each design decision — is in
 [`CHANGELOG.md`](CHANGELOG.md).
 
 ### Known limitations (deliberate)
 
-- **POSIX-only.** The transports use `fork`/pipes/pthreads; Linux and
-  macOS are supported, Windows is not.
+- **Linux-only.** The transports use `fork`/pipes/pthreads; Linux
+  (x86-64 and aarch64) is what CI builds and tests. macOS and Windows
+  are not supported.
 - **OAuth 2.1 deferred** — no remote authenticated-server consumer in
   sight yet. TLS is terminator-only by design (run the HTTP transport
   behind nginx/caddy); rationale in

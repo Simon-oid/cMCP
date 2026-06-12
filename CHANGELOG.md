@@ -4,7 +4,7 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
-## [Unreleased] — deep-analysis hardening pass
+## v0.10.0 — deep-analysis hardening pass (2026-06-12)
 
 A security/robustness review (LLM Council in the loop on the bind-default
 call) turned up four real findings; this wave lands all four. No public
