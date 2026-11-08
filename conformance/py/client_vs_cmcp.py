@@ -138,8 +138,12 @@ async def run_http_checks(mode: str) -> list[tuple[bool, str]]:
         ) as client:
             names = [t.name for t in (await client.list_tools()).tools]
             greet = await client.call_tool("greet", {})
+            # x-mcp-header: the SDK mirrors `region` into Mcp-Param-Region
+            # and cMCP rejects the call (-32020) unless the two agree.
+            where = await client.call_tool("where", {"region": "us-west1"})
         return [
-            (names == ["greet"], f"http tools/list -> {names}"),
+            (names == ["greet", "where"], f"http tools/list -> {names}"),
+            (text_of(where) == "region=us-west1", f"http where (Mcp-Param-Region) -> {text_of(where)!r}"),
             (asked == ["What is your name?"], f"http elicitation asked once -> {asked}"),
             (text_of(greet) == "Hello, Lin!", f"http greet -> {text_of(greet)!r}"),
         ]

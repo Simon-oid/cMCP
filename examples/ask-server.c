@@ -9,6 +9,10 @@
  *     user and retries with `inputResponses`, and this time
  *     cmcp_handler_input hands the answer straight back.
  *
+ * A second tool, `where`, marks its `region` argument with
+ * `x-mcp-header`: over Streamable HTTP the client mirrors it into an
+ * `Mcp-Param-Region` header, which cMCP checks against the body.
+ *
  * Usage: `ask-server` serves stdio; `ask-server --http PORT` serves
  * Streamable HTTP on 127.0.0.1:PORT/mcp.
  *
@@ -54,6 +58,19 @@ static int greet(const cmcp_json_t *arguments, void *userdata,
     return CMCP_OK;
 }
 
+static int where(const cmcp_json_t *arguments, void *userdata,
+                 cmcp_handler_ctx_t *hctx, cmcp_json_t **out_content,
+                 int *out_is_error) {
+    (void)userdata; (void)hctx;
+    const cmcp_json_t *r = cmcp_json_object_get(arguments, "region");
+    char text[256];
+    snprintf(text, sizeof text, "region=%s",
+             r && r->type == CMCP_JSON_STRING ? cmcp_json_string(r) : "?");
+    *out_content = cmcp_tool_text_content(text);
+    *out_is_error = 0;
+    return CMCP_OK;
+}
+
 /* Serve on 127.0.0.1:port until the process is killed. */
 static int run_http(cmcp_server_t *s, const char *port_arg) {
     long port = strtol(port_arg, NULL, 10);
@@ -75,7 +92,16 @@ int main(int argc, char **argv) {
         .input_schema = "{\"type\":\"object\"}",
         .handler = greet,
     };
+    cmcp_tool_t where_tool = {
+        .name = "where",
+        .description = "Report the region the request was routed for",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"region\":"
+                        "{\"type\":\"string\",\"x-mcp-header\":\"Region\"}},"
+                        "\"required\":[\"region\"]}",
+        .handler = where,
+    };
     int rc = cmcp_server_add_tool(s, &tool);
+    if (rc == CMCP_OK) rc = cmcp_server_add_tool(s, &where_tool);
     if (rc == CMCP_OK) {
         rc = (argc == 3 && strcmp(argv[1], "--http") == 0)
                  ? run_http(s, argv[2])

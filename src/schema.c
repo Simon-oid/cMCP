@@ -23,6 +23,7 @@ typedef struct {
     const cmcp_json_t *root;      /* root schema (for `#/$defs/x` paths) */
     int                depth;     /* current validate() recursion depth */
     int                max_depth; /* abort with -32602-shape error past this */
+    int                draft07;   /* $schema is draft-07: $ref ignores siblings */
 } validate_ctx_t;
 
 #define CMCP_SCHEMA_MAX_DEPTH 64
@@ -684,6 +685,76 @@ static int check_array(validate_ctx_t *ctx,
     return CMCP_OK;
 }
 
+/* `contains` with `minContains` / `maxContains` (2020-12; draft-07 has
+ * `contains` alone, which is the minContains = 1 case). */
+static int check_contains(validate_ctx_t *ctx,
+                          const cmcp_json_t *schema, const cmcp_json_t *value,
+                          path_buf_t *path, cmcp_schema_error_t *err) {
+    const cmcp_json_t *contains = cmcp_json_object_get(schema, "contains");
+    if (!contains || value->type != CMCP_JSON_ARRAY) return CMCP_OK;
+    const cmcp_json_t *minc = cmcp_json_object_get(schema, "minContains");
+    const cmcp_json_t *maxc = cmcp_json_object_get(schema, "maxContains");
+    long long min = (minc && minc->type == CMCP_JSON_INT) ? minc->i : 1;
+
+    long long matched = 0;
+    for (size_t i = 0; i < value->arr.len; i++) {
+        size_t saved = path_push_idx(path, i);
+        if (validate_quiet(ctx, contains, value->arr.items[i], path) == CMCP_OK)
+            matched++;
+        path_pop(path, saved);
+    }
+    if (matched < min)
+        return fail(err, path, min == 1 && !minc ? "contains" : "minContains",
+                    "array has %lld matching items (min %lld)", matched, min);
+    if (maxc && maxc->type == CMCP_JSON_INT && matched > maxc->i)
+        return fail(err, path, "maxContains",
+                    "array has %lld matching items (max %lld)", matched, maxc->i);
+    return CMCP_OK;
+}
+
+/* Every name in `names` (an array of strings) must be a key of `value`. */
+static int require_names(const cmcp_json_t *names, const cmcp_json_t *value,
+                         const char *trigger, const char *keyword,
+                         path_buf_t *path, cmcp_schema_error_t *err) {
+    for (size_t i = 0; i < names->arr.len; i++) {
+        const cmcp_json_t *n = names->arr.items[i];
+        if (n->type == CMCP_JSON_STRING && !cmcp_json_object_get(value, n->str.s))
+            return fail(err, path, keyword,
+                        "property '%s' is required when '%s' is present",
+                        n->str.s, trigger);
+    }
+    return CMCP_OK;
+}
+
+/* `dependentRequired` / `dependentSchemas` (2020-12) and the draft-07
+ * `dependencies` keyword that merged both: when the object has the
+ * trigger property, the listed properties are required / the schema
+ * applies to the whole object. */
+static int check_dependent(validate_ctx_t *ctx,
+                           const cmcp_json_t *schema, const cmcp_json_t *value,
+                           path_buf_t *path, cmcp_schema_error_t *err) {
+    if (value->type != CMCP_JSON_OBJECT) return CMCP_OK;
+    static const char *const kws[] = {
+        "dependentRequired", "dependentSchemas", "dependencies",
+    };
+    for (size_t k = 0; k < sizeof kws / sizeof kws[0]; k++) {
+        const cmcp_json_t *dep = cmcp_json_object_get(schema, kws[k]);
+        if (!dep || dep->type != CMCP_JSON_OBJECT) continue;
+        for (size_t i = 0; i < dep->obj.len; i++) {
+            const char *trigger = dep->obj.keys[i];
+            const cmcp_json_t *rule = dep->obj.values[i];
+            if (!cmcp_json_object_get(value, trigger)) continue;
+            int rc = CMCP_OK;
+            if (rule->type == CMCP_JSON_ARRAY && k != 1)
+                rc = require_names(rule, value, trigger, kws[k], path, err);
+            else if (k != 0 && rule->type != CMCP_JSON_ARRAY)
+                rc = validate(ctx, rule, value, path, err);
+            if (rc != CMCP_OK) return rc;
+        }
+    }
+    return CMCP_OK;
+}
+
 /* ====================================================================== */
 /* Combinators: allOf / anyOf / oneOf / not                                */
 /* ====================================================================== */
@@ -978,10 +1049,9 @@ static int validate(validate_ctx_t *ctx,
     int ref_consumed = 0;
     rc = check_ref(ctx, schema, value, path, err, &ref_consumed);
     if (rc != CMCP_OK) goto out;
-    /* draft-2020-12: $ref siblings are honoured. Fall through into the
-     * rest of the keywords. (Draft-07 would early-return if $ref was
-     * present; we don't, to match Ajv's 2020-12 mode.) */
-    (void)ref_consumed;
+    /* 2020-12 honours keywords next to $ref; draft-07 ignores them, so a
+     * schema declaring draft-07 is validated by its own rules. */
+    if (ref_consumed && ctx->draft07) goto out;
 
     if ((rc = check_type(schema, value, path, err))                != CMCP_OK) goto out;
     if ((rc = check_enum(schema, value, path, err))                != CMCP_OK) goto out;
@@ -991,6 +1061,8 @@ static int validate(validate_ctx_t *ctx,
     if ((rc = check_number(schema, value, path, err))              != CMCP_OK) goto out;
     if ((rc = check_object(ctx, schema, value, path, err))         != CMCP_OK) goto out;
     if ((rc = check_array(ctx, schema, value, path, err))          != CMCP_OK) goto out;
+    if ((rc = check_contains(ctx, schema, value, path, err))       != CMCP_OK) goto out;
+    if ((rc = check_dependent(ctx, schema, value, path, err))      != CMCP_OK) goto out;
     if ((rc = check_combinators(ctx, schema, value, path, err))    != CMCP_OK) goto out;
     if ((rc = check_conditional(ctx, schema, value, path, err))    != CMCP_OK) goto out;
 
@@ -1003,6 +1075,33 @@ out:
 /* Public entry                                                            */
 /* ====================================================================== */
 
+int cmcp_schema_dialect(const cmcp_json_t *schema) {
+    const cmcp_json_t *d = (schema && schema->type == CMCP_JSON_OBJECT)
+                               ? cmcp_json_object_get(schema, "$schema") : NULL;
+    if (!d) return CMCP_SCHEMA_2020_12;          /* MCP default dialect */
+    if (d->type != CMCP_JSON_STRING) return -1;
+    static const char *const v2020[] = {
+        "https://json-schema.org/draft/2020-12/schema",
+        "https://json-schema.org/draft/2020-12/schema#",
+    };
+    static const char *const v07[] = {
+        "http://json-schema.org/draft-07/schema",
+        "http://json-schema.org/draft-07/schema#",
+        "https://json-schema.org/draft-07/schema",
+        "https://json-schema.org/draft-07/schema#",
+    };
+    for (size_t i = 0; i < sizeof v2020 / sizeof v2020[0]; i++)
+        if (strcmp(d->str.s, v2020[i]) == 0) return CMCP_SCHEMA_2020_12;
+    for (size_t i = 0; i < sizeof v07 / sizeof v07[0]; i++)
+        if (strcmp(d->str.s, v07[i]) == 0) return CMCP_SCHEMA_DRAFT_07;
+    return -1;
+}
+
+const cmcp_json_t *cmcp_schema_resolve_pointer(const cmcp_json_t *root,
+                                               const char *ref) {
+    return resolve_json_pointer(root, ref);
+}
+
 int cmcp_schema_validate(const cmcp_json_t *schema,
                           const cmcp_json_t *value,
                           cmcp_schema_error_t *err) {
@@ -1011,6 +1110,10 @@ int cmcp_schema_validate(const cmcp_json_t *schema,
     if (schema->type != CMCP_JSON_OBJECT && schema->type != CMCP_JSON_BOOL)
         return CMCP_EINVAL;
     if (err) cmcp_schema_error_init(err);
+    /* An unsupported dialect is reported, not validated as if it were
+     * another one (spec: basic/index, JSON Schema Usage). */
+    int dialect = cmcp_schema_dialect(schema);
+    if (dialect < 0) return CMCP_EUNSUPPORTED;
 
     /* Treat NULL value as a JSON null so the inner functions can deref
      * `value->type` without a NULL check on every line. */
@@ -1031,6 +1134,7 @@ int cmcp_schema_validate(const cmcp_json_t *schema,
         .root      = schema,
         .depth     = 0,
         .max_depth = CMCP_SCHEMA_MAX_DEPTH,
+        .draft07   = dialect == CMCP_SCHEMA_DRAFT_07,
     };
     int rc = validate(&ctx, schema, value, &path, err);
 

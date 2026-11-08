@@ -142,6 +142,11 @@ static int hrig_start(hrig_t *r) {
     cmcp_server_capabilities_t caps = {.tools_list_changed = 1};
     cmcp_server_set_capabilities(r->s, &caps);
     const cmcp_tool_t tools[] = {
+        {.name = "sql", .description = "d", .handler = echo,
+         .input_schema = "{\"type\":\"object\",\"properties\":{"
+                         "\"text\":{\"type\":\"string\"},"
+                         "\"region\":{\"type\":\"string\","
+                         "\"x-mcp-header\":\"Region\"}}}"},
         {.name = "hang", .description = "d", .handler = hang,
          .input_schema = "{\"type\":\"object\"}"},
         {.name = "echo", .description = "d", .handler = echo,
@@ -606,6 +611,32 @@ static void test_closing_connection_cancels_request(void) {
     hrig_stop(&r);
 }
 
+/* x-mcp-header: the mirrored argument must match its Mcp-Param header. */
+#define SQL_CALL "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\"," \
+    "\"params\":{\"name\":\"sql\",\"arguments\":{\"text\":\"q\","          \
+    "\"region\":\"us-west1\"}," META "}}"
+#define SQL_HEADERS "MCP-Protocol-Version: " MODERN "\r\n"                  \
+    "Mcp-Method: tools/call\r\nMcp-Name: sql\r\n"
+
+static void test_mcp_param_header_is_checked(void) {
+    hrig_t r; TEST_ASSERT(hrig_start(&r) == 0);
+    char *resp = post(&r, SQL_HEADERS "Mcp-Param-Region: us-west1\r\n",
+                      ACCEPT_BOTH, SQL_CALL);
+    TEST_ASSERT(status_of(resp) == 200);
+    free(resp);
+    /* Missing, then different: a gateway could have routed this call to
+     * another region than the one the body runs in. */
+    expect_error(&r, SQL_HEADERS, SQL_CALL, 400, CMCP_RPC_HEADER_MISMATCH);
+    expect_error(&r, SQL_HEADERS "Mcp-Param-Region: eu-north1\r\n", SQL_CALL,
+                 400, CMCP_RPC_HEADER_MISMATCH);
+    /* Header names are case-insensitive. */
+    resp = post(&r, SQL_HEADERS "mcp-param-region: us-west1\r\n",
+                ACCEPT_BOTH, SQL_CALL);
+    TEST_ASSERT(status_of(resp) == 200);
+    free(resp);
+    hrig_stop(&r);
+}
+
 int main(void) {
     TEST_RUN(test_header_decode_unit);
     TEST_RUN(test_modern_call_needs_no_session);
@@ -621,5 +652,6 @@ int main(void) {
     TEST_RUN(test_listen_requires_sse_accept);
     TEST_RUN(test_listen_bad_filter_ends_stream);
     TEST_RUN(test_closing_connection_cancels_request);
+    TEST_RUN(test_mcp_param_header_is_checked);
     TEST_DONE();
 }

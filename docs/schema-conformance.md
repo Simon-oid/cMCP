@@ -13,7 +13,18 @@ TypeScript MCP SDK uses). The full audit and gap-tracking lives in
 ## Target draft
 
 cMCP implements **JSON Schema draft 2020-12** semantics with **draft-
-07 wire compatibility**. Concretely: we use the 2020-12 keyword names
+07 wire compatibility**. MCP 2026-07-28 makes 2020-12 the default
+dialect when a schema has no `$schema`, and requires an unsupported
+dialect to be reported rather than validated as another one:
+
+| `$schema` | Treated as |
+|---|---|
+| absent | 2020-12 |
+| `https://json-schema.org/draft/2020-12/schema` (with or without `#`) | 2020-12 |
+| `http(s)://json-schema.org/draft-07/schema` (with or without `#`) | draft-07: `$ref` ignores its sibling keywords |
+| anything else | `CMCP_EUNSUPPORTED` from `cmcp_schema_validate` and `cmcp_schema_check`; `cmcp_server_add_tool` refuses the tool |
+
+ Concretely: we use the 2020-12 keyword names
 internally (`prefixItems`, `$defs`) and accept the draft-07 aliases
 (`items` as tuple, `additionalItems`, `definitions`) without emitting
 them ourselves. A schema written for either draft will validate
@@ -55,6 +66,8 @@ identically on cMCP and Ajv for every keyword in this document.
 | `items` (draft-2020-12, paired with `prefixItems`) | Subschema or boolean applied to entries past the prefix. |
 | `minItems`, `maxItems` | Inclusive bounds on length. |
 | `uniqueItems` | Deep-equality check across all pairs. |
+| `contains` | At least one element (or `minContains`) matches the subschema. |
+| `minContains`, `maxContains` | Bounds on how many elements match `contains`; `minContains: 0` makes `contains` always pass. |
 
 ### Objects
 
@@ -67,6 +80,9 @@ identically on cMCP and Ajv for every keyword in this document.
 | `patternProperties` | POSIX ERE patterns → subschema applied to every value whose key matches. |
 | `propertyNames` | Subschema applied to each key (the key is materialised as a string value). |
 | `minProperties`, `maxProperties` | Inclusive bounds on key count. |
+| `dependentRequired` | `{"a": ["b"]}`: when `a` is present, `b` is required. |
+| `dependentSchemas` | `{"a": {...}}`: when `a` is present, the subschema applies to the whole object. |
+| `dependencies` (draft-07) | Either form above, per property. |
 
 ### Boolean combinators
 
@@ -168,20 +184,54 @@ JSON parser preserves the lexical form.
 If you want to accept either form for the same field, use
 `"type": ["integer", "number"]` or just `"type": "number"`.
 
-## Not yet implemented
+## Not implemented — rejected at registration
 
-These keywords parse without error (schemas containing them remain
-valid) but are not enforced. They are deferred to demand:
-
-| Keyword | Why deferred |
+| Keyword | Why |
 |---|---|
-| `dependentRequired` / `dependentSchemas` / `dependencies` (draft-07) | Rarely used; deferred until a real consumer needs them. |
-| `contains` / `minContains` / `maxContains` | Pending demand. |
-| `unevaluatedProperties` / `unevaluatedItems` | Requires evaluation tracking through combinators — significant complexity for marginal benefit. |
+| `unevaluatedProperties` / `unevaluatedItems` | Needs evaluation tracking through every applicator. |
+| `$dynamicRef` / `$recursiveRef` | Dynamic scoping; no MCP tool schema we know of uses it. |
 
-A schema that uses these keywords still validates successfully against
-the rest of the schema; cMCP just doesn't enforce them. This is the
-same forward-compatible posture the validator has carried since v0.1.
+Earlier versions accepted these and simply did not enforce them, which
+made a schema more permissive than its author meant. `cmcp_schema_check`
+now rejects them with `CMCP_EUNSUPPORTED`, so the tool author finds out
+at registration instead of in production.
+
+## Registration-time checks (`cmcp_schema_check`)
+
+`cmcp_server_add_tool` runs `cmcp_schema_check` on `input_schema` and
+`output_schema`, and refuses the tool (with a one-line reason on stderr)
+when it fails:
+
+| Check | Result |
+|---|---|
+| Unsupported `$schema` dialect | `CMCP_EUNSUPPORTED` |
+| `$ref` to another document or URI (never fetched) | `CMCP_EUNSUPPORTED` |
+| Local `$ref` that does not resolve | `CMCP_EINVAL` |
+| A keyword from the table above | `CMCP_EUNSUPPORTED` |
+| A subschema that is neither an object nor a boolean | `CMCP_EINVAL` |
+| `type` not a type name (or non-empty array of them); `required` not strings; `enum` not an array; empty `allOf`/`anyOf`/`oneOf`/`prefixItems`; a map keyword that is not an object; a count (`minLength`, `maxItems`, `minContains`, ...) that is not a non-negative integer | `CMCP_EINVAL` |
+| More than 64 levels of nesting or 10,000 subschemas (DoS bound) | `CMCP_EINVAL` |
+
+The error carries a JSON Pointer *into the schema* (e.g.
+`/properties/a`), the keyword and a message.
+
+## `x-mcp-header` (MCP 2026-07-28)
+
+A property may carry `"x-mcp-header": "<Name>"`; over Streamable HTTP
+the client mirrors that argument into `Mcp-Param-<Name>`.
+
+At registration the annotation must be a non-empty HTTP token (RFC 9110
+`tchar`), unique case-insensitively within the schema, on a property of
+type `string`, `integer` or `boolean` (not `number`), reached from the
+root through `properties` keys only — never through `items`,
+combinators, conditionals or `$ref`. Otherwise `CMCP_EINVAL`.
+
+On each modern `tools/call` over HTTP, every annotated argument present
+(and not `null`) in the body must arrive in its header with the same
+value: the `=?base64?...?=` sentinel is decoded first, integers are
+compared numerically (`42.0` = `42`) within ±(2^53 − 1), booleans as
+`true` / `false`. A missing or different header is `400` with JSON-RPC
+`-32020` (HeaderMismatch). Over stdio the annotation is ignored.
 
 ## Cross-check methodology
 

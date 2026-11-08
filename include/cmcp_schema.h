@@ -25,25 +25,44 @@
  *
  * Supported keywords (full list + semantics in docs/schema-conformance.md):
  *
- *   type, enum, const
+ *   type, enum, const, format
  *   minLength / maxLength / pattern              on strings
  *   minimum / maximum / exclusive{Min,Max}imum   on numbers
  *   multipleOf                                   on numbers
  *   minItems / maxItems / uniqueItems            on arrays
  *   items (single + tuple), prefixItems          on arrays
  *   additionalItems                              on arrays
+ *   contains / minContains / maxContains         on arrays
  *   properties, required                         on objects
  *   patternProperties, additionalProperties      on objects
  *   propertyNames                                on objects
  *   minProperties / maxProperties                on objects
+ *   dependentRequired / dependentSchemas         on objects
+ *   dependencies (draft-07)                      on objects
  *   allOf / anyOf / oneOf / not                  combinators
  *   if / then / else                             conditional
+ *   $ref (local JSON Pointer) / $defs / definitions
  *   true / false                                 boolean schemas
  *
- * Not yet implemented (silently accepted; landing post-6.7):
- *   $ref / $defs / definitions, format, dependentRequired/Schemas,
- *   contains, unevaluatedProperties/Items. See docs/schema-conformance.md
- *   for the deferred list and rationale. */
+ * Dialects: JSON Schema 2020-12 (the MCP default when `$schema` is
+ * absent) and draft-07. Any other `$schema` is CMCP_EUNSUPPORTED.
+ *
+ * Not implemented: unevaluatedProperties / unevaluatedItems and
+ * $dynamicRef. cmcp_schema_check rejects schemas that use them rather
+ * than validating them more permissively than their author meant. */
+
+/* Dialect of a schema, from its `$schema` (absent = 2020-12). */
+#define CMCP_SCHEMA_2020_12  1
+#define CMCP_SCHEMA_DRAFT_07 2
+
+/* CMCP_SCHEMA_2020_12, CMCP_SCHEMA_DRAFT_07, or -1 for a dialect this
+ * build does not support. */
+int cmcp_schema_dialect(const cmcp_json_t *schema);
+
+/* Resolve a local `$ref` ("#", "#/a/b", RFC 6901 escapes) against
+ * `root`. Borrowed result, or NULL when it does not resolve. */
+const cmcp_json_t *cmcp_schema_resolve_pointer(const cmcp_json_t *root,
+                                               const char *ref);
 
 typedef struct {
     /* JSON Pointer (RFC 6901) into the offending value. "" = root. */
@@ -71,6 +90,7 @@ void cmcp_schema_error_clear(cmcp_schema_error_t *e);
  *   CMCP_OK      value matches the schema
  *   CMCP_ESCHEMA value violates the schema (err populated if requested)
  *   CMCP_EINVAL  schema itself is malformed (NULL or not an object)
+ *   CMCP_EUNSUPPORTED the schema declares a dialect this build lacks
  *   CMCP_ENOMEM  allocation failed during validation
  */
 int cmcp_schema_validate(const cmcp_json_t *schema,
@@ -85,5 +105,22 @@ int cmcp_schema_validate(const cmcp_json_t *schema,
  * Caller owns the result. Returns NULL on allocation failure or if
  * `e` has no populated fields. */
 cmcp_json_t *cmcp_schema_error_to_json(const cmcp_schema_error_t *e);
+
+/* Check a schema itself, as cmcp_server_add_tool does at registration.
+ * Rejects what cmcp_schema_validate would otherwise get wrong:
+ *
+ *   CMCP_EUNSUPPORTED  a `$schema` dialect other than 2020-12 / draft-07;
+ *                      a `$ref` to another document or URI (never
+ *                      fetched); unevaluatedProperties / unevaluatedItems
+ *                      / $dynamicRef / $recursiveRef
+ *   CMCP_EINVAL        a malformed schema: a subschema that is neither
+ *                      an object nor a boolean, a local `$ref` that does
+ *                      not resolve, badly typed keyword values (`type`,
+ *                      `required`, `enum`, the combinators, the counts),
+ *                      more than 64 levels or 10000 subschemas
+ *
+ * On failure `err` (optional; freed with cmcp_schema_error_clear) holds
+ * the JSON Pointer *into the schema*, the keyword, and a message. */
+int cmcp_schema_check(const cmcp_json_t *schema, cmcp_schema_error_t *err);
 
 #endif

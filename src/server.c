@@ -13,6 +13,7 @@
 #include "mrtr.h"
 #include "seal.h"
 #include "subscriptions.h"
+#include "xheader.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -342,6 +343,33 @@ static server_tool_t *tool_find(cmcp_server_t *s, const char *name) {
     return NULL;
 }
 
+/* Registration-time checks on a tool's schemas: what the validator
+ * supports (cmcp_schema_check) and the x-mcp-header rules. A rejected
+ * schema is reported on stderr, the only channel a library may use,
+ * so the author sees why add_tool failed. */
+static int check_tool_schemas(const char *tool, const cmcp_json_t *in,
+                              const cmcp_json_t *out) {
+    cmcp_schema_error_t e;
+    cmcp_schema_error_init(&e);
+    const char *which = "inputSchema";
+    int rc = in ? cmcp_schema_check(in, &e) : CMCP_OK;
+    if (rc == CMCP_OK && in) {
+        cmcp_schema_error_clear(&e);
+        rc = cmcp_xheader_lint(in, &e);
+    }
+    if (rc == CMCP_OK && out) {
+        cmcp_schema_error_clear(&e);
+        which = "outputSchema";
+        rc = cmcp_schema_check(out, &e);
+    }
+    if (rc != CMCP_OK)
+        fprintf(stderr, "cmcp: tool '%s' rejected: %s at '%s' (%s): %s\n",
+                tool, which, e.path ? e.path : "", e.keyword ? e.keyword : "",
+                e.message ? e.message : "invalid schema");
+    cmcp_schema_error_clear(&e);
+    return rc;
+}
+
 int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
     if (!s || !tool || !tool->name || !tool->handler) return CMCP_EINVAL;
     if (tool_find(s, tool->name)) return CMCP_EPROTOCOL;
@@ -366,6 +394,12 @@ int cmcp_server_add_tool(cmcp_server_t *s, const cmcp_tool_t *tool) {
             cmcp_json_free(out_schema);
             return CMCP_EPARSE;
         }
+    }
+    int src = check_tool_schemas(tool->name, in_schema, out_schema);
+    if (src != CMCP_OK) {
+        cmcp_json_free(in_schema);
+        cmcp_json_free(out_schema);
+        return src;
     }
     cmcp_json_t *icons = NULL;
     if (tool->icons) {
@@ -1151,6 +1185,11 @@ static void outgoing_cancel_all(cmcp_server_t *s) {
 /* tools/call                                                              */
 /* ====================================================================== */
 
+/* cmcp_header_get_fn over the handler context's request headers. */
+static const char *handler_header(void *ctx, const char *name) {
+    return cmcp_handler_get_header((const cmcp_handler_ctx_t *)ctx, name);
+}
+
 static void handle_tools_call(cmcp_server_t *s,
                                const cmcp_rpc_message_t *req,
                                cmcp_rpc_message_t *resp,
@@ -1177,6 +1216,22 @@ static void handle_tools_call(cmcp_server_t *s,
 
     /* arguments is optional; default to absent. */
     const cmcp_json_t *args = cmcp_json_object_get(req->params, "arguments");
+
+    /* Streamable HTTP (2026-07-28): arguments the schema marks with
+     * x-mcp-header must match their Mcp-Param-* headers, or a gateway
+     * routing on the header and this server could act on different
+     * values. Mcp-Method is always present on such a request. */
+    if (hctx && hctx->mrtr.modern && t->input_schema &&
+        cmcp_handler_get_header(hctx, "Mcp-Method")) {
+        char *msg = NULL;
+        if (cmcp_xheader_check(t->input_schema, args, handler_header, hctx,
+                               &msg)) {
+            cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_HEADER_MISMATCH,
+                                msg ? msg : "Header mismatch", NULL);
+            free(msg);
+            return;
+        }
+    }
 
     /* Validate arguments against the registered input schema. NULL
      * arguments are treated as a JSON null by the validator; that

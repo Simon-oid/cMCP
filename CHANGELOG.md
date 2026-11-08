@@ -10,7 +10,8 @@ cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
 revision through `initialize` and adds the modern, stateless
 2026-07-28 revision, chosen per request. Landing in phases; the stdio
 server path, multi round-trip requests, modern requests over Streamable
-HTTP and `subscriptions/listen` are done; schemas and the client follow.
+HTTP, `subscriptions/listen` and the JSON Schema work are done; the
+client follows.
 
 - **Modern server path (stdio).** A request whose `params._meta`
   carries `io.modelcontextprotocol/protocolVersion` or
@@ -85,6 +86,25 @@ HTTP and `subscriptions/listen` are done; schemas and the client follow.
   modern request hangs up before the answer, the request is cancelled
   (`cmcp_handler_cancelled` turns true) and a late response is dropped
   instead of reaching the next POST.
+- **JSON Schema 2020-12 conformance.** 2020-12 is the default dialect;
+  draft-07 is honoured when declared (`$ref` then ignores siblings); any
+  other `$schema` is `CMCP_EUNSUPPORTED`. New keywords: `contains` /
+  `minContains` / `maxContains`, `dependentRequired` /
+  `dependentSchemas`, draft-07 `dependencies`. New public
+  `cmcp_schema_check`, `cmcp_schema_dialect`,
+  `cmcp_schema_resolve_pointer`.
+- **Behaviour change: tool schemas are checked at registration.**
+  `cmcp_server_add_tool` refuses (with a reason on stderr) a schema with
+  an unsupported dialect, a `$ref` to another document (`CMCP_EUNSUPPORTED`)
+  or one that does not resolve, `unevaluatedProperties` /
+  `unevaluatedItems` / `$dynamicRef` (previously accepted but not
+  enforced), malformed keyword values, or more than 64 levels / 10,000
+  subschemas.
+- **`x-mcp-header`.** Annotations are linted at registration (HTTP
+  token, case-insensitively unique, string/integer/boolean, reachable
+  through `properties` only). On a modern `tools/call` over HTTP each
+  annotated argument must match its `Mcp-Param-*` header (sentinel
+  decoded, integers numerically), else `400` / `-32020`.
 - **Behaviour change:** list-changed notifications reach a legacy client
   only once its handshake is complete, and modern clients only through a
   subscription that asked for them (the spec forbids unrequested
@@ -97,7 +117,9 @@ HTTP and `subscriptions/listen` are done; schemas and the client follow.
   method chain in `server.c` moved into `dispatch_request`, shared by
   both eras.
   `src/mrtr.{c,h}` the MRTR state, `src/subscriptions.{c,h}` the
-  subscription registry, `src/seal.{c,h}` and
+  subscription registry, `src/schema_check.c` + `src/schema_walk.h` the
+  registration checks, `src/xheader.{c,h}` the x-mcp-header rules,
+  `src/seal.{c,h}` and
   `src/sha256.{c,h}` the requestState seal.
 - **Tests:** `tests/test_modern.c` (10 cases, raw-wire frames),
   `tests/test_mrtr.c` (14 cases: both rounds, tampered / replayed /
@@ -108,12 +130,15 @@ HTTP and `subscriptions/listen` are done; schemas and the client follow.
   mapping, request-scoped SSE, legacy beside modern, listen streams,
   `409`/`406`, stream-close cancellation), `tests/test_subscriptions.c`
   (stdio: acknowledged subset, tagging, per-filter routing, cancel, no
-  unsolicited notifications). The Python SDK
+  unsolicited notifications), `tests/test_schema_check.c` (dialects, the
+  new keywords, every registration check incl. the DoS bounds,
+  x-mcp-header lint and comparison). The Python SDK
   conformance harness
   (`make conformance-py`) passes in all three modes and now also runs
   an elicitation round-trip against the new `examples/ask-server`, and
   in the modern modes repeats it over Streamable HTTP
-  (`ask-server --http PORT`).
+  (`ask-server --http PORT`), including a tool whose `region` argument
+  the SDK mirrors into `Mcp-Param-Region`.
 
 ## v0.10.0 — deep-analysis hardening pass (2026-06-12)
 

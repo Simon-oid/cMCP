@@ -24,7 +24,7 @@ libcurl (for the Streamable HTTP client transport).
   the Python SDK** on the same workload. SDK versions, methodology and
   the command to reproduce in
   [`docs/perf-baselines.md`](docs/perf-baselines.md#current-numbers-2026-11-08).
-- **<!-- test-stats -->4,187 assertions across 35 test binaries<!-- /test-stats -->**, all green under
+- **<!-- test-stats -->4,256 assertions across 36 test binaries<!-- /test-stats -->**, all green under
   valgrind, ASan/UBSan, and TSan on every push.
 - **Conformance-tested in both wire roles** against the official MCP
   TypeScript reference SDK, plus a replay gate over captured wire
