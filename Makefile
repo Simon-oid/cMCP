@@ -26,7 +26,7 @@ CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c src/era.c \
                      src/http_parser.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
-SERVER_CANDIDATES := src/server.c src/worker.c src/mrtr.c
+SERVER_CANDIDATES := src/server.c src/worker.c src/mrtr.c src/subscriptions.c
 CLIENT_CANDIDATES := src/client.c src/session.c
 
 CORE_SRC   := $(wildcard $(CORE_CANDIDATES))

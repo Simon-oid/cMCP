@@ -12,6 +12,7 @@
 #include "era.h"
 #include "mrtr.h"
 #include "seal.h"
+#include "subscriptions.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -170,6 +171,10 @@ struct cmcp_server {
      * zero length means no key could be drawn, so state is refused. */
     unsigned char                state_key[CMCP_SEAL_KEY_LEN];
     size_t                       state_key_len;
+
+    /* Open `subscriptions/listen` streams (MCP 2026-07-28). NULL only
+     * if it could not be allocated; listen then fails with -32603. */
+    cmcp_subs_t                 *subs;
 };
 
 /* ====================================================================== */
@@ -235,6 +240,7 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
     s->log_mu_init    = 1;
     s->log_min_level  = CMCP_LOG_LEVEL_DEBUG;
     load_random_state_key(s);
+    s->subs = cmcp_subs_new();
     return s;
 }
 
@@ -265,6 +271,7 @@ static void prompt_clear(server_prompt_t *p) {
 }
 
 void cmcp_server_free(cmcp_server_t *s) {
+    if (s) cmcp_subs_free(s->subs);
     if (!s) return;
     free(s->name);
     free(s->version);
@@ -1671,6 +1678,49 @@ static int handle_modern_call(cmcp_server_t *s,
     return CMCP_OK;
 }
 
+/* The change notifications this server can actually emit, as
+ * CMCP_SUB_* bits: a subscription keeps only these. */
+static unsigned supported_subscriptions(const cmcp_server_t *s) {
+    unsigned k = 0;
+    if (s->caps.tools_list_changed)     k |= CMCP_SUB_TOOLS;
+    if (s->caps.prompts_list_changed)   k |= CMCP_SUB_PROMPTS;
+    if (s->caps.resources_list_changed) k |= CMCP_SUB_RESOURCES;
+    if (s->caps.resources_subscribe)    k |= CMCP_SUB_UPDATES;
+    return k;
+}
+
+/* A JSON-RPC id as a JSON value (owned), for subscription ids. */
+static cmcp_json_t *id_to_json(const cmcp_id_t *id) {
+    if (id->kind == CMCP_ID_INT) return cmcp_json_new_int(id->i);
+    if (id->kind == CMCP_ID_STRING) return cmcp_json_new_string_n(id->s, id->s_len);
+    return cmcp_json_new_null();
+}
+
+/* subscriptions/listen: register the filter and acknowledge it. The
+ * acknowledgment is the first message of the subscription; the request
+ * itself stays unanswered while the stream is open (*resp stays empty),
+ * so the run loop sends nothing for it. */
+static void handle_listen(cmcp_server_t *s, const cmcp_rpc_message_t *msg,
+                          cmcp_rpc_message_t *resp) {
+    cmcp_json_t *id = id_to_json(&msg->id);
+    cmcp_json_t *ack = NULL;
+    int rc = id ? cmcp_subs_listen(s->subs, id, msg->params,
+                                   supported_subscriptions(s), &ack)
+                : CMCP_ENOMEM;
+    cmcp_json_free(id);
+    if (rc == CMCP_EPROTOCOL) {
+        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INVALID_PARAMS,
+                            "Invalid subscription filter", NULL);
+        return;
+    }
+    if (rc != CMCP_OK) {
+        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INTERNAL_ERROR,
+                            "Server out of memory", NULL);
+        return;
+    }
+    cmcp_server_notify(s, "notifications/subscriptions/acknowledged", ack);
+}
+
 /* Serve one modern (2026-07-28) request. Stateless: it never reads or
  * changes the legacy handshake state, so it works before, after or
  * without `initialize`, on the same process as a legacy session. */
@@ -1686,6 +1736,10 @@ static void handle_modern(cmcp_server_t *s,
         return;
     }
 
+    if (strcmp(msg->method, "subscriptions/listen") == 0) {
+        handle_listen(s, msg, resp);
+        return;                       /* no response while it is open */
+    }
     if (strcmp(msg->method, "server/discover") == 0) {
         cmcp_json_t *result = cmcp_era_discover_result(server_caps_to_json(s));
         if (!result) {
@@ -1746,7 +1800,12 @@ static void server_handle_message(cmcp_server_t *s,
              * its handler can bail and its response is dropped. */
             const cmcp_json_t *rid = msg->params
                 ? cmcp_json_object_get(msg->params, "requestId") : NULL;
-            if (rid) inflight_cancel(s, rid);
+            if (rid) {
+                inflight_cancel(s, rid);
+                /* On stdio this is also how a client ends a
+                 * subscriptions/listen stream. */
+                cmcp_subs_cancel(s->subs, rid);
+            }
         }
         /* All other notifications: drop silently per JSON-RPC spec. */
         return;
@@ -2037,8 +2096,9 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
         cmcp_rpc_message_t resp;
         server_handle_message(s, &msgs[0], &resp, NULL);
 
-        /* Only requests get replies. */
-        if (msgs[0].kind == CMCP_MSG_REQUEST) {
+        /* Only requests get replies — and not every request: an open
+         * subscriptions/listen is answered only when it ends. */
+        if (msgs[0].kind == CMCP_MSG_REQUEST && (resp.result || resp.error)) {
             send_message(t, &resp);
         }
         cmcp_rpc_message_clear(&resp);
@@ -2118,34 +2178,92 @@ int cmcp_server_notify(cmcp_server_t *s,
     return rc;
 }
 
+/* Non-zero once a legacy session completed its handshake: only then
+ * did a legacy client sign up for server-wide notifications. */
+static int legacy_session_ready(cmcp_server_t *s) {
+    pthread_mutex_lock(&s->log_mu);
+    int ready = s->log_session;
+    pthread_mutex_unlock(&s->log_mu);
+    return ready;
+}
+
+/* Send `method` to every subscription that asked for `kind` (and `uri`,
+ * for resource updates), tagged with its subscription id. */
+static int notify_subscribers(cmcp_server_t *s, const char *method,
+                              unsigned kind, const char *uri) {
+    cmcp_json_t *ids = cmcp_subs_match(s->subs, kind, uri);
+    int rc = CMCP_OK;
+    for (size_t i = 0; ids && i < cmcp_json_array_len(ids); i++) {
+        cmcp_json_t *extra = NULL;
+        if (uri) {
+            extra = cmcp_json_new_object();
+            if (extra && cmcp_json_object_set(extra, "uri",
+                                              cmcp_json_new_string(uri)) != 0) {
+                cmcp_json_free(extra);
+                extra = NULL;
+            }
+            if (!extra) { rc = CMCP_ENOMEM; continue; }
+        }
+        cmcp_json_t *params = cmcp_subs_tag(cmcp_json_array_at(ids, i), extra);
+        int r = params ? cmcp_server_notify(s, method, params) : CMCP_ENOMEM;
+        if (r != CMCP_OK && rc == CMCP_OK) rc = r;
+    }
+    cmcp_json_free(ids);
+    return rc;
+}
+
+/* A list-changed notification: to the legacy session, if there is one,
+ * and to each modern subscription that asked for it. Nobody else: the
+ * spec forbids sending notification types a client did not request. */
+static int notify_list_changed(cmcp_server_t *s, const char *method,
+                               unsigned kind) {
+    /* Outside cmcp_server_run there is no one to tell (CMCP_EINVAL, as
+     * cmcp_server_notify reports), whoever would have been listening. */
+    pthread_mutex_lock(&s->notify_mu);
+    int running = s->active_transport != NULL;
+    pthread_mutex_unlock(&s->notify_mu);
+    if (!running) return CMCP_EINVAL;
+    int rc = CMCP_OK;
+    if (legacy_session_ready(s)) rc = cmcp_server_notify(s, method, NULL);
+    int r = notify_subscribers(s, method, kind, NULL);
+    return rc != CMCP_OK ? rc : r;
+}
+
 int cmcp_server_notify_tools_changed(cmcp_server_t *s) {
     if (!s) return CMCP_EINVAL;
     if (!s->caps.tools_list_changed) return CMCP_EPROTOCOL;
-    return cmcp_server_notify(s, "notifications/tools/list_changed", NULL);
+    return notify_list_changed(s, "notifications/tools/list_changed",
+                               CMCP_SUB_TOOLS);
 }
 
 int cmcp_server_notify_resources_changed(cmcp_server_t *s) {
     if (!s) return CMCP_EINVAL;
     if (!s->caps.resources_list_changed) return CMCP_EPROTOCOL;
-    return cmcp_server_notify(s, "notifications/resources/list_changed", NULL);
+    return notify_list_changed(s, "notifications/resources/list_changed",
+                               CMCP_SUB_RESOURCES);
 }
 
 int cmcp_server_notify_prompts_changed(cmcp_server_t *s) {
     if (!s) return CMCP_EINVAL;
     if (!s->caps.prompts_list_changed) return CMCP_EPROTOCOL;
-    return cmcp_server_notify(s, "notifications/prompts/list_changed", NULL);
+    return notify_list_changed(s, "notifications/prompts/list_changed",
+                               CMCP_SUB_PROMPTS);
 }
 
 int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri) {
     if (!s || !uri) return CMCP_EINVAL;
     if (!s->caps.resources_subscribe) return CMCP_EPROTOCOL;
-    /* Skip if no peer subscribed to this URI. */
-    if (sub_index(s, uri) < 0) return CMCP_OK;
-
-    cmcp_json_t *params = cmcp_json_new_object();
-    if (!params) return CMCP_ENOMEM;
-    cmcp_json_object_set(params, "uri", cmcp_json_new_string(uri));
-    return cmcp_server_notify(s, "notifications/resources/updated", params);
+    int rc = CMCP_OK;
+    /* Legacy: only if the session subscribed to this URI. */
+    if (sub_index(s, uri) >= 0) {
+        cmcp_json_t *params = cmcp_json_new_object();
+        if (!params) return CMCP_ENOMEM;
+        cmcp_json_object_set(params, "uri", cmcp_json_new_string(uri));
+        rc = cmcp_server_notify(s, "notifications/resources/updated", params);
+    }
+    int r = notify_subscribers(s, "notifications/resources/updated",
+                               CMCP_SUB_UPDATES, uri);
+    return rc != CMCP_OK ? rc : r;
 }
 
 /* ====================================================================== */

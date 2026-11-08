@@ -20,7 +20,9 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,6 +87,22 @@ static int slow(const cmcp_json_t *args, void *ud, cmcp_handler_ctx_t *hctx,
     return CMCP_OK;
 }
 
+/* Runs until cancelled (or 3 s), and records that it saw the cancel. */
+static atomic_int g_cancel_seen;
+
+static int hang(const cmcp_json_t *args, void *ud, cmcp_handler_ctx_t *hctx,
+                cmcp_json_t **out, int *is_error) {
+    (void)args; (void)ud;
+    for (int i = 0; i < 300 && !cmcp_handler_cancelled(hctx); i++) {
+        struct timespec ts = {0, 10 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+    }
+    if (cmcp_handler_cancelled(hctx)) atomic_store(&g_cancel_seen, 1);
+    *out = cmcp_tool_text_content("hang done");
+    *is_error = 0;
+    return CMCP_OK;
+}
+
 typedef struct {
     cmcp_transport_t *t;
     cmcp_server_t    *s;
@@ -121,7 +139,11 @@ static int hrig_start(hrig_t *r) {
     r->t = cmcp_transport_http_listen("127.0.0.1", r->port);
     r->s = cmcp_server_new("http-modern", "1.0");
     if (!r->port || !r->t || !r->s) return -1;
+    cmcp_server_capabilities_t caps = {.tools_list_changed = 1};
+    cmcp_server_set_capabilities(r->s, &caps);
     const cmcp_tool_t tools[] = {
+        {.name = "hang", .description = "d", .handler = hang,
+         .input_schema = "{\"type\":\"object\"}"},
         {.name = "echo", .description = "d", .handler = echo,
          .input_schema = "{\"type\":\"object\",\"properties\":"
                          "{\"text\":{\"type\":\"string\"}}}"},
@@ -442,6 +464,148 @@ static void test_header_decode_unit(void) {
     TEST_ASSERT(cmcp_http_header_decode("=?base64?a=bc?=") == NULL);   /* pad */
 }
 
+/* ---------------------------------------------------------------- */
+/* subscriptions/listen and stream-close cancellation (Phase 4b)     */
+/* ---------------------------------------------------------------- */
+
+#define LISTEN_HEADERS "MCP-Protocol-Version: " MODERN "\r\n"          \
+    "Mcp-Method: subscriptions/listen\r\n"
+
+#define LISTEN_BODY(id, filter)                                          \
+    "{\"jsonrpc\":\"2.0\",\"id\":" #id ",\"method\":\"subscriptions/listen\"," \
+    "\"params\":{" META ",\"notifications\":" filter "}}"
+
+/* Open a connection and send one POST without reading the reply. */
+static int post_open(hrig_t *r, const char *headers, const char *accept,
+                     const char *body) {
+    char req[4096];
+    int n = snprintf(req, sizeof req,
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\n"
+        "Content-Type: application/json\r\nAccept: %s\r\n%s"
+        "Content-Length: %zu\r\n\r\n%s",
+        accept, headers, strlen(body), body);
+    int fd = (n > 0 && (size_t)n < sizeof req) ? open_client(r->port) : -1;
+    if (fd >= 0 && send(fd, req, (size_t)n, 0) != (ssize_t)n) {
+        close(fd);
+        fd = -1;
+    }
+    return fd;
+}
+
+/* Read from a stream that stays open until `needle` shows up in what
+ * was read so far (kept in buf), or 3 s pass. 1 when found. */
+static int read_until(int fd, char *buf, size_t cap, size_t *len,
+                      const char *needle) {
+    for (int i = 0; i < 300; i++) {
+        buf[*len] = '\0';
+        if (strstr(buf, needle)) return 1;
+        struct pollfd p = {fd, POLLIN, 0};
+        if (poll(&p, 1, 10) <= 0) continue;
+        ssize_t n = recv(fd, buf + *len, cap - 1 - *len, 0);
+        if (n <= 0) return 0;
+        *len += (size_t)n;
+    }
+    return 0;
+}
+
+/* Open listen 9 for tools; returns the fd once acknowledged, or -1. */
+static int open_listener(hrig_t *r, char *buf, size_t cap, size_t *len) {
+    *len = 0;
+    int fd = post_open(r, LISTEN_HEADERS, ACCEPT_BOTH,
+                       LISTEN_BODY(9, "{\"toolsListChanged\":true}"));
+    if (fd < 0) return -1;
+    if (!read_until(fd, buf, cap, len, "subscriptions/acknowledged")) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void test_listen_streams_over_http(void) {
+    hrig_t r; TEST_ASSERT(hrig_start(&r) == 0);
+    char buf[8192]; size_t len = 0;
+    int fd = open_listener(&r, buf, sizeof buf, &len);
+    TEST_ASSERT(fd >= 0);
+    TEST_ASSERT(strstr(buf, "Content-Type: text/event-stream") != NULL);
+    TEST_ASSERT(strstr(buf, "\"io.modelcontextprotocol/subscriptionId\":9") != NULL);
+
+    TEST_ASSERT(cmcp_server_notify_tools_changed(r.s) == CMCP_OK);
+    TEST_ASSERT(fd >= 0 && read_until(fd, buf, sizeof buf, &len, "tools/list_changed"));
+
+    /* While it is open, the id is taken. */
+    char *resp = post(&r, LISTEN_HEADERS, ACCEPT_BOTH,
+                      LISTEN_BODY(9, "{\"toolsListChanged\":true}"));
+    TEST_ASSERT(status_of(resp) == 409);
+    free(resp);
+
+    /* Closing the stream ends the subscription: the id frees up. */
+    if (fd >= 0) close(fd);
+    int again = -1;
+    for (int i = 0; i < 40 && again < 0; i++) {
+        struct timespec ts = {0, 50 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        again = open_listener(&r, buf, sizeof buf, &len);
+    }
+    TEST_ASSERT(again >= 0);
+    if (again >= 0) close(again);
+
+    /* The injected cancellations left the slot usable. */
+    resp = post(&r, STD_HEADERS, ACCEPT_BOTH, ECHO_CALL);
+    TEST_ASSERT(status_of(resp) == 200);
+    free(resp);
+    hrig_stop(&r);
+}
+
+static void test_listen_requires_sse_accept(void) {
+    hrig_t r; TEST_ASSERT(hrig_start(&r) == 0);
+    char *resp = post(&r, LISTEN_HEADERS, ACCEPT_JSON,
+                      LISTEN_BODY(9, "{\"toolsListChanged\":true}"));
+    TEST_ASSERT(status_of(resp) == 406);
+    free(resp);
+    hrig_stop(&r);
+}
+
+/* A listen the server rejects ends its stream with the error. */
+static void test_listen_bad_filter_ends_stream(void) {
+    hrig_t r; TEST_ASSERT(hrig_start(&r) == 0);
+    char *resp = post(&r, LISTEN_HEADERS, ACCEPT_BOTH,
+                      LISTEN_BODY(9, "{\"toolsListChanged\":\"yes\"}"));
+    TEST_ASSERT(resp && strstr(resp, "text/event-stream") != NULL);
+    TEST_ASSERT(resp && strstr(resp, "-32602") != NULL);
+    free(resp);
+    resp = post(&r, STD_HEADERS, ACCEPT_BOTH, ECHO_CALL);
+    TEST_ASSERT(status_of(resp) == 200);
+    free(resp);
+    hrig_stop(&r);
+}
+
+/* Hanging up on a modern request cancels it (spec: closing the stream
+ * is the cancellation), and the server goes on serving. */
+static void test_closing_connection_cancels_request(void) {
+    hrig_t r; TEST_ASSERT(hrig_start(&r) == 0);
+    atomic_store(&g_cancel_seen, 0);
+    int fd = post_open(&r, "MCP-Protocol-Version: " MODERN "\r\n"
+                           "Mcp-Method: tools/call\r\nMcp-Name: hang\r\n",
+        ACCEPT_BOTH,
+        "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\","
+        "\"params\":{\"name\":\"hang\",\"arguments\":{}," META "}}");
+    TEST_ASSERT(fd >= 0);
+    struct timespec ts = {0, 200 * 1000 * 1000};
+    nanosleep(&ts, NULL);
+    if (fd >= 0) close(fd);
+    for (int i = 0; i < 300 && !atomic_load(&g_cancel_seen); i++) {
+        struct timespec t2 = {0, 10 * 1000 * 1000};
+        nanosleep(&t2, NULL);
+    }
+    TEST_ASSERT(atomic_load(&g_cancel_seen) == 1);
+
+    char *resp = post(&r, STD_HEADERS, ACCEPT_BOTH, ECHO_CALL);
+    TEST_ASSERT(status_of(resp) == 200);
+    TEST_ASSERT(resp && strstr(resp, "\"hi\"") != NULL);
+    free(resp);
+    hrig_stop(&r);
+}
+
 int main(void) {
     TEST_RUN(test_header_decode_unit);
     TEST_RUN(test_modern_call_needs_no_session);
@@ -453,5 +617,9 @@ int main(void) {
     TEST_RUN(test_input_required_is_200);
     TEST_RUN(test_progress_streams_on_the_request);
     TEST_RUN(test_legacy_session_beside_modern);
+    TEST_RUN(test_listen_streams_over_http);
+    TEST_RUN(test_listen_requires_sse_accept);
+    TEST_RUN(test_listen_bad_filter_ends_stream);
+    TEST_RUN(test_closing_connection_cancels_request);
     TEST_DONE();
 }

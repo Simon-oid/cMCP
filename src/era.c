@@ -19,6 +19,7 @@ static const char *const MODERN_METHODS[] = {
     "tools/list",     "tools/call",
     "resources/list", "resources/read",
     "prompts/list",   "prompts/get",
+    "subscriptions/listen",
 };
 
 /* Results the spec marks cacheable (CacheableResult). */

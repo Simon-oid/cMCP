@@ -444,6 +444,16 @@ static int bound_addr_is_loopback(int fd) {
 
 typedef struct sse_conn {
     int                       fd;
+    /* NULL for a legacy GET stream. For a 2026-07-28 subscriptions/listen
+     * stream: the listen request's JSON-RPC id as emitted JSON, which is
+     * also the subscriptionId its notifications carry. Owned. */
+    char                     *sub_id;
+    /* Set (under sse_mu) once the server answered the listen request:
+     * the stream ended on the server's side, so no cancel is sent. */
+    int                       ended;
+    /* Set once the acknowledgment went out: from then on a response
+     * with this id is someone else's (ids are per client). sse_mu. */
+    int                       acked;
     pthread_t                 thread;
     struct sse_conn          *next;
     struct http_impl         *owner;
@@ -502,6 +512,12 @@ typedef struct http_impl {
     int                cur_modern;
     int                cur_sse_ok;
     int                cur_sse_open;
+
+    /* JSON-RPC id (emitted JSON) of a modern request whose client hung
+     * up before the answer. It was cancelled; if its handler finishes
+     * anyway, that late response is dropped instead of landing in the
+     * slot, where the next POST would take it for its own. slot_mu. */
+    char              *abandoned_id;
 
     /* SSE bookkeeping. sse_mu guards both the holder list AND the
      * event ring + counter (MCP 2025-11-25 SEP-1699): a single lock so
@@ -576,6 +592,99 @@ static void wake_init(void) {
     sigaction(CMCP_HTTP_WAKE_SIGNAL, &sa, NULL);
 }
 
+/* ---------------------------------------------------------------- */
+/* MCP 2026-07-28 helpers: ids, slot injection, cancellation          */
+/* ---------------------------------------------------------------- */
+
+/* Interval between keep-alive comments on an idle listen stream. */
+#define HTTP_LISTEN_KEEPALIVE_MS 15000
+
+/* Emit the JSON value at body.<k1>[.<k2>[.<k3>]] as text (owned), or
+ * NULL when absent. Used to compare JSON-RPC ids and subscription ids
+ * exactly, whatever their JSON type. */
+static char *json_text_at(const char *buf, size_t len, const char *k1,
+                          const char *k2, const char *k3) {
+    cmcp_json_t *j = cmcp_json_parse(buf, len);
+    const cmcp_json_t *v = j;
+    const char *keys[3] = {k1, k2, k3};
+    for (int i = 0; i < 3 && v && keys[i]; i++)
+        v = v->type == CMCP_JSON_OBJECT ? cmcp_json_object_get(v, keys[i]) : NULL;
+    char *text = v ? cmcp_json_emit(v) : NULL;
+    cmcp_json_free(j);
+    return text;
+}
+
+static char *message_id_text(const char *buf, size_t len) {
+    return json_text_at(buf, len, "id", NULL, NULL);
+}
+
+static char *subscription_id_text(const char *buf, size_t len) {
+    return json_text_at(buf, len, "params", "_meta",
+                        "io.modelcontextprotocol/subscriptionId");
+}
+
+/* Put a frame the transport itself originates (a cancellation) into the
+ * request slot, waiting for it to be free. Dropped during shutdown. */
+static void slot_put(http_impl_t *impl, const char *body) {
+    size_t len = strlen(body);
+    char *copy = (char *)malloc(len + 1);
+    if (!copy) return;
+    memcpy(copy, body, len + 1);
+    pthread_mutex_lock(&impl->slot_mu);
+    while ((impl->req_present || impl->resp_present) &&
+           !atomic_load_explicit(&impl->shutting_down, memory_order_relaxed))
+        pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
+    if (atomic_load_explicit(&impl->shutting_down, memory_order_relaxed)) {
+        pthread_mutex_unlock(&impl->slot_mu);
+        free(copy);
+        return;
+    }
+    impl->req_body = copy;
+    impl->req_len = len;
+    impl->req_is_init = 0;
+    impl->req_present = 1;
+    pthread_cond_signal(&impl->read_cv);
+    pthread_mutex_unlock(&impl->slot_mu);
+}
+
+/* On Streamable HTTP closing the response stream IS the cancellation
+ * (spec: basic/transports/streamable-http, Cancellation). Translate it
+ * into the notifications/cancelled the server already understands. */
+static void inject_cancel(http_impl_t *impl, const char *id_text) {
+    char body[512];
+    int n = snprintf(body, sizeof body,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\","
+        "\"params\":{\"requestId\":%s,\"reason\":\"stream closed\"}}",
+        id_text);
+    if (n > 0 && (size_t)n < sizeof body) slot_put(impl, body);
+}
+
+/* The client hung up: a recv peek sees EOF (or a hard error). */
+static int peer_closed(int fd) {
+    char b;
+    ssize_t n = recv(fd, &b, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0) return 1;
+    return n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR;
+}
+
+static long long mono_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Keep an idle listen stream alive through proxies and client idle
+ * timers with an SSE comment line, which carries no event. */
+static void maybe_keepalive(sse_conn_t *c, long long *last_ms) {
+    if (!c->sub_id) return;
+    long long now = mono_ms();
+    if (now - *last_ms < HTTP_LISTEN_KEEPALIVE_MS) return;
+    *last_ms = now;
+    pthread_mutex_lock(&c->owner->sse_mu);
+    (void)send(c->fd, ":\n\n", 3, MSG_NOSIGNAL);
+    pthread_mutex_unlock(&c->owner->sse_mu);
+}
+
 static void *sse_holder_main(void *arg) {
     sse_conn_t *c = (sse_conn_t *)arg;
     /* Self-detach: the acceptor used to detach us via pthread_detach
@@ -584,12 +693,14 @@ static void *sse_holder_main(void *arg) {
      * runs (TSan-correctly flagged the UAF on c->thread). Self-detach
      * eliminates the race — we own the lifetime decision. */
     pthread_detach(pthread_self());
+    long long last_keepalive = mono_ms();
     /* Hold the connection open until either:
      *   - the client disconnects (recv returns 0/error)
      *   - the transport shuts down (close fd or signal) */
     for (;;) {
         if (atomic_load_explicit(&c->owner->shutting_down,
                                   memory_order_relaxed)) break;
+        maybe_keepalive(c, &last_keepalive);
         struct pollfd p = { c->fd, POLLIN, 0 };
         int rv = poll(&p, 1, HTTP_ACCEPT_POLL_MS);
         if (rv < 0) {
@@ -607,12 +718,21 @@ static void *sse_holder_main(void *arg) {
         }
     }
     close(c->fd);
+    /* The client closed a listen stream the server had not ended: that
+     * ends the subscription. Done while still linked, so close_fn (which
+     * waits for the holder list to drain) cannot free the slot under us;
+     * slot_put gives up as soon as shutdown starts. */
+    pthread_mutex_lock(&c->owner->sse_mu);
+    int cancel = c->sub_id && !c->ended;
+    pthread_mutex_unlock(&c->owner->sse_mu);
+    if (cancel) inject_cancel(c->owner, c->sub_id);
     /* Unlink ourselves and free. */
     pthread_mutex_lock(&c->owner->sse_mu);
     sse_conn_t **pp = &c->owner->sse_head;
     while (*pp && *pp != c) pp = &(*pp)->next;
     if (*pp) *pp = c->next;
     pthread_mutex_unlock(&c->owner->sse_mu);
+    free(c->sub_id);
     free(c);
     return NULL;
 }
@@ -645,6 +765,7 @@ typedef struct {
     int is_notif;
     int is_response;     /* JSON-RPC response: id + (result|error), no method */
     int method_is_init;
+    int is_listen;       /* a subscriptions/listen request */
     int request_scoped;  /* notifications/progress or notifications/message:
                           * on the modern path they belong to the request
                           * in flight, not to a session stream */
@@ -659,6 +780,8 @@ static body_kind_t classify_body(const char *body, size_t len) {
     if (method && method->type == CMCP_JSON_STRING) {
         if (id) k.is_request = 1; else k.is_notif = 1;
         if (strcmp(method->str.s, "initialize") == 0) k.method_is_init = 1;
+        if (id && strcmp(method->str.s, "subscriptions/listen") == 0)
+            k.is_listen = 1;
         if (!id && (strcmp(method->str.s, "notifications/progress") == 0 ||
                     strcmp(method->str.s, "notifications/message") == 0))
             k.request_scoped = 1;
@@ -802,6 +925,177 @@ static int clear_cur_request(http_impl_t *impl) {
     return open;
 }
 
+/* Send `buf` to the listen stream of subscription `id_text`. With
+ * `is_response`, it is the server's answer to the listen request — an
+ * error, before any acknowledgment — so it ends the stream. Returns 1
+ * when a stream took it. */
+static int route_to_listener(http_impl_t *impl, const char *id_text,
+                             const char *buf, size_t len, int is_response) {
+    int found = 0;
+    pthread_mutex_lock(&impl->sse_mu);
+    for (sse_conn_t *c = impl->sse_head; c; c = c->next) {
+        if (!c->sub_id || strcmp(c->sub_id, id_text) != 0 || c->ended) continue;
+        if (is_response && c->acked) break;  /* another client's request */
+        sse_emit_event_to_fd(c->fd, 0, buf, len);
+        if (is_response) {
+            c->ended = 1;
+            shutdown(c->fd, SHUT_RDWR);       /* the holder notices and exits */
+        } else {
+            c->acked = 1;
+        }
+        found = 1;
+        break;
+    }
+    pthread_mutex_unlock(&impl->sse_mu);
+    return found;
+}
+
+/* A late response to a request whose client hung up: drop it. */
+static int drop_abandoned(http_impl_t *impl, const char *id_text) {
+    pthread_mutex_lock(&impl->slot_mu);
+    int hit = impl->abandoned_id && strcmp(impl->abandoned_id, id_text) == 0;
+    if (hit) {
+        free(impl->abandoned_id);
+        impl->abandoned_id = NULL;
+    }
+    pthread_mutex_unlock(&impl->slot_mu);
+    return hit;
+}
+
+static void unlink_conn(http_impl_t *impl, sse_conn_t *c) {
+    pthread_mutex_lock(&impl->sse_mu);
+    for (sse_conn_t **pp = &impl->sse_head; *pp; pp = &(*pp)->next) {
+        if (*pp == c) { *pp = c->next; break; }
+    }
+    pthread_mutex_unlock(&impl->sse_mu);
+}
+
+/* Register a listen stream unless its id is already taken. 1 on success. */
+static int register_listener(http_impl_t *impl, sse_conn_t *c) {
+    pthread_mutex_lock(&impl->sse_mu);
+    for (sse_conn_t *o = impl->sse_head; o; o = o->next) {
+        if (o->sub_id && strcmp(o->sub_id, c->sub_id) == 0) {
+            pthread_mutex_unlock(&impl->sse_mu);
+            return 0;
+        }
+    }
+    c->next = impl->sse_head;
+    impl->sse_head = c;
+    pthread_mutex_unlock(&impl->sse_mu);
+    return 1;
+}
+
+/* subscriptions/listen over HTTP (MCP 2026-07-28): the response is an
+ * SSE stream that stays open, so the connection moves to a holder thread
+ * instead of waiting on the slot for an answer that only comes when the
+ * subscription ends. The server's acknowledgment and every notification
+ * carrying this subscriptionId are routed to it. Returns 1 when the
+ * holder took ownership of `fd`. */
+static int handle_listen_post(http_impl_t *impl, int fd, http_request_t *req) {
+    const char *acc = http_header_get(req, "Accept");
+    if (!acc || !strstr(acc, "text/event-stream")) {
+        reply_error(fd, 406, "Not Acceptable",
+                    "subscriptions/listen requires Accept: text/event-stream\n");
+        return 0;
+    }
+    sse_conn_t *c = (sse_conn_t *)calloc(1, sizeof *c);
+    char *body = (char *)malloc(req->body_len + 1);
+    if (c) c->sub_id = message_id_text(req->body, req->body_len);
+    if (!c || !c->sub_id || !body) {
+        if (c) free(c->sub_id);
+        free(c);
+        free(body);
+        reply_error(fd, 500, "Internal Server Error", "oom\n");
+        return 0;
+    }
+    c->fd = fd;
+    c->owner = impl;
+    memcpy(body, req->body, req->body_len);
+    body[req->body_len] = '\0';
+
+    /* Ids are chosen per client; two live subscriptions sharing one
+     * would receive each other's notifications. */
+    if (!register_listener(impl, c)) {
+        free(c->sub_id); free(c); free(body);
+        reply_error(fd, 409, "Conflict", "subscription id already in use\n");
+        return 0;
+    }
+    if (http_write_sse_head(fd, NULL) != CMCP_OK) {
+        unlink_conn(impl, c);
+        free(c->sub_id); free(c); free(body);
+        return 0;
+    }
+
+    /* Hand the request to the server; its acknowledgment (or error)
+     * comes back through write_fn and is routed by id. */
+    pthread_mutex_lock(&impl->slot_mu);
+    while ((impl->req_present || impl->resp_present) &&
+           !atomic_load_explicit(&impl->shutting_down, memory_order_relaxed))
+        pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
+    if (atomic_load_explicit(&impl->shutting_down, memory_order_relaxed)) {
+        pthread_mutex_unlock(&impl->slot_mu);
+        unlink_conn(impl, c);
+        free(c->sub_id); free(c); free(body);
+        return 0;
+    }
+    impl->req_body = body;
+    impl->req_len = req->body_len;
+    impl->req_is_init = 0;
+    impl->req_present = 1;
+    http_set_cur_headers(impl, req);
+    pthread_cond_signal(&impl->read_cv);
+    pthread_mutex_unlock(&impl->slot_mu);
+
+    if (pthread_create(&c->thread, NULL, sse_holder_main, c) != 0) {
+        unlink_conn(impl, c);
+        inject_cancel(impl, c->sub_id);
+        free(c->sub_id); free(c);
+        return 0;
+    }
+    return 1;
+}
+
+/* The client of a modern request hung up before the answer. Called
+ * with slot_mu held; releases it. The request is cancelled and its id
+ * remembered, so a response its handler still produces is dropped. */
+static void abandon_request(http_impl_t *impl, const http_request_t *req) {
+    char *rid = message_id_text(req->body, req->body_len);
+    char *copy = rid ? strdup(rid) : NULL;
+    clear_cur_request(impl);
+    free(impl->abandoned_id);
+    impl->abandoned_id = rid;
+    pthread_mutex_unlock(&impl->slot_mu);
+    if (copy) inject_cancel(impl, copy);
+    free(copy);
+}
+
+/* Wait (slot_mu held) for the response; for a modern request, give up
+ * and cancel when the client closes the connection. Returns 1 when a
+ * response is in the slot, 0 when the caller must just return (slot_mu
+ * then already released for an abandoned request: *released = 1). */
+static int wait_response(http_impl_t *impl, int fd, const http_request_t *req,
+                         int modern, int *released) {
+    *released = 0;
+    while (!impl->resp_present &&
+           !atomic_load_explicit(&impl->shutting_down, memory_order_relaxed)) {
+        if (!modern) {
+            pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
+            continue;
+        }
+        struct timespec dl;
+        clock_gettime(CLOCK_REALTIME, &dl);
+        dl.tv_nsec += 100L * 1000 * 1000;
+        if (dl.tv_nsec >= 1000000000L) { dl.tv_sec++; dl.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&impl->write_cv, &impl->slot_mu, &dl);
+        if (!impl->resp_present && peer_closed(fd)) {
+            abandon_request(impl, req);
+            *released = 1;
+            return 0;
+        }
+    }
+    return impl->resp_present;
+}
+
 /* Legacy (2025-11-25) session rules for one POST. Returns 1 to
  * proceed, 0 when an error reply was already sent. */
 static int legacy_session_ok(http_impl_t *impl, int fd,
@@ -832,14 +1126,16 @@ static int legacy_session_ok(http_impl_t *impl, int fd,
     return 1;
 }
 
-static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
+/* Returns 1 when `fd` was handed to a holder thread (the caller must not
+ * close it), 0 otherwise. */
+static int handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     if (req->body_len == 0) {
         reply_error(fd, 400, "Bad Request", "empty body\n");
-        return;
+        return 0;
     }
 
     int modern = 0;
-    if (!post_era_gate(fd, req, &modern)) return;
+    if (!post_era_gate(fd, req, &modern)) return 0;
 
     body_kind_t kind = classify_body(req->body, req->body_len);
 
@@ -848,7 +1144,8 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
      * carries is ignored). The first `initialize` request is allowed
      * without a session id (it mints one); everything else requires a
      * match. */
-    if (!modern && !legacy_session_ok(impl, fd, req, &kind)) return;
+    if (!modern && !legacy_session_ok(impl, fd, req, &kind)) return 0;
+    if (modern && kind.is_listen) return handle_listen_post(impl, fd, req);
 
 
     /* Push the body into the request slot. The slot is busy from the
@@ -867,13 +1164,13 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     if (atomic_load_explicit(&impl->shutting_down, memory_order_relaxed)) {
         pthread_mutex_unlock(&impl->slot_mu);
         reply_error(fd, 503, "Service Unavailable", "shutting down\n");
-        return;
+        return 0;
     }
     impl->req_body    = (char *)malloc(req->body_len + 1);
     if (!impl->req_body) {
         pthread_mutex_unlock(&impl->slot_mu);
         reply_error(fd, 500, "Internal Server Error", "oom\n");
-        return;
+        return 0;
     }
     memcpy(impl->req_body, req->body, req->body_len);
     impl->req_body[req->body_len] = '\0';
@@ -882,6 +1179,14 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     impl->req_present = 1;
     http_set_cur_headers(impl, req);     /* B.1: expose headers to handler */
     if (modern && kind.is_request) {
+        /* An id a hung-up client used can be reused by the next one;
+         * stop dropping responses for it. */
+        char *rid = message_id_text(req->body, req->body_len);
+        if (impl->abandoned_id && rid && strcmp(impl->abandoned_id, rid) == 0) {
+            free(impl->abandoned_id);
+            impl->abandoned_id = NULL;
+        }
+        free(rid);
         const char *acc = http_header_get(req, "Accept");
         impl->cur_fd       = fd;
         impl->cur_modern   = 1;
@@ -910,21 +1215,19 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
         pthread_mutex_unlock(&impl->slot_mu);
         http_write_response(fd, 202, "Accepted", "text/plain",
                               NULL, "", 0);
-        return;
+        return 0;
     }
 
     /* Wait for the response. */
-    while (!impl->resp_present &&
-           !atomic_load_explicit(&impl->shutting_down,
-                                  memory_order_relaxed)) {
-        pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
-    }
+    int released = 0;
+    if (!wait_response(impl, fd, req, modern, &released) && released)
+        return 0;
     if (!impl->resp_present) {
         int streaming = clear_cur_request(impl);
         pthread_mutex_unlock(&impl->slot_mu);
         if (!streaming)
             reply_error(fd, 503, "Service Unavailable", "shutting down\n");
-        return;
+        return 0;
     }
 
     /* Steal response state. */
@@ -945,7 +1248,7 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     if (streaming) {
         sse_emit_event_to_fd(fd, 0, body, blen);
         free(body);
-        return;
+        return 0;
     }
     int status = modern ? cmcp_http_modern_status(body, blen) : 200;
 
@@ -961,6 +1264,7 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
                         : status == 404 ? "Not Found" : "Bad Request",
                         "application/json", minted ? extra : NULL, body, blen);
     free(body);
+    return 0;
 }
 
 static void handle_get_sse(http_impl_t *impl, int fd, http_request_t *req) {
@@ -1108,8 +1412,8 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
         /* NOLINTBEGIN(bugprone-branch-clone) */
         /* The protocol-version check is era-dependent, so handle_post
          * runs it once it has looked at the body. */
-        if (check_origin(impl, fd, &req)) handle_post(impl, fd, &req);
-        close(fd);
+        if (!check_origin(impl, fd, &req) || !handle_post(impl, fd, &req))
+            close(fd);
         /* NOLINTEND(bugprone-branch-clone) */
     } else if (is_get_mcp) {
         const char *acc = http_header_get(&req, "Accept");
@@ -1373,16 +1677,31 @@ static int http_write_fn(cmcp_transport_t *t, const char *buf, size_t len) {
     if (kind.is_notif) {
         if (kind.request_scoped && route_to_request_stream(impl, buf, len))
             return CMCP_OK;
+        /* A subscription's notification goes to its listen stream only. */
+        char *sub = subscription_id_text(buf, len);
+        if (sub) {
+            route_to_listener(impl, sub, buf, len, 0);
+            free(sub);
+            return CMCP_OK;
+        }
         pthread_mutex_lock(&impl->sse_mu);
         uint64_t id = sse_record_event(impl, buf, len);
         sse_conn_t *c = impl->sse_head;
         while (c) {
-            sse_emit_event_to_fd(c->fd, id, buf, len);
+            if (!c->sub_id) sse_emit_event_to_fd(c->fd, id, buf, len);
             c = c->next;
         }
         pthread_mutex_unlock(&impl->sse_mu);
         return CMCP_OK;
     }
+
+    /* Responses that no POST is waiting for: the answer to a listen
+     * request (its stream), or a late answer to an abandoned request. */
+    char *rid = message_id_text(buf, len);
+    int routed = rid && (route_to_listener(impl, rid, buf, len, 1) ||
+                         drop_abandoned(impl, rid));
+    free(rid);
+    if (routed) return CMCP_OK;
 
     /* Response path: into the slot mailbox. */
     char *copy = (char *)malloc(len + 1);
@@ -1482,6 +1801,7 @@ static void http_close_fn(cmcp_transport_t *t) {
         }
         free(impl->req_body);
         free(impl->resp_body);
+        free(impl->abandoned_id);
         free(impl->allowed_origins);
         http_clear_cur_headers(impl);        /* B.1: free header snapshot */
         if (impl->event_ring) {

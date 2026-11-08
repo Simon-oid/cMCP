@@ -9,8 +9,8 @@ pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
 revision through `initialize` and adds the modern, stateless
 2026-07-28 revision, chosen per request. Landing in phases; the stdio
-server path, multi round-trip requests and modern requests over
-Streamable HTTP are done; `subscriptions/listen` and the client follow.
+server path, multi round-trip requests, modern requests over Streamable
+HTTP and `subscriptions/listen` are done; schemas and the client follow.
 
 - **Modern server path (stdio).** A request whose `params._meta`
   carries `io.modelcontextprotocol/protocolVersion` or
@@ -71,13 +71,33 @@ Streamable HTTP are done; `subscriptions/listen` and the client follow.
   `X-Accel-Buffering: no` and no event ids. Legacy sessions, GET
   streams and resumption are unchanged. Rules live in
   `src/http_modern.{c,h}`.
+- **`subscriptions/listen`** (stdio and HTTP). The server keeps the part
+  of the filter it can honour (from its `*_list_changed` /
+  `resources_subscribe` capabilities), sends
+  `notifications/subscriptions/acknowledged` first, then tags every
+  matching notification with `_meta["io.modelcontextprotocol/subscriptionId"]`;
+  the request gets no response while open. A malformed filter is
+  `-32602`. On stdio `notifications/cancelled` ends it; on HTTP the
+  POST becomes a long-lived SSE stream (keep-alive comments every 15 s)
+  and closing it ends the subscription. A listen whose id is already
+  live on the HTTP transport is refused with `409`.
+- **Closing the stream cancels the request (HTTP).** If the client of a
+  modern request hangs up before the answer, the request is cancelled
+  (`cmcp_handler_cancelled` turns true) and a late response is dropped
+  instead of reaching the next POST.
+- **Behaviour change:** list-changed notifications reach a legacy client
+  only once its handshake is complete, and modern clients only through a
+  subscription that asked for them (the spec forbids unrequested
+  notification types). Legacy GET streams no longer receive modern
+  subscription traffic.
 - **Behaviour change:** `cmcp_server_log` now drops messages until a
   legacy session has completed its handshake (no one has opted in to
   server-wide logs before that).
 - **Internal:** `src/era.{c,h}` holds the modern request rules; the
   method chain in `server.c` moved into `dispatch_request`, shared by
   both eras.
-  `src/mrtr.{c,h}` the MRTR state, `src/seal.{c,h}` and
+  `src/mrtr.{c,h}` the MRTR state, `src/subscriptions.{c,h}` the
+  subscription registry, `src/seal.{c,h}` and
   `src/sha256.{c,h}` the requestState seal.
 - **Tests:** `tests/test_modern.c` (10 cases, raw-wire frames),
   `tests/test_mrtr.c` (14 cases: both rounds, tampered / replayed /
@@ -85,7 +105,10 @@ Streamable HTTP are done; `subscriptions/listen` and the client follow.
   handler on the legacy path, shared keys), `tests/test_seal.c` (NIST,
   RFC 4231 and RFC 4648 vectors), `tests/test_http_modern.c` (real
   sockets: no session, every -32020 case, the base64 sentinel, 400/404
-  mapping, request-scoped SSE, legacy beside modern). The Python SDK
+  mapping, request-scoped SSE, legacy beside modern, listen streams,
+  `409`/`406`, stream-close cancellation), `tests/test_subscriptions.c`
+  (stdio: acknowledged subset, tagging, per-filter routing, cancel, no
+  unsolicited notifications). The Python SDK
   conformance harness
   (`make conformance-py`) passes in all three modes and now also runs
   an elicitation round-trip against the new `examples/ask-server`, and
