@@ -1,5 +1,5 @@
 /* host-probe — a stateful multi-server MCP host that drives the client
- * API the way a real agent host (butlerbot) would, deliberately BEYOND
+ * API the way a real agent host would, deliberately BEYOND
  * what cmcp-inspect / minimal-client already cover (connect → handshake →
  * list → one sync call). This is the P6 validation probe from the
  * 2026-06-01 LLM Council verdict.

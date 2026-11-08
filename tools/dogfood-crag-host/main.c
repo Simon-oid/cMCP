@@ -1,5 +1,5 @@
 /*
- * dogfood-crag-host — a butlerbot-shaped host harness that drives a
+ * dogfood-crag-host — a realistic agent-host harness that drives a
  * realistic session against tools/crag-mcp/.
  *
  * Purpose (council D1 verdict, 2026-05-30): produce evidence about
@@ -24,7 +24,7 @@
  * v0.7-* gaps surfaced by the O1 rewrite are closed; the dogfood
  * summary now reports findings: 0.
  *
- * Pattern coverage (still the butlerbot shape):
+ * Pattern coverage (still the agent-host shape):
  *   1. handshake + capability inspection (read server identity)
  *   2. cmcp_client_tools_list -> walk typed records
  *   3. cmcp_client_resource_read -> ambient context (crag://stats)

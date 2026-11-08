@@ -262,7 +262,7 @@ protocol bump, no struct layout change. SemVer-minor.
 
 - v0.8.0 cut paperwork (CHANGELOG section close, README status flip,
   `CMCP_VERSION` bump, tag recipe). Defer to the cut commit.
-- butlerbot integration. Tier 7 is library-side self-defense; the
+- Agent-host integration. Tier 7 is library-side self-defense; the
   embedding lane runs separately when authorised.
 - Continuous perf-history dashboard, auto-bisect on first crash,
   per-file coverage gating — all Tier 8 candidates per TODO.
@@ -437,7 +437,7 @@ audit item.
 The first release sized by **a real host's pain**, not the spec. After
 Tier 6 closed (v0.5.0, 2026-05-29) the council met to decide what
 v0.6.0 should target. The verdict from D1 — running
-`tools/dogfood-crag-host/` as a butlerbot-shaped host against the
+`tools/dogfood-crag-host/` as a realistic agent-host harness against the
 in-tree `tools/crag-mcp/` — surfaced four ergonomics findings
 (F1–F4) in the public client surface. v0.6.0 ships the additive
 closure of those findings, the rewritten dogfood harness that
@@ -2119,7 +2119,7 @@ server.
 ### Deferred
 
 - **3.1 OAuth 2.1** — no remote authed server in sight for the
-  consumer (butlerbot). Tracked under "Deferred past Tier 4".
+  consumer (an agent host). Tracked under "Deferred past Tier 4".
 
 ## [0.2.0] — 2026-05-07
 

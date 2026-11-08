@@ -637,7 +637,7 @@ write side, in lock-step with the read side.
 
 ## Multi-server session
 
-`cmcp_session_t` is the aggregator a multi-server host (butlerbot) uses
+`cmcp_session_t` is the aggregator a multi-server agent host uses
 to present a flat tool surface across N child servers:
 
 ```
@@ -997,16 +997,16 @@ setLevel it cannot honour.
   `cmcp_transport_t`; concurrent multi-tenant deployments instantiate
   multiple transports.
 - OAuth 2.1 on the HTTP transport. Deferred — no remote authed cMCP
-  server in sight for the consumer (butlerbot).
+  server in sight for the target consumer (a local agent host).
 - `completion/complete` (argument autocomplete for prompts and
-  resources). Low value for an autonomous agent — butlerbot's LLM
+  resources). Low value for an autonomous agent — the agent's LLM
   picks arguments, it does not drive a completion menu. Implement
   if an interactive host ever consumes cMCP.
 - `resources/templates/list` (RFC 6570 URI-templated resources).
   Needs a URI-template engine cMCP does not have; deferred until a
   templated server is real.
 - Connection pooling at the session layer. One client per server is
-  the current shape; butlerbot's actual usage hasn't yet shown a need
+  the current shape; real agent-host usage hasn't yet shown a need
   for more.
 - Sampling / elicitation handlers running on a worker pool — they
   currently run on the client's reader thread, which means a slow

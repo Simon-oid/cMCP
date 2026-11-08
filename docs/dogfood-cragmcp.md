@@ -3,7 +3,7 @@
 Generated 2026-05-30 as the council-D1 deliverable (see
 `~/.claude/plans/eager-leaping-pike.md` Tier 7 + the council verdict
 captured in chat). The premise: drive `tools/crag-mcp/` end-to-end
-through the public client API the way **butlerbot will**, and write
+through the public client API the way **a real agent host would**, and write
 down every moment the API felt wrong from the host's seat.
 
 The harness lives at `tools/dogfood-crag-host/main.c`. It is built
@@ -61,7 +61,7 @@ operations every host needs:
 | call a tool | only `cmcp_session_tool_call` | `cmcp_client_request("tools/call", {name, arguments}, &resp)` then walk `result.content[0]` + check `result.isError` (and `response.error`, see F2) |
 
 Even our own `cmcp-inspect` drops to raw JSON walking for this — so
-butlerbot will too. The session-layer types are correct; mirror them
+any agent host will too. The session-layer types are correct; mirror them
 onto `cmcp_client_t`:
 
 ```c
@@ -213,7 +213,7 @@ cmcp_json_string_new()
 cmcp_json_int_new()
 ```
 
-Defer until v0.7.0 — paper-cut-grade, not blocking butlerbot.
+Defer until v0.7.0 — paper-cut-grade, not blocking agent hosts.
 
 ### F6 — Async parallelism is wire-level only; the host can't reason about server concurrency (observability gap)
 
@@ -259,7 +259,7 @@ not server bugs — the harness was looking in the wrong error channel.
 
 That harness mistake **is** the finding (F2): if even the dogfooder
 who wrote the library mis-reads the error model on first try,
-butlerbot will too.
+an agent host will too.
 
 ## What this points to for v0.6.0
 

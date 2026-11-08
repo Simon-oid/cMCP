@@ -28,7 +28,7 @@ A JSON-RPC protocol library is the wrong layer to terminate TLS at:
    behind a terminator in production.
 3. **No good library choice for static-by-default.** Linking OpenSSL
    makes the static library considerably heavier and forces every
-   downstream consumer (butlerbot, cRAG-as-MCP-server, any other host)
+   downstream consumer (agent hosts, cRAG-as-MCP-server, any other host)
    into the OpenSSL ABI. The static-first packaging posture in 6.4
    would have to choose between bloating every binary or shipping
    shared-only — neither is acceptable for a protocol library.

@@ -1,8 +1,8 @@
 # CI — aarch64 correctness lane (closes AUDIT-2 against regressions).
 #
-# cMCP's load-bearing deployment target is a Raspberry Pi (butlerbot runs
-# as an HTTP *client* against a cMCP server, and may also embed the libs
-# directly), yet every other CI job runs on x86_64 only. AUDIT-2 flagged
+# cMCP's load-bearing deployment target is a Raspberry Pi (an agent host
+# runs as an HTTP *client* against a cMCP server, and may also embed the
+# libs directly), yet every other CI job runs on x86_64 only. AUDIT-2 flagged
 # that the ARM target was verified exactly once, by hand, under QEMU — so
 # an aarch64-only regression (alignment, signedness of `char`, 32/64-bit
 # `long`, atomics) could land silently between manual checks.

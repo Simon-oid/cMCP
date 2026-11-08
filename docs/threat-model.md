@@ -7,7 +7,7 @@ out-of-scope.
 
 cMCP is a *protocol library*. The threat model assumes:
 
-- A host process (e.g. butlerbot) links cMCP and uses it to drive one
+- A host process (e.g. an LLM agent) links cMCP and uses it to drive one
   or more MCP servers, or accepts MCP requests from one or more
   clients.
 - The host is trusted (cMCP runs inside the host's address space —

@@ -129,7 +129,7 @@ $(CRAG_MCP_BIN): $(CRAG_MCP_SRC) tools/crag-mcp/crag_cutoff.c \
 	    $(LDFLAGS) $(LDLIBS) -lm -ldl
 
 # dogfood-crag-host: opt-in target. The council's D1 verdict (2026-05-30)
-# called for a real butlerbot-shaped host harness driving crag-mcp end-to-end
+# called for a realistic agent-host harness driving crag-mcp end-to-end
 # under cmcp-tee, so we capture how the public client API actually feels
 # from the host author's seat. Not part of make all; output is the
 # findings doc, not the binary.

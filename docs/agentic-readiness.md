@@ -1,7 +1,7 @@
 # cMCP agentic-readiness plan
 
-How we get cMCP to a quality bar where an LLM agent (butlerbot,
-Claude Code, any MCP host) can rely on it without a human in the
+How we get cMCP to a quality bar where an LLM agent (Claude Code,
+a C agent host, any MCP host) can rely on it without a human in the
 loop. This is not a feature roadmap — see [`TODO.md`](../TODO.md)
 for that. This is the *quality* track: the work that turns "the
 suite is green" into "an autonomous agent can drive this for hours
@@ -290,8 +290,8 @@ specific failure modes:
    an issue against the *tool description* or *error message*
    (not the agent). The fix lands in the next sprint; the playbook
    regresses on next run.
-4. **butlerbot integration test** *(deferred until butlerbot exists)*.
-   Once butlerbot is up, port the playbook to it — that becomes
+4. **C agent-host integration test** *(deferred until such a host exists)*.
+   Once it is up, port the playbook to it — that becomes
    the canonical autonomous-agent regression suite.
 
 **Acceptance criterion.** Weekly playbook run achieves ≥ 9/10 task

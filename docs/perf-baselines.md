@@ -3,7 +3,7 @@
 This document captures cMCP's first-pass performance numbers. The
 baselines are *informational*, not a per-PR gate. They exist so:
 
-1. Consumers (butlerbot, cRAG-as-MCP-server, third-party hosts) can
+1. Consumers (agent hosts, cRAG-as-MCP-server, third-party hosts) can
    reason about expected per-call cost when sizing their workloads.
 2. Future tier work has a reference point — if a refactor halves
    throughput on the inline bench, that needs explaining.

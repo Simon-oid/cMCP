@@ -223,7 +223,7 @@ re-ordering or stringifying the result incorrectly.
 ## After running
 
 crag-mcp is the most "real" workload of the three. Failures here are
-the ones that matter most for butlerbot's eventual integration.
+the ones that matter most for an agent host's eventual integration.
 
 Two extra triage rules on top of the standard table:
 
