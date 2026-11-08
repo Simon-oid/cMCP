@@ -16,10 +16,17 @@
  *  `CMCP_PROTOCOL_VERSION` — see docs/SEMVER.md. */
 #define CMCP_VERSION       "0.10.0"
 
-/** MCP wire-protocol revision this cMCP build speaks (e.g.
- *  "2025-11-25"). Pinned per release; the handshake captures whatever
- *  the peer advertises and the host decides whether to continue. */
+/** Legacy (handshake-based) MCP revision this build speaks on the
+ *  `initialize` path. The handshake captures whatever the peer
+ *  advertises and the host decides whether to continue. */
 #define CMCP_PROTOCOL_VERSION "2025-11-25"
+
+/** Modern (stateless, per-request `_meta`) MCP revision this build
+ *  serves. cMCP is dual-era: a request carrying
+ *  `io.modelcontextprotocol/protocolVersion` in its `_meta` is served
+ *  under this revision with no handshake; `initialize` selects
+ *  CMCP_PROTOCOL_VERSION. */
+#define CMCP_PROTOCOL_VERSION_MODERN "2026-07-28"
 
 /**
  * @brief Library-wide error codes. Negative on failure, zero on success.

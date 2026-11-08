@@ -31,8 +31,8 @@ SERVER = os.environ.get("CMCP_CONF_SERVER", "./examples/echo-server")
 # mode -> (expected outcome, protocol version the session must report)
 EXPECTED = {
     "legacy": ("pass", "2025-11-25"),
-    "auto": ("pass", "2025-11-25"),  # falls back to legacy until Phase 1
-    "2026-07-28": ("fail", None),  # cMCP has no modern path yet
+    "auto": ("pass", "2026-07-28"),  # discover succeeds, client stays modern
+    "2026-07-28": ("pass", "2026-07-28"),  # stateless, no handshake
 }
 
 

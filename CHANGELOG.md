@@ -4,6 +4,38 @@ All notable changes to cMCP are recorded here. Phase numbers match
 [`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
 pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 
+## Unreleased — dual-era: MCP 2026-07-28 (in progress)
+
+cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
+revision through `initialize` and adds the modern, stateless
+2026-07-28 revision, chosen per request. Landing in phases; the stdio
+server path is done, HTTP, MRTR and the client follow.
+
+- **Modern server path (stdio).** A request whose `params._meta`
+  carries `io.modelcontextprotocol/protocolVersion` or
+  `.../clientCapabilities` is served with no handshake: missing or
+  mistyped required fields → `-32602`; a version other than
+  `2026-07-28` → `-32022` with `data.supported` / `data.requested`.
+  `ping`, `logging/setLevel` and `resources/(un)subscribe` are not
+  served on this path (`-32601`). Both eras can share one process.
+- **`server/discover`**: supported versions (`2026-07-28`,
+  `2025-11-25`), capabilities, server identity.
+- **Modern results** carry `resultType: "complete"` and
+  `_meta["io.modelcontextprotocol/serverInfo"]`; cacheable results
+  (`server/discover`, the list methods, `resources/read`) carry
+  `ttlMs: 0` and `cacheScope: "private"`. Legacy results are
+  byte-for-byte unchanged.
+- **New public macros:** `CMCP_PROTOCOL_VERSION_MODERN`,
+  `CMCP_RPC_HEADER_MISMATCH` (-32020),
+  `CMCP_RPC_MISSING_CLIENT_CAPABILITY` (-32021),
+  `CMCP_RPC_UNSUPPORTED_PROTOCOL_VERSION` (-32022).
+- **Internal:** `src/era.{c,h}` holds the modern request rules; the
+  method chain in `server.c` moved into `dispatch_request`, shared by
+  both eras.
+- **Tests:** `tests/test_modern.c` (10 cases, raw-wire frames); the
+  Python SDK conformance harness (`make conformance-py`) now expects
+  `auto` and `2026-07-28` modes to pass.
+
 ## v0.10.0 — deep-analysis hardening pass (2026-06-12)
 
 A security/robustness review (LLM Council in the loop on the bind-default

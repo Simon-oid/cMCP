@@ -9,6 +9,7 @@
 #include "cmcp_types.h"
 #include "cmcp_transport.h"
 #include "worker.h"
+#include "era.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -1592,65 +1593,13 @@ static void handle_logging_set_level(cmcp_server_t *s,
     cmcp_rpc_make_response(resp, &req->id, cmcp_json_new_object());
 }
 
-/* ====================================================================== */
-/* Per-frame handler                                                       */
-/* ====================================================================== */
-
-/* Dispatch one parsed message. For requests, *resp is initialised by
- * this function and the caller must clear it. `hctx` is the per-call
- * handle for handler-invoking requests (cancellation + progress); it is
- * NULL for the inline path, where no handler runs. */
-static void server_handle_message(cmcp_server_t *s,
-                                   const cmcp_rpc_message_t *msg,
-                                   cmcp_rpc_message_t *resp,
-                                   cmcp_handler_ctx_t *hctx) {
-    cmcp_rpc_message_init(resp);
-
-    if (msg->kind == CMCP_MSG_RESPONSE) {
-        /* Servers don't send requests in v0.1, so they shouldn't see
-         * responses. Drop silently — no reply. */
-        return;
-    }
-
-    /* Notification path. */
-    if (msg->kind == CMCP_MSG_NOTIFICATION) {
-        if (msg->method &&
-            strcmp(msg->method, "notifications/initialized") == 0) {
-            if (s->state == SS_HANDSHAKE) s->state = SS_READY;
-            /* Otherwise: stray initialized; ignore. */
-        } else if (msg->method &&
-                   strcmp(msg->method, "notifications/cancelled") == 0) {
-            /* Cooperative cancellation: flag the in-flight request so
-             * its handler can bail and its response is dropped. */
-            const cmcp_json_t *rid = msg->params
-                ? cmcp_json_object_get(msg->params, "requestId") : NULL;
-            if (rid) inflight_cancel(s, rid);
-        }
-        /* All other notifications: drop silently per JSON-RPC spec. */
-        return;
-    }
-
-    /* Request path. */
-    if (msg->method && strcmp(msg->method, "initialize") == 0) {
-        handle_initialize(s, msg, resp);
-        return;
-    }
-
-    /* `ping` — a liveness probe. Either party may send it at any time;
-     * the receiver MUST respond with an empty result. Answered before
-     * the readiness gate so it works pre-handshake too. */
-    if (msg->method && strcmp(msg->method, "ping") == 0) {
-        cmcp_rpc_make_response(resp, &msg->id, cmcp_json_new_object());
-        return;
-    }
-
-    if (s->state != SS_READY) {
-        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INVALID_REQUEST,
-                             "Server is not ready: send `initialize` first",
-                             NULL);
-        return;
-    }
-
+/* Route a request to its method handler. Shared by both eras: the
+ * legacy path reaches it after the handshake gate, the modern path after
+ * era validation and its own allow-list. */
+static void dispatch_request(cmcp_server_t *s,
+                             const cmcp_rpc_message_t *msg,
+                             cmcp_rpc_message_t *resp,
+                             cmcp_handler_ctx_t *hctx) {
     /* JSON-RPC parse rejects method-less requests, so this is structurally
      * unreachable — but the analyzer doesn't see that constraint, and a
      * defensive guard is cheap. */
@@ -1699,6 +1648,114 @@ static void server_handle_message(cmcp_server_t *s,
 
     cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_METHOD_NOT_FOUND,
                          msg->method ? msg->method : "(null)", NULL);
+}
+
+/* Serve one modern (2026-07-28) request. Stateless: it never reads or
+ * changes the legacy handshake state, so it works before, after or
+ * without `initialize`, on the same process as a legacy session. */
+static void handle_modern(cmcp_server_t *s,
+                          const cmcp_rpc_message_t *msg,
+                          cmcp_rpc_message_t *resp,
+                          cmcp_handler_ctx_t *hctx) {
+    if (cmcp_era_check_request(msg, resp) != CMCP_OK) return;
+
+    if (!cmcp_era_modern_method_allowed(msg->method)) {
+        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_METHOD_NOT_FOUND,
+                            msg->method, NULL);
+        return;
+    }
+
+    if (strcmp(msg->method, "server/discover") == 0) {
+        cmcp_json_t *result = cmcp_era_discover_result(server_caps_to_json(s));
+        if (!result) {
+            cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INTERNAL_ERROR,
+                                "Server out of memory", NULL);
+            return;
+        }
+        cmcp_rpc_make_response(resp, &msg->id, result);
+    } else {
+        dispatch_request(s, msg, resp, hctx);
+    }
+
+    /* Errors pass through untouched; results get resultType, serverInfo
+     * and, where the spec asks, cache hints. */
+    if (resp->result &&
+        cmcp_era_finish_result(resp->result, msg->method, s->name,
+                               s->version) != CMCP_OK) {
+        cmcp_rpc_message_clear(resp);
+        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INTERNAL_ERROR,
+                            "Server out of memory", NULL);
+    }
+}
+
+/* ====================================================================== */
+/* Per-frame handler                                                       */
+/* ====================================================================== */
+
+/* Dispatch one parsed message. For requests, *resp is initialised by
+ * this function and the caller must clear it. `hctx` is the per-call
+ * handle for handler-invoking requests (cancellation + progress); it is
+ * NULL for the inline path, where no handler runs. */
+static void server_handle_message(cmcp_server_t *s,
+                                   const cmcp_rpc_message_t *msg,
+                                   cmcp_rpc_message_t *resp,
+                                   cmcp_handler_ctx_t *hctx) {
+    cmcp_rpc_message_init(resp);
+
+    if (msg->kind == CMCP_MSG_RESPONSE) {
+        /* Servers don't send requests in v0.1, so they shouldn't see
+         * responses. Drop silently — no reply. */
+        return;
+    }
+
+    /* Notification path. */
+    if (msg->kind == CMCP_MSG_NOTIFICATION) {
+        if (msg->method &&
+            strcmp(msg->method, "notifications/initialized") == 0) {
+            if (s->state == SS_HANDSHAKE) s->state = SS_READY;
+            /* Otherwise: stray initialized; ignore. */
+        } else if (msg->method &&
+                   strcmp(msg->method, "notifications/cancelled") == 0) {
+            /* Cooperative cancellation: flag the in-flight request so
+             * its handler can bail and its response is dropped. */
+            const cmcp_json_t *rid = msg->params
+                ? cmcp_json_object_get(msg->params, "requestId") : NULL;
+            if (rid) inflight_cancel(s, rid);
+        }
+        /* All other notifications: drop silently per JSON-RPC spec. */
+        return;
+    }
+
+    /* Request path. A request carrying modern per-request _meta (or
+     * the modern-only `server/discover`) is served statelessly; the
+     * era is chosen per request, so both eras can share a process. */
+    if (msg->method && (strcmp(msg->method, "server/discover") == 0 ||
+                        cmcp_era_is_modern(msg->params))) {
+        handle_modern(s, msg, resp, hctx);
+        return;
+    }
+
+    if (msg->method && strcmp(msg->method, "initialize") == 0) {
+        handle_initialize(s, msg, resp);
+        return;
+    }
+
+    /* `ping` — a liveness probe. Either party may send it at any time;
+     * the receiver MUST respond with an empty result. Answered before
+     * the readiness gate so it works pre-handshake too. */
+    if (msg->method && strcmp(msg->method, "ping") == 0) {
+        cmcp_rpc_make_response(resp, &msg->id, cmcp_json_new_object());
+        return;
+    }
+
+    if (s->state != SS_READY) {
+        cmcp_rpc_make_error(resp, &msg->id, CMCP_RPC_INVALID_REQUEST,
+                             "Server is not ready: send `initialize` first",
+                             NULL);
+        return;
+    }
+
+    dispatch_request(s, msg, resp, hctx);
 }
 
 /* Send a response (or error) frame. */
@@ -1907,7 +1964,7 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
             continue;
         }
         if (msgs[0].kind == CMCP_MSG_REQUEST &&
-            s->state == SS_READY &&
+            (s->state == SS_READY || cmcp_era_is_modern(msgs[0].params)) &&
             is_pool_method(msgs[0].method)) {
             work_item_t *w = (work_item_t *)malloc(sizeof *w);
             if (!w) {

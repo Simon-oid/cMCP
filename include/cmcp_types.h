@@ -88,6 +88,12 @@ int cmcp_log_level_from_name(const char *name, cmcp_log_level_t *out_level);
 #define CMCP_RPC_SERVER_ERROR_MIN  (-32099)
 #define CMCP_RPC_SERVER_ERROR_MAX  (-32000)
 
+/* MCP 2026-07-28 partitions that range: -32020..-32099 is reserved for
+ * codes the specification defines, with exactly these meanings. */
+#define CMCP_RPC_HEADER_MISMATCH                (-32020)
+#define CMCP_RPC_MISSING_CLIENT_CAPABILITY      (-32021)
+#define CMCP_RPC_UNSUPPORTED_PROTOCOL_VERSION   (-32022)
+
 /* ------------------------------------------------------------------ */
 /* JSON-RPC ID                                                         */
 /* ------------------------------------------------------------------ */
