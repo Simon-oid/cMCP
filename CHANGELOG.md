@@ -9,7 +9,8 @@ pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
 revision through `initialize` and adds the modern, stateless
 2026-07-28 revision, chosen per request. Landing in phases; the stdio
-server path is done, HTTP, MRTR and the client follow.
+server path and multi round-trip requests are done, HTTP and the
+client follow.
 
 - **Modern server path (stdio).** A request whose `params._meta`
   carries `io.modelcontextprotocol/protocolVersion` or
@@ -29,12 +30,47 @@ server path is done, HTTP, MRTR and the client follow.
   `CMCP_RPC_HEADER_MISMATCH` (-32020),
   `CMCP_RPC_MISSING_CLIENT_CAPABILITY` (-32021),
   `CMCP_RPC_UNSUPPORTED_PROTOCOL_VERSION` (-32022).
+- **Multi round-trip requests (MRTR).** On the modern path a handler
+  asks the client for input with the new dual-era
+  `cmcp_handler_input(hctx, key, method, params, &out)`: legacy calls
+  still send a blocking `elicitation/create` / `sampling/createMessage`
+  / `roots/list`; modern calls queue it and return the new error code
+  `CMCP_EINPUT_REQUIRED` (-14), and the library answers with
+  `resultType: "input_required"` plus `inputRequests` (only on
+  `tools/call`, `resources/read`, `prompts/get`). On the retry the
+  answer comes back from `inputResponses[key]`. Interim results carry
+  no cache hints. `cmcp_server_send_request`, `cmcp_handler_elicit`
+  and `cmcp_handler_elicit_url` return `CMCP_EUNSUPPORTED` on the
+  modern path, as the spec removed server-initiated requests.
+- **Sealed `requestState`.** `cmcp_handler_set_request_state` /
+  `cmcp_handler_request_state`: the library seals the handler's state
+  with HMAC-SHA256 (implemented from FIPS 180-4 / RFC 2104, no new
+  dependency), bound to the method, the tool/prompt/resource and a
+  600 s expiry. A forged, expired or replayed-elsewhere state is
+  rejected with `-32602` before the handler runs. The key is random per
+  process; `cmcp_server_set_state_key` shares one across instances.
+- **Per-request client capabilities and logging.**
+  `cmcp_handler_client_caps(hctx)` returns this request's `_meta`
+  capabilities on the modern path (never inferred from earlier
+  requests). A handler that fails for want of one is answered with
+  `-32021` and `data.requiredCapabilities`. `cmcp_handler_log` emits
+  only when the request's `_meta` carries `logLevel`, at or above it.
+  `cmcp_client_capabilities_t` gained `roots`.
+- **Behaviour change:** `cmcp_server_log` now drops messages until a
+  legacy session has completed its handshake (no one has opted in to
+  server-wide logs before that).
 - **Internal:** `src/era.{c,h}` holds the modern request rules; the
   method chain in `server.c` moved into `dispatch_request`, shared by
   both eras.
-- **Tests:** `tests/test_modern.c` (10 cases, raw-wire frames); the
-  Python SDK conformance harness (`make conformance-py`) now expects
-  `auto` and `2026-07-28` modes to pass.
+  `src/mrtr.{c,h}` the MRTR state, `src/seal.{c,h}` and
+  `src/sha256.{c,h}` the requestState seal.
+- **Tests:** `tests/test_modern.c` (10 cases, raw-wire frames),
+  `tests/test_mrtr.c` (14 cases: both rounds, tampered / replayed /
+  unsealed state, -32021, per-request caps and logLevel, the same
+  handler on the legacy path, shared keys), `tests/test_seal.c` (NIST,
+  RFC 4231 and RFC 4648 vectors). The Python SDK conformance harness
+  (`make conformance-py`) passes in all three modes and now also runs
+  an elicitation round-trip against the new `examples/ask-server`.
 
 ## v0.10.0 — deep-analysis hardening pass (2026-06-12)
 

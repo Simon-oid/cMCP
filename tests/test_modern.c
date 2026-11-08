@@ -17,11 +17,11 @@
 #include "cmcp_transport.h"
 #include "cmcp_types.h"
 
-#include <pthread.h>
+#include "wire_rig.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #define MODERN "2026-07-28"
 
@@ -37,14 +37,6 @@
 /* Scaffolding                                                             */
 /* ====================================================================== */
 
-typedef struct {
-    cmcp_transport_t *client_t;
-    cmcp_transport_t *server_t;
-    cmcp_server_t    *srv;
-    pthread_t         th;
-    int               rc;
-} rig_t;
-
 static int echo_handler(const cmcp_json_t *arguments, void *userdata,
                         cmcp_handler_ctx_t *hctx, cmcp_json_t **out_content,
                         int *out_is_error) {
@@ -57,22 +49,7 @@ static int echo_handler(const cmcp_json_t *arguments, void *userdata,
     return CMCP_OK;
 }
 
-static void *server_thread(void *arg) {
-    rig_t *r = (rig_t *)arg;
-    r->rc = cmcp_server_run(r->srv, r->server_t);
-    return NULL;
-}
-
-static int rig_start(rig_t *r) {
-    memset(r, 0, sizeof(*r));
-    int c2s[2], s2c[2];
-    if (pipe(c2s) != 0) return -1;
-    if (pipe(s2c) != 0) { close(c2s[0]); close(c2s[1]); return -1; }
-    r->client_t = cmcp_transport_stdio_new_fds(s2c[0], c2s[1]);
-    r->server_t = cmcp_transport_stdio_new_fds(c2s[0], s2c[1]);
-    r->srv = cmcp_server_new("modern-server", "1.2.3");
-    if (!r->client_t || !r->server_t || !r->srv) return -1;
-
+static int add_echo(cmcp_server_t *srv) {
     cmcp_tool_t echo = {
         .name = "echo",
         .description = "Echo the text back",
@@ -81,41 +58,7 @@ static int rig_start(rig_t *r) {
                         "\"required\":[\"text\"]}",
         .handler = echo_handler,
     };
-    if (cmcp_server_add_tool(r->srv, &echo) != CMCP_OK) return -1;
-    return pthread_create(&r->th, NULL, server_thread, r) == 0 ? 0 : -1;
-}
-
-static void rig_stop(rig_t *r) {
-    cmcp_transport_close(r->client_t);   /* EOF ends the server loop */
-    pthread_join(r->th, NULL);
-    cmcp_transport_close(r->server_t);
-    cmcp_server_free(r->srv);
-}
-
-/* Write one raw frame, read one frame back, parse it as JSON.
- * Returns an owned value, or NULL on any failure. */
-static cmcp_json_t *exchange(rig_t *r, const char *frame) {
-    if (cmcp_transport_write(r->client_t, frame, strlen(frame)) != CMCP_OK)
-        return NULL;
-    char *in = NULL; size_t n = 0;
-    if (cmcp_transport_read(r->client_t, &in, &n) != CMCP_OK) return NULL;
-    cmcp_json_t *v = cmcp_json_parse(in, n);
-    free(in);
-    return v;
-}
-
-/* Small JSON path helpers: NULL-safe, return NULL on any miss. */
-static const cmcp_json_t *get(const cmcp_json_t *o, const char *key) {
-    return (o && o->type == CMCP_JSON_OBJECT) ? cmcp_json_object_get(o, key)
-                                              : NULL;
-}
-
-static int is_str(const cmcp_json_t *v, const char *want) {
-    return v && v->type == CMCP_JSON_STRING && strcmp(cmcp_json_string(v), want) == 0;
-}
-
-static long long int_of(const cmcp_json_t *v) {
-    return (v && v->type == CMCP_JSON_INT) ? cmcp_json_int(v) : -999999;
+    return cmcp_server_add_tool(srv, &echo) == CMCP_OK ? 0 : -1;
 }
 
 static int array_has_str(const cmcp_json_t *arr, const char *want) {
@@ -147,7 +90,7 @@ static void assert_cache_hints(const cmcp_json_t *result) {
 /* ====================================================================== */
 
 static void test_discover_reports_both_eras(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\","
@@ -168,7 +111,7 @@ static void test_discover_reports_both_eras(void) {
 }
 
 static void test_missing_protocol_version_is_invalid_params(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"server/discover\","
@@ -181,7 +124,7 @@ static void test_missing_protocol_version_is_invalid_params(void) {
 }
 
 static void test_missing_client_capabilities_is_invalid_params(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\","
@@ -194,7 +137,7 @@ static void test_missing_client_capabilities_is_invalid_params(void) {
 }
 
 static void test_unsupported_version_lists_supported(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\","
@@ -213,7 +156,7 @@ static void test_unsupported_version_lists_supported(void) {
 }
 
 static void test_tools_list_without_handshake(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\","
@@ -232,7 +175,7 @@ static void test_tools_list_without_handshake(void) {
 }
 
 static void test_tools_call_without_handshake(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
@@ -251,7 +194,7 @@ static void test_tools_call_without_handshake(void) {
 }
 
 static void test_removed_methods_are_unknown_on_modern_path(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     static const char *removed[] = {
         "ping", "logging/setLevel", "resources/subscribe",
@@ -273,7 +216,7 @@ static void test_removed_methods_are_unknown_on_modern_path(void) {
 /* Legacy semantics are untouched: initialize, then a request without
  * modern _meta gets a 2025-11-25 result with no resultType. */
 static void test_legacy_path_unchanged(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *init = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":20,\"method\":\"initialize\","
@@ -302,7 +245,7 @@ static void test_legacy_path_unchanged(void) {
 /* A legacy request that arrives before initialize is still refused:
  * the modern path only opens for requests that carry modern _meta. */
 static void test_legacy_request_before_initialize_still_refused(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *v = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":30,\"method\":\"tools/list\"}");
@@ -315,7 +258,7 @@ static void test_legacy_request_before_initialize_still_refused(void) {
 /* Both eras on one process: a legacy session is live and a modern
  * request is still served statelessly next to it. */
 static void test_both_eras_on_one_process(void) {
-    rig_t r; TEST_ASSERT(rig_start(&r) == 0);
+    rig_t r; TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_echo) == 0);
 
     cmcp_json_t *init = exchange(&r,
         "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"initialize\","

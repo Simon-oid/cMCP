@@ -19,6 +19,7 @@ const char *cmcp_errstr(int err) {
     case CMCP_ENOTFOUND:    return "not found";
     case CMCP_EHANDLER:     return "handler error";
     case CMCP_EAGAIN:       return "capacity exceeded, retry";
+    case CMCP_EINPUT_REQUIRED: return "client input required";
     default:                return "unknown error";
     }
 }

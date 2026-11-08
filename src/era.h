@@ -25,6 +25,13 @@
 #define CMCP_META_CLIENT_CAPS      "io.modelcontextprotocol/clientCapabilities"
 #define CMCP_META_CLIENT_INFO      "io.modelcontextprotocol/clientInfo"
 #define CMCP_META_SERVER_INFO      "io.modelcontextprotocol/serverInfo"
+#define CMCP_META_LOG_LEVEL        "io.modelcontextprotocol/logLevel"
+
+/* Parse a ClientCapabilities object (the `initialize` params field, or
+ * the per-request `_meta` key on the modern path) into *out. A NULL or
+ * non-object input yields all-zero capabilities. */
+void cmcp_era_parse_client_caps(const cmcp_json_t *o,
+                                cmcp_client_capabilities_t *out);
 
 /* Non-zero when `params._meta` carries either required modern key.
  * Either key is enough: a modern request missing the other one must be

@@ -22,10 +22,11 @@ LDLIBS  ?= -Wl,--as-needed $(CURL_LIBS) -Wl,--no-as-needed -lpthread -lm
 # --- Source partitioning into three link targets ---------------------------
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.
 CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c src/era.c \
+                     src/sha256.c src/seal.c \
                      src/http_parser.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
-SERVER_CANDIDATES := src/server.c src/worker.c
+SERVER_CANDIDATES := src/server.c src/worker.c src/mrtr.c
 CLIENT_CANDIDATES := src/client.c src/session.c
 
 CORE_SRC   := $(wildcard $(CORE_CANDIDATES))
@@ -165,7 +166,7 @@ conformance: all $(CONF_C_BIN)
 # first run (pip installs the pinned SDK into conformance/py/.venv).
 CONF_PY_VENV := $(CONF_DIR)/py/.venv
 
-conformance-py: examples/echo-server
+conformance-py: examples/echo-server examples/ask-server
 	@command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
 	@test -x $(CONF_PY_VENV)/bin/python || python3 -m venv $(CONF_PY_VENV)
 	$(CONF_PY_VENV)/bin/pip install --quiet --disable-pip-version-check -r $(CONF_DIR)/py/requirements.txt

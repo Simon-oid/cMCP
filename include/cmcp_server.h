@@ -427,7 +427,9 @@ int cmcp_server_notify_resource_updated(cmcp_server_t *s, const char *uri);
  * Filter-gated: messages below the floor most recently set by the
  * client's `logging/setLevel` request are silently dropped (returns
  * CMCP_OK). Pre-setLevel the floor is CMCP_LOG_LEVEL_DEBUG, so
- * everything passes — the host is expected to dial it down.
+ * everything passes — the host is expected to dial it down. Until a
+ * legacy session has completed its handshake every message is dropped:
+ * modern (2026-07-28) clients opt in per request, see cmcp_handler_log.
  *
  * `logger` may be NULL (the field is then omitted from the wire).
  * `data` may be NULL → empty object on the wire; otherwise it is
@@ -525,5 +527,93 @@ int cmcp_handler_elicit_url(cmcp_handler_ctx_t *hctx,
                              const char *message,
                              const char *url,
                              cmcp_json_t **out_result);
+
+/* ====================================================================== */
+/* Dual-era client input (MCP 2026-07-28 multi round-trip requests)        */
+/* ====================================================================== */
+
+/* MCP 2026-07-28 removed server→client requests. A handler serving a
+ * modern request that needs input from the client (an elicitation
+ * form, an LLM sample, the roots list) ends its call with an
+ * `InputRequiredResult`; the client gathers the answers and retries the
+ * same request with `inputResponses`, and the handler simply runs again.
+ * The calls below let one handler body serve both eras:
+ *
+ *     cmcp_json_t *ans = NULL;
+ *     int rc = cmcp_handler_input(hctx, "login", "elicitation/create",
+ *                                 params, &ans);
+ *     if (rc == CMCP_EINPUT_REQUIRED) return rc;   // modern, first round
+ *     if (rc != CMCP_OK) return rc;
+ *     ... use ans, then cmcp_json_free(ans) ...
+ *
+ * Only `tools/call`, `resources/read` and `prompts/get` may ask for
+ * input (spec table "Supported Requests"). On the modern path
+ * cmcp_server_send_request, cmcp_handler_elicit and
+ * cmcp_handler_elicit_url return CMCP_EUNSUPPORTED. */
+
+/* Non-zero when this call is a modern (2026-07-28) request. NULL-safe. */
+int cmcp_handler_is_modern(const cmcp_handler_ctx_t *hctx);
+
+/* The client capabilities that apply to this call: the ones sent in
+ * this request's `_meta` on the modern path (the spec forbids inferring
+ * them from earlier requests), the handshake's on the legacy path.
+ * Borrowed, valid for the handler call. NULL only for a NULL hctx. */
+const cmcp_client_capabilities_t *
+cmcp_handler_client_caps(const cmcp_handler_ctx_t *hctx);
+
+/* Ask the client for input. `method` is "elicitation/create",
+ * "sampling/createMessage" or "roots/list"; `params` is that request's
+ * params object (consumed; may be NULL for roots/list). `key` names the
+ * request within this call and must be unique per round.
+ *
+ *   legacy  sends the request and blocks for the answer (as
+ *           cmcp_handler_elicit does); CMCP_OK with *out_result owned.
+ *   modern  if the retry carries `inputResponses[key]`, CMCP_OK with an
+ *           owned copy in *out_result; otherwise the request is queued
+ *           and CMCP_EINPUT_REQUIRED is returned — return from the
+ *           handler and the library answers with an InputRequiredResult
+ *           listing every queued request.
+ *
+ * CMCP_EUNSUPPORTED when the client did not declare the capability the
+ * method needs; on the modern path a handler that then fails is
+ * answered with -32021 and data.requiredCapabilities. CMCP_EINVAL for
+ * an unknown method, an empty or duplicate key. *out_result is NULL
+ * whenever the return is not CMCP_OK. */
+int cmcp_handler_input(cmcp_handler_ctx_t *hctx, const char *key,
+                       const char *method, cmcp_json_t *params,
+                       cmcp_json_t **out_result);
+
+/* The `requestState` this retry carried, after the library verified its
+ * seal (integrity, expiry, and that it was issued for this same method
+ * and primitive). NULL when there was none. A forged, expired or
+ * mismatched state never reaches the handler: the request is rejected
+ * with -32602 first. Borrowed, valid for the handler call. */
+const char *cmcp_handler_request_state(const cmcp_handler_ctx_t *hctx);
+
+/* Set the state to hand back with this call's InputRequiredResult
+ * (copied; NULL clears). Setting it makes the call answer
+ * input_required even with no queued input requests — the spec's
+ * "request state only" form, e.g. for load shedding. The library seals
+ * it with HMAC-SHA256 and a CMCP_MRTR_STATE_TTL_S expiry; it is signed,
+ * not encrypted, so the client can read it — keep secrets out. Modern
+ * path only: CMCP_EUNSUPPORTED on a legacy call. */
+int cmcp_handler_set_request_state(cmcp_handler_ctx_t *hctx,
+                                   const char *state);
+
+/* Log on behalf of this call. Modern path: emitted only when the
+ * request's `_meta` carries `io.modelcontextprotocol/logLevel` and
+ * `level` is at or above it (the spec forbids log notifications for a
+ * request that did not opt in). Legacy path: same as cmcp_server_log.
+ * Requires `caps.logging`. `data` is consumed. */
+int cmcp_handler_log(cmcp_handler_ctx_t *hctx, cmcp_log_level_t level,
+                     const char *logger, cmcp_json_t *data);
+
+/* Use a fixed 32-byte key to seal requestState instead of the random
+ * per-process default. Needed when several server instances sit behind
+ * one endpoint, so a retry can land on any of them. Configuration, like
+ * cmcp_server_set_capabilities: call it before cmcp_server_run.
+ * CMCP_EINVAL unless `len` is 32. */
+int cmcp_server_set_state_key(cmcp_server_t *s, const unsigned char *key,
+                              size_t len);
 
 #endif

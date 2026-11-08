@@ -11,6 +11,12 @@ The same checks run once per client connect mode:
   auto        probe `server/discover`, fall back to legacy on failure
   2026-07-28  modern per-request `_meta`, no handshake
 
+Each mode also runs an input round-trip against examples/ask-server,
+whose one tool asks for the user's name: by a server-initiated
+`elicitation/create` on the legacy path, by an InputRequiredResult and a
+retry with `inputResponses` (multi round-trip requests) on the modern
+path. The SDK answers through the same elicitation callback either way.
+
 EXPECTED below records what each mode should do against the current
 cMCP build. A mode that behaves differently from its expectation fails
 the run, whether it unexpectedly passes or unexpectedly fails, so the
@@ -24,9 +30,10 @@ import asyncio
 import os
 import sys
 
-from mcp import Client, StdioServerParameters
+from mcp import Client, StdioServerParameters, types
 
 SERVER = os.environ.get("CMCP_CONF_SERVER", "./examples/echo-server")
+ASK_SERVER = os.environ.get("CMCP_CONF_ASK_SERVER", "./examples/ask-server")
 
 # mode -> (expected outcome, protocol version the session must report)
 EXPECTED = {
@@ -62,7 +69,28 @@ async def run_checks(mode: str) -> list[tuple[bool, str]]:
 
         bad = await client.call_tool("add", {"a": "not-a-number"})
         checks.append((bool(bad.is_error), "schema violation -> isError result"))
+
+    checks.extend(await run_input_checks(mode))
     return checks
+
+
+async def run_input_checks(mode: str) -> list[tuple[bool, str]]:
+    """greet asks for a name; the callback answers it."""
+    asked: list[str] = []
+
+    async def on_elicit(context, params):
+        asked.append(params.message)
+        return types.ElicitResult(action="accept", content={"name": "Ada"})
+
+    params = StdioServerParameters(command=ASK_SERVER, args=[])
+    async with Client(
+        params, mode=mode, read_timeout_seconds=10, elicitation_callback=on_elicit
+    ) as client:
+        greet = await client.call_tool("greet", {})
+    return [
+        (asked == ["What is your name?"], f"elicitation asked once -> {asked}"),
+        (text_of(greet) == "Hello, Ada!", f"greet -> {text_of(greet)!r}"),
+    ]
 
 
 async def run_mode(mode: str) -> bool:

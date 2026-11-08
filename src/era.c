@@ -186,6 +186,12 @@ int cmcp_era_finish_result(cmcp_json_t *result, const char *method,
     if (add_server_info(result, server_name, server_version) != CMCP_OK)
         return CMCP_ENOMEM;
 
+    /* Interim input_required results are never cacheable and carry no
+     * hints (spec: server/utilities/caching). */
+    const cmcp_json_t *rt = cmcp_json_object_get(result, "resultType");
+    if (rt && rt->type == CMCP_JSON_STRING &&
+        strcmp(cmcp_json_string(rt), "input_required") == 0)
+        return CMCP_OK;
     if (!in_list(method, CACHEABLE_METHODS, COUNT(CACHEABLE_METHODS)))
         return CMCP_OK;
     if (!cmcp_json_object_get(result, "ttlMs") &&
@@ -196,4 +202,38 @@ int cmcp_era_finish_result(cmcp_json_t *result, const char *method,
                   cmcp_json_new_string(CACHE_SCOPE_DEFAULT)))
         return CMCP_ENOMEM;
     return CMCP_OK;
+}
+
+/* Moved from server.c so the modern path can parse per-request
+ * capabilities with the same rules as the legacy handshake. */
+void cmcp_era_parse_client_caps(const cmcp_json_t *o,
+                                cmcp_client_capabilities_t *out) {
+    memset(out, 0, sizeof *out);
+    if (!o || o->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *sampling = cmcp_json_object_get(o, "sampling");
+    if (sampling) {
+        out->sampling = 1;
+        if (sampling->type == CMCP_JSON_OBJECT) {
+            if (cmcp_json_object_get(sampling, "tools"))
+                out->sampling_tools = 1;
+        }
+    }
+    const cmcp_json_t *elicit = cmcp_json_object_get(o, "elicitation");
+    if (elicit) {
+        out->elicitation = 1;
+        if (elicit->type == CMCP_JSON_OBJECT) {
+            if (cmcp_json_object_get(elicit, "form"))
+                out->elicitation_form = 1;
+            if (cmcp_json_object_get(elicit, "url"))
+                out->elicitation_url = 1;
+        }
+    }
+    const cmcp_json_t *roots = cmcp_json_object_get(o, "roots");
+    if (roots && roots->type == CMCP_JSON_OBJECT) {
+        out->roots = 1;
+        const cmcp_json_t *lc = cmcp_json_object_get(roots, "listChanged");
+        if (lc && lc->type == CMCP_JSON_BOOL && lc->b) {
+            out->roots_list_changed = 1;
+        }
+    }
 }

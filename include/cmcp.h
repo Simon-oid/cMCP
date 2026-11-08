@@ -51,6 +51,9 @@ typedef enum {
     CMCP_ENOTFOUND      = -11, /**< Named primitive (tool/resource/prompt) not registered. */
     CMCP_EHANDLER       = -12, /**< Handler returned a non-success result. */
     CMCP_EAGAIN         = -13, /**< Capacity/rate cap reached; retry later. */
+    CMCP_EINPUT_REQUIRED = -14, /**< Handler needs client input first (MCP
+                                 *   2026-07-28 multi round-trip); see
+                                 *   cmcp_handler_input. */
 } cmcp_err_t;
 
 /**

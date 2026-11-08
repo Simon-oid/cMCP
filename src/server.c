@@ -10,6 +10,8 @@
 #include "cmcp_transport.h"
 #include "worker.h"
 #include "era.h"
+#include "mrtr.h"
+#include "seal.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -157,6 +159,17 @@ struct cmcp_server {
     pthread_mutex_t              log_mu;
     int                          log_mu_init;
     cmcp_log_level_t             log_min_level;
+    /* Non-zero once a legacy session completed its handshake. Without
+     * one, nobody opted in to server-wide logs: a modern client opts in
+     * per request (`_meta` logLevel, see cmcp_handler_log). Guarded by
+     * log_mu. */
+    int                          log_session;
+
+    /* HMAC key that seals MRTR `requestState` (see seal.h). Random per
+     * process unless the host sets one with cmcp_server_set_state_key;
+     * zero length means no key could be drawn, so state is refused. */
+    unsigned char                state_key[CMCP_SEAL_KEY_LEN];
+    size_t                       state_key_len;
 };
 
 /* ====================================================================== */
@@ -170,6 +183,16 @@ static char *xstrdup(const char *s) {
     if (!out) return NULL;
     memcpy(out, s, n + 1);
     return out;
+}
+
+/* Draw a fresh MRTR state key from the kernel CSPRNG. A failure leaves
+ * the key empty: requestState is then refused rather than unprotected. */
+static void load_random_state_key(cmcp_server_t *s) {
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (!f) return;
+    if (fread(s->state_key, 1, sizeof s->state_key, f) == sizeof s->state_key)
+        s->state_key_len = sizeof s->state_key;
+    fclose(f);
 }
 
 cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
@@ -211,6 +234,7 @@ cmcp_server_t *cmcp_server_new(const char *name, const char *version) {
     }
     s->log_mu_init    = 1;
     s->log_min_level  = CMCP_LOG_LEVEL_DEBUG;
+    load_random_state_key(s);
     return s;
 }
 
@@ -610,36 +634,6 @@ static cmcp_json_t *server_caps_to_json(const cmcp_server_t *s) {
     return root;
 }
 
-static void client_caps_from_json(const cmcp_json_t *o,
-                                   cmcp_client_capabilities_t *out) {
-    memset(out, 0, sizeof *out);
-    if (!o || o->type != CMCP_JSON_OBJECT) return;
-    const cmcp_json_t *sampling = cmcp_json_object_get(o, "sampling");
-    if (sampling) {
-        out->sampling = 1;
-        if (sampling->type == CMCP_JSON_OBJECT) {
-            if (cmcp_json_object_get(sampling, "tools"))
-                out->sampling_tools = 1;
-        }
-    }
-    const cmcp_json_t *elicit = cmcp_json_object_get(o, "elicitation");
-    if (elicit) {
-        out->elicitation = 1;
-        if (elicit->type == CMCP_JSON_OBJECT) {
-            if (cmcp_json_object_get(elicit, "form"))
-                out->elicitation_form = 1;
-            if (cmcp_json_object_get(elicit, "url"))
-                out->elicitation_url = 1;
-        }
-    }
-    const cmcp_json_t *roots = cmcp_json_object_get(o, "roots");
-    if (roots && roots->type == CMCP_JSON_OBJECT) {
-        const cmcp_json_t *lc = cmcp_json_object_get(roots, "listChanged");
-        if (lc && lc->type == CMCP_JSON_BOOL && lc->b) {
-            out->roots_list_changed = 1;
-        }
-    }
-}
 
 /* ====================================================================== */
 /* Handshake handlers                                                      */
@@ -700,7 +694,7 @@ static void handle_initialize(cmcp_server_t *s,
         }
     }
     const cmcp_json_t *cc = cmcp_json_object_get(req->params, "capabilities");
-    client_caps_from_json(cc, &s->peer_caps);
+    cmcp_era_parse_client_caps(cc, &s->peer_caps);
 
     /* Build result. */
     cmcp_json_t *result = cmcp_json_new_object();
@@ -784,6 +778,8 @@ struct cmcp_handler_ctx {
                                           * wired in Phase 3.4 Step 3 */
     cmcp_json_t        *structured;      /* owned; attached to tool result */
     int                 is_tool_call;    /* set_structured no-ops elsewhere */
+    cmcp_mrtr_t         mrtr;            /* modern per-request state; zero
+                                          * (modern = 0) on the legacy path */
 };
 
 /* params._meta.progressToken — a string or int per spec — or NULL. The
@@ -796,6 +792,15 @@ static const cmcp_json_t *meta_progress_token(const cmcp_json_t *params) {
     if (tok && (tok->type == CMCP_JSON_STRING || tok->type == CMCP_JSON_INT))
         return tok;
     return NULL;
+}
+
+/* Reset a handler context for one request. */
+static void hctx_init(cmcp_handler_ctx_t *c, cmcp_server_t *s,
+                      const cmcp_json_t *params, int is_tool_call) {
+    memset(c, 0, sizeof *c);
+    c->server         = s;
+    c->progress_token = meta_progress_token(params);
+    c->is_tool_call   = is_tool_call;
 }
 
 int cmcp_handler_cancelled(const cmcp_handler_ctx_t *hctx) {
@@ -1214,11 +1219,7 @@ static void handle_tools_call(cmcp_server_t *s,
      * one with no cancellation wiring. */
     cmcp_handler_ctx_t local;
     if (!hctx) {
-        local.server         = s;
-        local.progress_token = meta_progress_token(req->params);
-        local.cancelled      = 0;
-        local.structured     = NULL;
-        local.is_tool_call   = 1;
+        hctx_init(&local, s, req->params, 1);
         hctx = &local;
     } else {
         hctx->is_tool_call = 1;
@@ -1340,11 +1341,7 @@ static void handle_resources_read(cmcp_server_t *s,
 
     cmcp_handler_ctx_t local;
     if (!hctx) {
-        local.server         = s;
-        local.progress_token = meta_progress_token(req->params);
-        local.cancelled      = 0;
-        local.structured     = NULL;
-        local.is_tool_call   = 0;
+        hctx_init(&local, s, req->params, 0);
         hctx = &local;
     } else {
         hctx->is_tool_call = 0;
@@ -1531,11 +1528,7 @@ static void handle_prompts_get(cmcp_server_t *s,
 
     cmcp_handler_ctx_t local;
     if (!hctx) {
-        local.server         = s;
-        local.progress_token = meta_progress_token(req->params);
-        local.cancelled      = 0;
-        local.structured     = NULL;
-        local.is_tool_call   = 0;
+        hctx_init(&local, s, req->params, 0);
         hctx = &local;
     } else {
         hctx->is_tool_call = 0;
@@ -1650,6 +1643,34 @@ static void dispatch_request(cmcp_server_t *s,
                          msg->method ? msg->method : "(null)", NULL);
 }
 
+/* Run one modern request through the dispatcher with its per-request
+ * MRTR state: capabilities, logLevel, inputResponses and the verified
+ * requestState go in; an InputRequiredResult (or -32021) may come out.
+ * Non-OK only when the MRTR fields themselves were invalid (then *resp
+ * already holds the error and needs no modern decoration). */
+static int handle_modern_call(cmcp_server_t *s,
+                              const cmcp_rpc_message_t *msg,
+                              cmcp_rpc_message_t *resp,
+                              cmcp_handler_ctx_t *hctx) {
+    /* The pool supplies a ctx for handler-invoking methods; list-style
+     * methods run inline without one, and still get their capabilities
+     * checked here. */
+    cmcp_handler_ctx_t local;
+    if (!hctx) {
+        hctx_init(&local, s, msg->params, 0);
+        hctx = &local;
+    }
+    if (cmcp_mrtr_begin(&hctx->mrtr, msg, s->state_key, s->state_key_len,
+                        resp) != CMCP_OK) {
+        cmcp_mrtr_clear(&hctx->mrtr);
+        return CMCP_EPROTOCOL;
+    }
+    dispatch_request(s, msg, resp, hctx);
+    cmcp_mrtr_finish(&hctx->mrtr, msg, s->state_key, s->state_key_len, resp);
+    cmcp_mrtr_clear(&hctx->mrtr);
+    return CMCP_OK;
+}
+
 /* Serve one modern (2026-07-28) request. Stateless: it never reads or
  * changes the legacy handshake state, so it works before, after or
  * without `initialize`, on the same process as a legacy session. */
@@ -1673,8 +1694,8 @@ static void handle_modern(cmcp_server_t *s,
             return;
         }
         cmcp_rpc_make_response(resp, &msg->id, result);
-    } else {
-        dispatch_request(s, msg, resp, hctx);
+    } else if (handle_modern_call(s, msg, resp, hctx) != CMCP_OK) {
+        return;                       /* -32602 from the MRTR fields */
     }
 
     /* Errors pass through untouched; results get resultType, serverInfo
@@ -1712,7 +1733,12 @@ static void server_handle_message(cmcp_server_t *s,
     if (msg->kind == CMCP_MSG_NOTIFICATION) {
         if (msg->method &&
             strcmp(msg->method, "notifications/initialized") == 0) {
-            if (s->state == SS_HANDSHAKE) s->state = SS_READY;
+            if (s->state == SS_HANDSHAKE) {
+                s->state = SS_READY;
+                pthread_mutex_lock(&s->log_mu);
+                s->log_session = 1;
+                pthread_mutex_unlock(&s->log_mu);
+            }
             /* Otherwise: stray initialized; ignore. */
         } else if (msg->method &&
                    strcmp(msg->method, "notifications/cancelled") == 0) {
@@ -1984,11 +2010,8 @@ int cmcp_server_run(cmcp_server_t *s, cmcp_transport_t *t) {
             w->transport = t;
             w->msg       = msgs[0];   /* move: w->msg now owns the fields */
             free(msgs);               /* free the array container only   */
-            w->ctx.server         = s;
-            w->ctx.progress_token = meta_progress_token(w->msg.params);
-            w->ctx.cancelled      = 0;
-            w->ctx.structured     = NULL;
-            w->ctx.is_tool_call   = 0;   /* re-set by handle_tools_call */
+            /* is_tool_call is re-set by handle_tools_call. */
+            hctx_init(&w->ctx, s, w->msg.params, 0);
             /* Register before submit so a cancel racing in while the
              * request is still queued is not lost. */
             if (inflight_register(s, &w->msg.id, &w->ctx) != CMCP_OK) {
@@ -2139,6 +2162,13 @@ int cmcp_server_send_request(cmcp_server_t *s,
         return CMCP_EINVAL;
     }
     cmcp_rpc_message_init(out_response);
+    /* MCP 2026-07-28 removed server-initiated requests: a modern call
+     * asks for input through an InputRequiredResult instead (see
+     * cmcp_handler_input). */
+    if (hctx && hctx->mrtr.modern) {
+        cmcp_json_free(params);
+        return CMCP_EUNSUPPORTED;
+    }
 
     pthread_mutex_lock(&s->notify_mu);
     cmcp_transport_t *t = s->active_transport;
@@ -2216,7 +2246,7 @@ int cmcp_handler_elicit(cmcp_handler_ctx_t *hctx,
     *out_result = NULL;
 
     cmcp_server_t *s = hctx->server;
-    if (!s->peer_caps.elicitation) {
+    if (hctx->mrtr.modern || !s->peer_caps.elicitation) {
         cmcp_json_free(requested_schema);
         return CMCP_EUNSUPPORTED;
     }
@@ -2262,7 +2292,8 @@ int cmcp_handler_elicit_url(cmcp_handler_ctx_t *hctx,
     *out_result = NULL;
 
     cmcp_server_t *s = hctx->server;
-    if (!s->peer_caps.elicitation_url) return CMCP_EUNSUPPORTED;
+    if (hctx->mrtr.modern || !s->peer_caps.elicitation_url)
+        return CMCP_EUNSUPPORTED;
 
     cmcp_json_t *params = cmcp_json_new_object();
     if (!params) return CMCP_ENOMEM;
@@ -2303,23 +2334,10 @@ static void log_redact_init(void) {
     }
 }
 
-int cmcp_server_log(cmcp_server_t *s,
-                     cmcp_log_level_t level,
-                     const char *logger,
-                     cmcp_json_t *data) {
-    if (!s) { cmcp_json_free(data); return CMCP_EINVAL; }
-    if (!s->caps.logging) { cmcp_json_free(data); return CMCP_EPROTOCOL; }
-    const char *lname = cmcp_log_level_to_name(level);
-    if (!lname) { cmcp_json_free(data); return CMCP_EINVAL; }
-
-    /* Filter against the current floor. Dropping is success — callers
-     * don't want a non-zero return to mean "your trace was just too
-     * verbose for this peer". */
-    pthread_mutex_lock(&s->log_mu);
-    cmcp_log_level_t floor = s->log_min_level;
-    pthread_mutex_unlock(&s->log_mu);
-    if ((int)level < (int)floor) { cmcp_json_free(data); return CMCP_OK; }
-
+/* Build and send one notifications/message. Filtering is the caller's
+ * job; this only redacts, wraps and emits. Consumes `data`. */
+static int emit_log(cmcp_server_t *s, const char *lname,
+                    const char *logger, cmcp_json_t *data) {
     /* Scrub credential-shaped values from `data` before it leaves
      * the process. The host on the receiving end may persist or
      * forward this payload (file logs, ops pipelines) — redact at
@@ -2335,4 +2353,118 @@ int cmcp_server_log(cmcp_server_t *s,
     cmcp_json_object_set(params, "data",
                           data ? data : cmcp_json_new_object());
     return cmcp_server_notify(s, "notifications/message", params);
+}
+
+int cmcp_server_log(cmcp_server_t *s,
+                     cmcp_log_level_t level,
+                     const char *logger,
+                     cmcp_json_t *data) {
+    if (!s) { cmcp_json_free(data); return CMCP_EINVAL; }
+    if (!s->caps.logging) { cmcp_json_free(data); return CMCP_EPROTOCOL; }
+    const char *lname = cmcp_log_level_to_name(level);
+    if (!lname) { cmcp_json_free(data); return CMCP_EINVAL; }
+
+    /* Filter against the current floor. Dropping is success — callers
+     * don't want a non-zero return to mean "your trace was just too
+     * verbose for this peer". With no legacy session nobody opted in
+     * to server-wide logs (modern clients opt in per request), so the
+     * message is dropped too. */
+    pthread_mutex_lock(&s->log_mu);
+    cmcp_log_level_t floor = s->log_min_level;
+    int session = s->log_session;
+    pthread_mutex_unlock(&s->log_mu);
+    if (!session || (int)level < (int)floor) {
+        cmcp_json_free(data);
+        return CMCP_OK;
+    }
+    return emit_log(s, lname, logger, data);
+}
+
+/* ====================================================================== */
+/* Dual-era handler API (MCP 2026-07-28 multi round-trip requests)         */
+/* ====================================================================== */
+
+int cmcp_handler_is_modern(const cmcp_handler_ctx_t *hctx) {
+    return hctx ? hctx->mrtr.modern : 0;
+}
+
+const cmcp_client_capabilities_t *
+cmcp_handler_client_caps(const cmcp_handler_ctx_t *hctx) {
+    if (!hctx) return NULL;
+    return hctx->mrtr.modern ? &hctx->mrtr.caps : &hctx->server->peer_caps;
+}
+
+/* Legacy half of cmcp_handler_input: the 2025-11-25 blocking round-trip,
+ * gated on the capabilities the handshake recorded. */
+static int legacy_input(cmcp_handler_ctx_t *hctx, const char *method,
+                        cmcp_json_t *params, cmcp_json_t **out_result) {
+    int known = 0;
+    cmcp_json_t *need = cmcp_mrtr_missing_cap(&hctx->server->peer_caps,
+                                              method, params, &known);
+    if (!known || need) {
+        cmcp_json_free(need);
+        cmcp_json_free(params);
+        return known ? CMCP_EUNSUPPORTED : CMCP_EINVAL;
+    }
+    cmcp_rpc_message_t resp;
+    int rc = cmcp_server_send_request(hctx->server, hctx, method, params, &resp);
+    if (rc != CMCP_OK) return rc;
+    if (resp.error) {
+        cmcp_rpc_message_clear(&resp);
+        return CMCP_EPROTOCOL;
+    }
+    *out_result = resp.result;      /* move out of the response shell */
+    resp.result = NULL;
+    cmcp_rpc_message_clear(&resp);
+    return CMCP_OK;
+}
+
+int cmcp_handler_input(cmcp_handler_ctx_t *hctx, const char *key,
+                       const char *method, cmcp_json_t *params,
+                       cmcp_json_t **out_result) {
+    if (!out_result) { cmcp_json_free(params); return CMCP_EINVAL; }
+    *out_result = NULL;
+    if (!hctx || !hctx->server || !key || !*key || !method) {
+        cmcp_json_free(params);
+        return CMCP_EINVAL;
+    }
+    if (hctx->mrtr.modern)
+        return cmcp_mrtr_input(&hctx->mrtr, key, method, params, out_result);
+    return legacy_input(hctx, method, params, out_result);
+}
+
+const char *cmcp_handler_request_state(const cmcp_handler_ctx_t *hctx) {
+    return hctx ? hctx->mrtr.state_in : NULL;
+}
+
+int cmcp_handler_set_request_state(cmcp_handler_ctx_t *hctx,
+                                   const char *state) {
+    if (!hctx) return CMCP_EINVAL;
+    return cmcp_mrtr_set_state(&hctx->mrtr, state);
+}
+
+int cmcp_handler_log(cmcp_handler_ctx_t *hctx, cmcp_log_level_t level,
+                     const char *logger, cmcp_json_t *data) {
+    if (!hctx || !hctx->server) { cmcp_json_free(data); return CMCP_EINVAL; }
+    cmcp_server_t *s = hctx->server;
+    if (!hctx->mrtr.modern) return cmcp_server_log(s, level, logger, data);
+
+    if (!s->caps.logging) { cmcp_json_free(data); return CMCP_EPROTOCOL; }
+    const char *lname = cmcp_log_level_to_name(level);
+    if (!lname) { cmcp_json_free(data); return CMCP_EINVAL; }
+    /* No logLevel in this request's _meta: the server MUST NOT send
+     * notifications/message for it. */
+    if (hctx->mrtr.log_level < 0 || (int)level < hctx->mrtr.log_level) {
+        cmcp_json_free(data);
+        return CMCP_OK;
+    }
+    return emit_log(s, lname, logger, data);
+}
+
+int cmcp_server_set_state_key(cmcp_server_t *s, const unsigned char *key,
+                              size_t len) {
+    if (!s || !key || len != CMCP_SEAL_KEY_LEN) return CMCP_EINVAL;
+    memcpy(s->state_key, key, len);
+    s->state_key_len = len;
+    return CMCP_OK;
 }

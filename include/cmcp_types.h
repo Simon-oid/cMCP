@@ -44,6 +44,8 @@ typedef struct {
     int elicitation_url;          /* elicitation.url sub-cap (SEP-1036): host
                                    * accepts URL-redirect elicitations */
     int roots_list_changed;       /* roots/list_changed */
+    int roots;                    /* roots/list (any `roots` object); added
+                                   * for MCP 2026-07-28 input requests */
 } cmcp_client_capabilities_t;
 
 /* ------------------------------------------------------------------ */
