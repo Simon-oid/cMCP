@@ -43,6 +43,10 @@ int cmcp_schema_walk_fail(cmcp_schema_error_t *err, int rc, const char *path,
     char msg[256];
     va_list ap;
     va_start(ap, fmt);
+    /* ap is initialised by va_start directly above; the analyzer loses
+     * track of it through the variadic boundary (false positive, same
+     * as fail() in schema.c).
+     * NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) */
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
     cmcp_schema_error_clear(err);
