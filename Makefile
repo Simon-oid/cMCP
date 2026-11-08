@@ -159,6 +159,19 @@ conformance: all $(CONF_C_BIN)
 	@echo "=== conformance B: TS client  vs  cMCP echo-server ==="
 	node $(CONF_DIR)/client_vs_cmcp.mjs
 
+# Direction C: the Python SDK (mcp 2.x, dual-era) client vs cMCP, once per
+# connect mode (legacy / auto / 2026-07-28). Expected outcomes per mode
+# live in conformance/py/client_vs_cmcp.py. Needs python3 + network on the
+# first run (pip installs the pinned SDK into conformance/py/.venv).
+CONF_PY_VENV := $(CONF_DIR)/py/.venv
+
+conformance-py: examples/echo-server
+	@command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
+	@test -x $(CONF_PY_VENV)/bin/python || python3 -m venv $(CONF_PY_VENV)
+	$(CONF_PY_VENV)/bin/pip install --quiet --disable-pip-version-check -r $(CONF_DIR)/py/requirements.txt
+	@echo "=== conformance C: Python SDK client  vs  cMCP echo-server ==="
+	$(CONF_PY_VENV)/bin/python -I $(CONF_DIR)/py/client_vs_cmcp.py
+
 $(CONF_C_BIN): $(CONF_DIR)/client_vs_ts.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
@@ -779,6 +792,6 @@ clean:
         fuzz-build fuzz-smoke docs \
         soak soak-build soak-churn soak-http soak-http-build soak-http-churn soak-nightly \
         bench bench-build bench-compare bench-compare-build \
-        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp dogfood-crag-host conformance schema-conformance replay check-spec-drift \
+        bench-profile bench-profile-cpu bench-profile-heap clean crag-mcp dogfood-crag-host conformance conformance-py schema-conformance replay check-spec-drift \
         install install-headers install-libs install-bins \
         install-pkgconfig install-cmake uninstall dist install-smoke

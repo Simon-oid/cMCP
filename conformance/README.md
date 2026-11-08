@@ -48,6 +48,18 @@ its own schemas, so a shape divergence throws before the asserts run —
 this proves cMCP's **server** emits what the reference **client**
 expects.
 
+**Direction C — `py/client_vs_cmcp.py`: Python SDK client vs cMCP
+server** (`make conformance-py`). The Python SDK (`mcp` 2.x) is
+*dual-era*: it speaks the legacy handshake revisions and the stateless
+2026-07-28 revision, which the TS SDK (1.32.x) does not yet support. The
+same checks run once per connect mode — `legacy`, `auto` (probe
+`server/discover`, fall back to `initialize`) and `2026-07-28` — and
+each mode's outcome is compared with the `EXPECTED` table at the top of
+the script. A mode that unexpectedly passes fails the run too, so the
+table moves forward on purpose as the 2026-07-28 upgrade lands. Needs
+`python3`; the first run pip-installs the pinned SDK into
+`conformance/py/.venv/`.
+
 ## Notes
 
 - **Pinned versions.** `package.json` pins the reference SDK and server.

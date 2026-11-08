@@ -40,6 +40,7 @@ tests/test_*
 conformance/client_vs_ts
 conformance/schema_ajv_runner
 conformance/node_modules/
+conformance/py/.venv/
 conformance/package-lock.json
 
 # Fuzz harnesses: the *.c sources and the hand-written seed_* corpus
