@@ -42,6 +42,7 @@
 #include "cmcp_http_parser.h"
 #include "cmcp_json.h"
 #include "cmcp_transport.h"
+#include "http_modern.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -360,6 +361,7 @@ static int http_write_sse_head(int fd, const char *session_id) {
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Cache-Control: no-cache\r\n"
+        "X-Accel-Buffering: no\r\n"
         "Connection: close\r\n"
         "%s%s%s"
         "\r\n",
@@ -488,6 +490,18 @@ typedef struct http_impl {
      * handler stays valid for that handler's whole call. */
     cmcp_http_header_t cur_headers[CMCP_HTTP_MAX_HEADERS];
     size_t             cur_n_headers;
+
+    /* The connection of the request in the slot, for MCP 2026-07-28
+     * request-scoped streams: notifications that belong to a modern
+     * request (progress, log) go on that request's own SSE response,
+     * opened lazily on the first one, when the client's Accept allows
+     * it. cur_fd is -1 when no modern request is waiting. All four are
+     * guarded by slot_mu; the POST handler resets them before it
+     * returns, so a worker never writes to a closed fd. */
+    int                cur_fd;
+    int                cur_modern;
+    int                cur_sse_ok;
+    int                cur_sse_open;
 
     /* SSE bookkeeping. sse_mu guards both the holder list AND the
      * event ring + counter (MCP 2025-11-25 SEP-1699): a single lock so
@@ -631,6 +645,9 @@ typedef struct {
     int is_notif;
     int is_response;     /* JSON-RPC response: id + (result|error), no method */
     int method_is_init;
+    int request_scoped;  /* notifications/progress or notifications/message:
+                          * on the modern path they belong to the request
+                          * in flight, not to a session stream */
 } body_kind_t;
 
 static body_kind_t classify_body(const char *body, size_t len) {
@@ -642,6 +659,9 @@ static body_kind_t classify_body(const char *body, size_t len) {
     if (method && method->type == CMCP_JSON_STRING) {
         if (id) k.is_request = 1; else k.is_notif = 1;
         if (strcmp(method->str.s, "initialize") == 0) k.method_is_init = 1;
+        if (!id && (strcmp(method->str.s, "notifications/progress") == 0 ||
+                    strcmp(method->str.s, "notifications/message") == 0))
+            k.request_scoped = 1;
     } else if (id && (cmcp_json_object_get(j, "result") ||
                        cmcp_json_object_get(j, "error"))) {
         /* A well-formed JSON-RPC response (answer to a server→client
@@ -709,38 +729,127 @@ static const char *http_request_header_fn(cmcp_transport_t *t,
     return val;
 }
 
+/* Validate the MCP-Protocol-Version header (transports section).
+ * Absent → accept: per spec the server falls back to the default
+ * revision. Present but not the version cMCP speaks → 400.
+ * Returns 1 to proceed, 0 if a 400 was already sent. */
+static int check_protocol_version(int fd, const http_request_t *req) {
+    const char *pv = http_header_get(req, "MCP-Protocol-Version");
+    if (pv && strcmp(pv, CMCP_PROTOCOL_VERSION) != 0) {
+        reply_error(fd, 400, "Bad Request",
+                     "unsupported MCP-Protocol-Version\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* Era gate for one POST. Modern (2026-07-28): the mirrored headers must
+ * match the body, else 400 with a JSON-RPC error (-32020 / -32022).
+ * Legacy: the MCP-Protocol-Version check above. Returns 1 to proceed and
+ * says in *is_modern which path the request takes. */
+static int post_era_gate(int fd, const http_request_t *req, int *is_modern) {
+    cmcp_json_t *body = cmcp_json_parse(req->body, req->body_len);
+    *is_modern = cmcp_http_modern_is(body, req);
+    int ok = 1;
+    if (*is_modern) {
+        char *err = NULL;
+        int status = cmcp_http_modern_check(body, req, &err);
+        if (status != 0) {
+            ok = 0;
+            if (err) {
+                http_write_response(fd, status, "Bad Request",
+                                    "application/json", NULL, err, strlen(err));
+            } else {
+                reply_error(fd, 500, "Internal Server Error", "oom\n");
+            }
+        }
+        free(err);
+    } else {
+        ok = check_protocol_version(fd, req);
+    }
+    cmcp_json_free(body);
+    return ok;
+}
+
+/* Deliver a request-scoped notification (progress, log) of the modern
+ * request in flight on that request's own SSE response, opening the
+ * stream on first use. Returns 1 when the notification belonged to a
+ * modern request (delivered, or dropped because the client did not
+ * accept a stream): it must never reach a legacy session stream. */
+static int route_to_request_stream(http_impl_t *impl, const char *buf,
+                                   size_t len) {
+    pthread_mutex_lock(&impl->slot_mu);
+    int handled = 0;
+    if (impl->cur_modern && impl->cur_fd >= 0) {
+        handled = 1;
+        if (impl->cur_sse_ok && !impl->cur_sse_open &&
+            http_write_sse_head(impl->cur_fd, NULL) == CMCP_OK)
+            impl->cur_sse_open = 1;
+        if (impl->cur_sse_open) sse_emit_event_to_fd(impl->cur_fd, 0, buf, len);
+    }
+    pthread_mutex_unlock(&impl->slot_mu);
+    return handled;
+}
+
+/* Forget the modern request in the slot. Caller holds slot_mu. Returns
+ * whether its SSE response stream had been opened. */
+static int clear_cur_request(http_impl_t *impl) {
+    int open = impl->cur_sse_open;
+    impl->cur_fd = -1;
+    impl->cur_modern = 0;
+    impl->cur_sse_ok = 0;
+    impl->cur_sse_open = 0;
+    return open;
+}
+
+/* Legacy (2025-11-25) session rules for one POST. Returns 1 to
+ * proceed, 0 when an error reply was already sent. */
+static int legacy_session_ok(http_impl_t *impl, int fd,
+                             const http_request_t *req,
+                             const body_kind_t *k) {
+    const char *sid = http_header_get(req, "Mcp-Session-Id");
+    pthread_mutex_lock(&impl->session_mu);
+    int have_session = impl->session_id[0] != '\0';
+    if (!k->method_is_init && !have_session) {
+        pthread_mutex_unlock(&impl->session_mu);
+        reply_error(fd, 400, "Bad Request",
+                     "missing Mcp-Session-Id (no session yet)\n");
+        return 0;
+    }
+    if (have_session && sid && strcmp(sid, impl->session_id) != 0) {
+        pthread_mutex_unlock(&impl->session_mu);
+        reply_error(fd, 404, "Not Found",
+                     "unknown Mcp-Session-Id\n");
+        return 0;
+    }
+    if (!k->method_is_init && have_session && !sid) {
+        pthread_mutex_unlock(&impl->session_mu);
+        reply_error(fd, 400, "Bad Request",
+                     "missing Mcp-Session-Id\n");
+        return 0;
+    }
+    pthread_mutex_unlock(&impl->session_mu);
+    return 1;
+}
+
 static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     if (req->body_len == 0) {
         reply_error(fd, 400, "Bad Request", "empty body\n");
         return;
     }
 
+    int modern = 0;
+    if (!post_era_gate(fd, req, &modern)) return;
+
     body_kind_t kind = classify_body(req->body, req->body_len);
 
-    /* Session check. The first `initialize` request is allowed without
-     * a session id (it mints one); everything else requires a match. */
-    const char *sid = http_header_get(req, "Mcp-Session-Id");
-    pthread_mutex_lock(&impl->session_mu);
-    int have_session = impl->session_id[0] != '\0';
-    if (!kind.method_is_init && !have_session) {
-        pthread_mutex_unlock(&impl->session_mu);
-        reply_error(fd, 400, "Bad Request",
-                     "missing Mcp-Session-Id (no session yet)\n");
-        return;
-    }
-    if (have_session && sid && strcmp(sid, impl->session_id) != 0) {
-        pthread_mutex_unlock(&impl->session_mu);
-        reply_error(fd, 404, "Not Found",
-                     "unknown Mcp-Session-Id\n");
-        return;
-    }
-    if (!kind.method_is_init && have_session && !sid) {
-        pthread_mutex_unlock(&impl->session_mu);
-        reply_error(fd, 400, "Bad Request",
-                     "missing Mcp-Session-Id\n");
-        return;
-    }
-    pthread_mutex_unlock(&impl->session_mu);
+    /* Session check (legacy only: 2026-07-28 has no sessions, so a
+     * modern request is served without one and any Mcp-Session-Id it
+     * carries is ignored). The first `initialize` request is allowed
+     * without a session id (it mints one); everything else requires a
+     * match. */
+    if (!modern && !legacy_session_ok(impl, fd, req, &kind)) return;
+
 
     /* Push the body into the request slot. The slot is busy from the
      * moment we deposit a body until either:
@@ -772,6 +881,13 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     impl->req_is_init = kind.method_is_init;
     impl->req_present = 1;
     http_set_cur_headers(impl, req);     /* B.1: expose headers to handler */
+    if (modern && kind.is_request) {
+        const char *acc = http_header_get(req, "Accept");
+        impl->cur_fd       = fd;
+        impl->cur_modern   = 1;
+        impl->cur_sse_ok   = acc && strstr(acc, "text/event-stream") != NULL;
+        impl->cur_sse_open = 0;
+    }
     pthread_cond_signal(&impl->read_cv);
 
     /* Only genuine notifications and JSON-RPC responses produce no
@@ -804,8 +920,10 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
         pthread_cond_wait(&impl->write_cv, &impl->slot_mu);
     }
     if (!impl->resp_present) {
+        int streaming = clear_cur_request(impl);
         pthread_mutex_unlock(&impl->slot_mu);
-        reply_error(fd, 503, "Service Unavailable", "shutting down\n");
+        if (!streaming)
+            reply_error(fd, 503, "Service Unavailable", "shutting down\n");
         return;
     }
 
@@ -817,8 +935,19 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
     impl->resp_len  = 0;
     impl->resp_present = 0;
     impl->resp_was_minted = 0;
+    int streaming = clear_cur_request(impl);
     pthread_cond_signal(&impl->write_cv);
     pthread_mutex_unlock(&impl->slot_mu);
+
+    /* A modern request whose stream is open gets its response as the
+     * last event; otherwise a plain JSON body, with the HTTP status the
+     * 2026-07-28 transport assigns to protocol errors. */
+    if (streaming) {
+        sse_emit_event_to_fd(fd, 0, body, blen);
+        free(body);
+        return;
+    }
+    int status = modern ? cmcp_http_modern_status(body, blen) : 200;
 
     /* Send HTTP 200 with the JSON-RPC response. If we just minted a
      * session id on the initialize response, include it in headers. */
@@ -827,8 +956,10 @@ static void handle_post(http_impl_t *impl, int fd, http_request_t *req) {
         snprintf(extra, sizeof extra, "Mcp-Session-Id: %s\r\n",
                   impl->session_id);
     }
-    http_write_response(fd, 200, "OK", "application/json",
-                          minted ? extra : NULL, body, blen);
+    http_write_response(fd, status,
+                        status == 200 ? "OK"
+                        : status == 404 ? "Not Found" : "Bad Request",
+                        "application/json", minted ? extra : NULL, body, blen);
     free(body);
 }
 
@@ -899,20 +1030,6 @@ static void handle_get_sse(http_impl_t *impl, int fd, http_request_t *req) {
     /* On success: holder thread detaches itself in sse_holder_main —
      * detaching here would race with a short-lived holder that has
      * already exited and freed c. */
-}
-
-/* Validate the MCP-Protocol-Version header (transports section).
- * Absent → accept: per spec the server falls back to the default
- * revision. Present but not the version cMCP speaks → 400.
- * Returns 1 to proceed, 0 if a 400 was already sent. */
-static int check_protocol_version(int fd, const http_request_t *req) {
-    const char *pv = http_header_get(req, "MCP-Protocol-Version");
-    if (pv && strcmp(pv, CMCP_PROTOCOL_VERSION) != 0) {
-        reply_error(fd, 400, "Bad Request",
-                     "unsupported MCP-Protocol-Version\n");
-        return 0;
-    }
-    return 1;
 }
 
 /* Origin allow-list check (MCP 2025-11-25 Minor 3 — DNS rebinding
@@ -989,14 +1106,10 @@ static void handle_one_connection(http_impl_t *impl, int fd) {
      * duplication. */
     if (is_post_mcp) {
         /* NOLINTBEGIN(bugprone-branch-clone) */
-        if (!check_origin(impl, fd, &req)) {
-            close(fd);
-        } else if (check_protocol_version(fd, &req)) {
-            handle_post(impl, fd, &req);
-            close(fd);
-        } else {
-            close(fd);
-        }
+        /* The protocol-version check is era-dependent, so handle_post
+         * runs it once it has looked at the body. */
+        if (check_origin(impl, fd, &req)) handle_post(impl, fd, &req);
+        close(fd);
         /* NOLINTEND(bugprone-branch-clone) */
     } else if (is_get_mcp) {
         const char *acc = http_header_get(&req, "Accept");
@@ -1161,9 +1274,13 @@ static int sse_emit_event_to_fd(int fd, uint64_t id,
     char *out = (char *)malloc(cap);
     if (!out) return CMCP_ENOMEM;
     size_t n = 0;
-    int idlen = snprintf(out, cap, "id: %llu\n", (unsigned long long)id);
-    if (idlen < 0 || (size_t)idlen >= cap) { free(out); return CMCP_EIO; }
-    n = (size_t)idlen;
+    /* id 0 = no id line: request-scoped streams (MCP 2026-07-28) are
+     * not resumable, and an unrecorded ring event has no id either. */
+    if (id != 0) {
+        int idlen = snprintf(out, cap, "id: %llu\n", (unsigned long long)id);
+        if (idlen < 0 || (size_t)idlen >= cap) { free(out); return CMCP_EIO; }
+        n = (size_t)idlen;
+    }
     /* The buffer being assembled is an SSE wire frame, not a C string —
      * length is tracked in `n` and the eventual send() goes through
      * write(2) with that length. Both memcpys deliberately copy 6 bytes
@@ -1254,6 +1371,8 @@ static int http_write_fn(cmcp_transport_t *t, const char *buf, size_t len) {
      * wants to receive). */
     body_kind_t kind = classify_body(buf, len);
     if (kind.is_notif) {
+        if (kind.request_scoped && route_to_request_stream(impl, buf, len))
+            return CMCP_OK;
         pthread_mutex_lock(&impl->sse_mu);
         uint64_t id = sse_record_event(impl, buf, len);
         sse_conn_t *c = impl->sse_head;
@@ -1438,6 +1557,7 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
     if (!impl || !t) goto fail;
 
     impl->listen_fd = fd;
+    impl->cur_fd    = -1;
     pthread_mutex_init(&impl->slot_mu, NULL);
     pthread_mutex_init(&impl->session_mu, NULL);
     pthread_mutex_init(&impl->sse_mu, NULL);

@@ -9,8 +9,8 @@ pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
 cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
 revision through `initialize` and adds the modern, stateless
 2026-07-28 revision, chosen per request. Landing in phases; the stdio
-server path and multi round-trip requests are done, HTTP and the
-client follow.
+server path, multi round-trip requests and modern requests over
+Streamable HTTP are done; `subscriptions/listen` and the client follow.
 
 - **Modern server path (stdio).** A request whose `params._meta`
   carries `io.modelcontextprotocol/protocolVersion` or
@@ -56,6 +56,21 @@ client follow.
   `-32021` and `data.requiredCapabilities`. `cmcp_handler_log` emits
   only when the request's `_meta` carries `logLevel`, at or above it.
   `cmcp_client_capabilities_t` gained `roots`.
+- **Modern requests over Streamable HTTP.** A POST is modern when its
+  body carries modern `_meta` or its `MCP-Protocol-Version` header is
+  `2026-07-28`. Modern requests need no session (`Mcp-Session-Id` is
+  ignored, never minted or echoed). The mirrored headers must match the
+  body — `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` for
+  `tools/call` / `resources/read` / `prompts/get` (the
+  `=?base64?...?=` sentinel is decoded first) — else `400` with
+  `-32020` HeaderMismatch; an unsupported version is `400` with
+  `-32022`. Protocol errors get the spec's statuses (`404` for
+  `-32601`, `400` for `-32020/-32021/-32022`). Progress and log
+  notifications of a modern request travel on an SSE response scoped to
+  that request (when `Accept` allows it; dropped otherwise), with
+  `X-Accel-Buffering: no` and no event ids. Legacy sessions, GET
+  streams and resumption are unchanged. Rules live in
+  `src/http_modern.{c,h}`.
 - **Behaviour change:** `cmcp_server_log` now drops messages until a
   legacy session has completed its handshake (no one has opted in to
   server-wide logs before that).
@@ -68,9 +83,14 @@ client follow.
   `tests/test_mrtr.c` (14 cases: both rounds, tampered / replayed /
   unsealed state, -32021, per-request caps and logLevel, the same
   handler on the legacy path, shared keys), `tests/test_seal.c` (NIST,
-  RFC 4231 and RFC 4648 vectors). The Python SDK conformance harness
+  RFC 4231 and RFC 4648 vectors), `tests/test_http_modern.c` (real
+  sockets: no session, every -32020 case, the base64 sentinel, 400/404
+  mapping, request-scoped SSE, legacy beside modern). The Python SDK
+  conformance harness
   (`make conformance-py`) passes in all three modes and now also runs
-  an elicitation round-trip against the new `examples/ask-server`.
+  an elicitation round-trip against the new `examples/ask-server`, and
+  in the modern modes repeats it over Streamable HTTP
+  (`ask-server --http PORT`).
 
 ## v0.10.0 — deep-analysis hardening pass (2026-06-12)
 

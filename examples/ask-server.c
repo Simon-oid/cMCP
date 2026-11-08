@@ -9,12 +9,18 @@
  *     user and retries with `inputResponses`, and this time
  *     cmcp_handler_input hands the answer straight back.
  *
+ * Usage: `ask-server` serves stdio; `ask-server --http PORT` serves
+ * Streamable HTTP on 127.0.0.1:PORT/mcp.
+ *
  * Build: `make examples/ask-server`. Used by `make conformance-py`. */
 #include "cmcp.h"
 #include "cmcp_json.h"
 #include "cmcp_server.h"
+#include "cmcp_transport.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 static int greet(const cmcp_json_t *arguments, void *userdata,
                  cmcp_handler_ctx_t *hctx, cmcp_json_t **out_content,
@@ -48,7 +54,19 @@ static int greet(const cmcp_json_t *arguments, void *userdata,
     return CMCP_OK;
 }
 
-int main(void) {
+/* Serve on 127.0.0.1:port until the process is killed. */
+static int run_http(cmcp_server_t *s, const char *port_arg) {
+    long port = strtol(port_arg, NULL, 10);
+    if (port <= 0 || port > 65535) return CMCP_EINVAL;
+    cmcp_transport_t *t = cmcp_transport_http_listen("127.0.0.1",
+                                                     (unsigned short)port);
+    if (!t) return CMCP_EIO;
+    int rc = cmcp_server_run(s, t);
+    cmcp_transport_close(t);
+    return rc;
+}
+
+int main(int argc, char **argv) {
     cmcp_server_t *s = cmcp_server_new("ask-server", CMCP_VERSION);
     if (!s) return 1;
     cmcp_tool_t tool = {
@@ -58,7 +76,11 @@ int main(void) {
         .handler = greet,
     };
     int rc = cmcp_server_add_tool(s, &tool);
-    if (rc == CMCP_OK) rc = cmcp_server_run_stdio(s);
+    if (rc == CMCP_OK) {
+        rc = (argc == 3 && strcmp(argv[1], "--http") == 0)
+                 ? run_http(s, argv[2])
+                 : cmcp_server_run_stdio(s);
+    }
     cmcp_server_free(s);
     return rc == CMCP_OK ? 0 : 1;
 }

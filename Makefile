@@ -22,7 +22,7 @@ LDLIBS  ?= -Wl,--as-needed $(CURL_LIBS) -Wl,--no-as-needed -lpthread -lm
 # --- Source partitioning into three link targets ---------------------------
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.
 CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c src/era.c \
-                     src/sha256.c src/seal.c \
+                     src/sha256.c src/seal.c src/http_modern.c \
                      src/http_parser.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c

@@ -17,6 +17,12 @@ whose one tool asks for the user's name: by a server-initiated
 retry with `inputResponses` (multi round-trip requests) on the modern
 path. The SDK answers through the same elicitation callback either way.
 
+The modern modes then repeat the input round-trip over Streamable HTTP
+(`ask-server --http PORT`): no session, mirrored Mcp-* headers, and the
+InputRequiredResult in a plain POST response. Legacy mode is not run
+over HTTP: cMCP's HTTP server does not yet deliver server-initiated
+requests on the legacy GET stream.
+
 EXPECTED below records what each mode should do against the current
 cMCP build. A mode that behaves differently from its expectation fails
 the run, whether it unexpectedly passes or unexpectedly fails, so the
@@ -28,7 +34,10 @@ expectation, 1 = a divergence.
 
 import asyncio
 import os
+import socket
+import subprocess
 import sys
+import time
 
 from mcp import Client, StdioServerParameters, types
 
@@ -71,6 +80,8 @@ async def run_checks(mode: str) -> list[tuple[bool, str]]:
         checks.append((bool(bad.is_error), "schema violation -> isError result"))
 
     checks.extend(await run_input_checks(mode))
+    if mode != "legacy":
+        checks.extend(await run_http_checks(mode))
     return checks
 
 
@@ -91,6 +102,50 @@ async def run_input_checks(mode: str) -> list[tuple[bool, str]]:
         (asked == ["What is your name?"], f"elicitation asked once -> {asked}"),
         (text_of(greet) == "Hello, Ada!", f"greet -> {text_of(greet)!r}"),
     ]
+
+
+def free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait_listening(port: int, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.05)
+    raise TimeoutError(f"ask-server did not listen on {port}")
+
+
+async def run_http_checks(mode: str) -> list[tuple[bool, str]]:
+    """greet over Streamable HTTP: the MRTR round-trip in plain POSTs."""
+    port = free_port()
+    proc = subprocess.Popen([ASK_SERVER, "--http", str(port)])
+    try:
+        wait_listening(port)
+        asked: list[str] = []
+
+        async def on_elicit(context, params):
+            asked.append(params.message)
+            return types.ElicitResult(action="accept", content={"name": "Lin"})
+
+        url = f"http://127.0.0.1:{port}/mcp"
+        async with Client(
+            url, mode=mode, read_timeout_seconds=10, elicitation_callback=on_elicit
+        ) as client:
+            names = [t.name for t in (await client.list_tools()).tools]
+            greet = await client.call_tool("greet", {})
+        return [
+            (names == ["greet"], f"http tools/list -> {names}"),
+            (asked == ["What is your name?"], f"http elicitation asked once -> {asked}"),
+            (text_of(greet) == "Hello, Lin!", f"http greet -> {text_of(greet)!r}"),
+        ]
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
 
 
 async def run_mode(mode: str) -> bool:
