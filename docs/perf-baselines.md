@@ -14,6 +14,47 @@ baselines are *informational*, not a per-PR gate. They exist so:
 > (this commit), [`agentic-readiness.md`](agentic-readiness.md) for the
 > overall quality-bar context.
 
+## Current numbers (2026-11-08)
+
+These are the numbers the README quotes. Every other table further
+down is a historical capture from the phase that introduced it
+(May–June 2026) and is kept as a record, not as the current claim.
+
+Environment: AMD Ryzen 7 5800X, 16 GB RAM, Linux 6.18.57-1-lts,
+glibc 2.44, gcc 16.2.1, idle desktop, cMCP at commit `1bfa5ef`
+(v0.10.0 + docs). Comparison servers: `@modelcontextprotocol/sdk`
+1.29.0 on Node v24.21.0, `mcp` 1.27.1 on CPython 3.14.8 — pinned in
+`bench/compare/package.json`, `package-lock.json` and
+`requirements.txt`.
+
+Each figure is the median of 5 consecutive runs.
+
+`make bench` (`server_inline_stdio`, 50,000 calls after 1,000 warmup):
+
+| bench | throughput (calls/s) | p50 µs | p99 µs |
+|---|---:|---:|---:|
+| `server_inline_stdio` | 43,082 | 22 | 27 |
+
+`make bench-compare` (cMCP client held constant, `tools/call echo`,
+10,000 calls after 1,000 warmup):
+
+| server | throughput (calls/s) | p50 µs | p99 µs | p50 vs cMCP |
+|---|---:|---:|---:|---:|
+| cMCP (C) | 40,956 | 22 | 31 | 1× |
+| TypeScript SDK 1.29.0 | 8,608 | 85 | 256 | 3.9× slower |
+| Python SDK 1.27.1 | 1,045 | 950 | 1,037 | 43× slower |
+
+The May–June captures below reported 5.8× (TS) and 47× (Python) at
+p50. Those runs did not record SDK versions, so the gap cannot be
+attributed; the table above is the reproducible claim. To reproduce:
+
+```sh
+npm ci --prefix bench/compare
+python3 -m venv bench/compare/.venv
+bench/compare/.venv/bin/pip install -r bench/compare/requirements.txt
+make bench && make bench-compare
+```
+
 ## What we measure
 
 Each bench binary in `bench/` emits one CSV row to stdout with the

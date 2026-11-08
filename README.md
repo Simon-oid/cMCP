@@ -18,10 +18,12 @@ libcurl (for the Streamable HTTP client transport).
 
 ## Highlights
 
-- **50,487 `tools/call`/s** steady-state over stdio (p50 19 µs, p99
-  27 µs on a Ryzen 5800X) — **5.8× the official TypeScript SDK, 47×
-  the Python SDK** on the same workload. Methodology and numbers in
-  [`docs/perf-baselines.md`](docs/perf-baselines.md).
+- **~43,000 `tools/call`/s** steady-state over stdio (p50 22 µs, p99
+  27 µs; median of 5 runs on a Ryzen 7 5800X, 2026-11-08) — **~3.9×
+  lower p50 latency than the official TypeScript SDK, ~43× lower than
+  the Python SDK** on the same workload. SDK versions, methodology and
+  the command to reproduce in
+  [`docs/perf-baselines.md`](docs/perf-baselines.md#current-numbers-2026-11-08).
 - **<!-- test-stats -->3,909 assertions across 30 test binaries<!-- /test-stats -->**, all green under
   valgrind, ASan/UBSan, and TSan on every push.
 - **Conformance-tested in both wire roles** against the official MCP
