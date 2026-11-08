@@ -1,0 +1,38 @@
+name: keepalive
+
+# GitHub disables scheduled workflows in a public repository after 60
+# days without repository activity. When that happened (2026-08), the
+# nightly fuzz, soak, CodeQL, bench-compare, gcc -fanalyzer and
+# spec-drift lanes all went silent while the README still claimed them.
+#
+# Once a month this job calls the "enable workflow" API on every
+# workflow in the repo, itself included. That re-enables anything that
+# was disabled and resets the inactivity timer, without pushing
+# commits.
+on:
+  schedule:
+    # 1st of every month, 06:00 UTC.
+    - cron: '0 6 1 * *'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    name: re-enable scheduled workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: write
+    steps:
+      - name: enable every workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh workflow list --all --json id,name,state \
+            --jq '.[] | "\(.id)\t\(.state)\t\(.name)"' |
+          while IFS=$'\t' read -r id state name; do
+            gh api --method PUT \
+              "repos/${GH_REPO}/actions/workflows/${id}/enable"
+            echo "enabled: ${name} (was ${state})"
+          done

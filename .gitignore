@@ -79,7 +79,6 @@ bench/results.csv
 bench/compare/bench_compare
 bench/compare/results.csv
 bench/compare/node_modules/
-bench/compare/package-lock.json
 bench/compare/.venv/
 bench/compare/__pycache__/
 bench/compare/**/__pycache__/
@@ -117,6 +116,7 @@ coverage/
 # evolving roadmap. Both are useful while developing but not part of
 # the public deliverable, so they live in the working tree only.
 CLAUDE.md
+GEMINI.md
 TODO.md
 todo.md
 notes.md

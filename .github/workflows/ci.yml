@@ -42,7 +42,16 @@ jobs:
         run: sudo sysctl -w vm.mmap_rnd_bits=28
 
       - name: make ${{ matrix.target }}
-        run: make ${{ matrix.target }}
+        # GitHub's bash runs with pipefail, so a failing test still fails
+        # this step even through tee.
+        run: make ${{ matrix.target }} 2>&1 | tee test.log
+
+      # The README's "N assertions across M test binaries" must match
+      # what the suite actually ran. Fix with:
+      #   scripts/test-stats.sh --update test.log
+      - name: README test counts are current
+        if: matrix.target == 'test'
+        run: scripts/test-stats.sh --check test.log
 
   replay:
     name: make replay (wire-fixture gate)

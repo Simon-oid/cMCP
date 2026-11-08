@@ -22,7 +22,7 @@ libcurl (for the Streamable HTTP client transport).
   27 µs on a Ryzen 5800X) — **5.8× the official TypeScript SDK, 47×
   the Python SDK** on the same workload. Methodology and numbers in
   [`docs/perf-baselines.md`](docs/perf-baselines.md).
-- **2,826 assertions across 27 test binaries**, all green under
+- **<!-- test-stats -->3,909 assertions across 30 test binaries<!-- /test-stats -->**, all green under
   valgrind, ASan/UBSan, and TSan on every push.
 - **Conformance-tested in both wire roles** against the official MCP
   TypeScript reference SDK, plus a replay gate over captured wire
@@ -234,7 +234,7 @@ in the v0.5 protocol bump.
 
 ```bash
 make            # libs (core/server/client) + cmcp-inspect + filesystem-mcp + cmcp-tee + examples
-make test       # build and run the test binaries — currently 2826 assertions across 27 binaries
+make test       # build and run every test binary (counts in Highlights, checked by CI)
 make valgrind   # same, under valgrind (leak-free)
 make test-asan  # full rebuild under -fsanitize=address,undefined; runs suite
 make test-tsan  # full rebuild under -fsanitize=thread; runs suite
