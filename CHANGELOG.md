@@ -10,8 +10,8 @@ cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
 revision through `initialize` and adds the modern, stateless
 2026-07-28 revision, chosen per request. Landing in phases; the stdio
 server path, multi round-trip requests, modern requests over Streamable
-HTTP, `subscriptions/listen` and the JSON Schema work are done; the
-client follows.
+HTTP, `subscriptions/listen`, the JSON Schema work and the dual-era
+client are done; the release work follows.
 
 - **Modern server path (stdio).** A request whose `params._meta`
   carries `io.modelcontextprotocol/protocolVersion` or
@@ -105,6 +105,26 @@ client follows.
   through `properties` only). On a modern `tools/call` over HTTP each
   annotated argument must match its `Mcp-Param-*` header (sentinel
   decoded, integers numerically), else `400` / `-32020`.
+- **Dual-era client.** `cmcp_client_set_mode` (`CMCP_CLIENT_LEGACY`, the
+  default; `CMCP_CLIENT_MODERN`; `CMCP_CLIENT_AUTO`) and
+  `cmcp_client_is_modern`. Modern connections use `server/discover`
+  instead of `initialize` and add `_meta` (protocolVersion,
+  clientCapabilities, clientInfo, logLevel) to every request; AUTO falls
+  back to `initialize` on any discover failure. `cmcp_client_request` and
+  the helpers on it drive MRTR: an `input_required` result is answered
+  with the elicitation / sampling handlers and the declared roots and
+  retried with `inputResponses` + the echoed `requestState` (max 8
+  rounds; no handler → `CMCP_EUNSUPPORTED`). `cmcp_client_set_log_level`
+  sets the per-request logLevel; `notify_roots_changed` is
+  `CMCP_EUNSUPPORTED` on a modern connection.
+- **Modern Streamable HTTP client.** No session; each POST mirrors the
+  body into `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and, for
+  tools seen in `tools/list`, `Mcp-Param-*` (base64 sentinel when a value
+  is not header-safe); a tool whose x-mcp-header annotations are invalid
+  is dropped from `tools/list` with a warning. SSE responses to a POST
+  are parsed as they stream; modern 4xx JSON-RPC errors reach the
+  client. New `cmcp_transport_http_is_client` and
+  `cmcp_transport_http_set_tool_schema`.
 - **Behaviour change:** list-changed notifications reach a legacy client
   only once its handshake is complete, and modern clients only through a
   subscription that asked for them (the spec forbids unrequested
@@ -119,7 +139,7 @@ client follows.
   `src/mrtr.{c,h}` the MRTR state, `src/subscriptions.{c,h}` the
   subscription registry, `src/schema_check.c` + `src/schema_walk.h` the
   registration checks, `src/xheader.{c,h}` the x-mcp-header rules,
-  `src/seal.{c,h}` and
+  `src/client_modern.{c,h}` the client-side rules, `src/seal.{c,h}` and
   `src/sha256.{c,h}` the requestState seal.
 - **Tests:** `tests/test_modern.c` (10 cases, raw-wire frames),
   `tests/test_mrtr.c` (14 cases: both rounds, tampered / replayed /
@@ -132,7 +152,13 @@ client follows.
   (stdio: acknowledged subset, tagging, per-filter routing, cancel, no
   unsolicited notifications), `tests/test_schema_check.c` (dialects, the
   new keywords, every registration check incl. the DoS bounds,
-  x-mcp-header lint and comparison). The Python SDK
+  x-mcp-header lint and comparison), `tests/test_client_modern.c`
+  (modern and AUTO connections, client-driven MRTR, per-request
+  logLevel, fallback to a legacy-only server, and the same over HTTP
+  with Mcp-Param and SSE). New conformance Direction D
+  (`conformance/client_vs_py.c`): the cMCP client against an MCP Python
+  SDK server in legacy / auto / modern over stdio and auto / modern over
+  HTTP, all passing. The Python SDK
   conformance harness
   (`make conformance-py`) passes in all three modes and now also runs
   an elicitation round-trip against the new `examples/ask-server`, and

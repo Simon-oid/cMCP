@@ -29,13 +29,13 @@ typedef struct {
 /* Registers the test's primitives on a fresh server. 0 on success. */
 typedef int (*rig_setup_fn)(cmcp_server_t *srv);
 
-static void *rig_server_thread(void *arg) {
+static inline void *rig_server_thread(void *arg) {
     rig_t *r = (rig_t *)arg;
     r->rc = cmcp_server_run(r->srv, r->server_t);
     return NULL;
 }
 
-static int rig_start(rig_t *r, const char *name, const char *version,
+static inline int rig_start(rig_t *r, const char *name, const char *version,
                      rig_setup_fn setup) {
     memset(r, 0, sizeof(*r));
     int c2s[2], s2c[2];
@@ -49,7 +49,7 @@ static int rig_start(rig_t *r, const char *name, const char *version,
     return pthread_create(&r->th, NULL, rig_server_thread, r) == 0 ? 0 : -1;
 }
 
-static void rig_stop(rig_t *r) {
+static inline void rig_stop(rig_t *r) {
     cmcp_transport_close(r->client_t);   /* EOF ends the server loop */
     pthread_join(r->th, NULL);
     cmcp_transport_close(r->server_t);
@@ -58,12 +58,12 @@ static void rig_stop(rig_t *r) {
 
 /* Frames go out WITHOUT a trailing newline: the stdio transport adds
  * it and rejects a frame that already contains one. */
-static int rig_send(rig_t *r, const char *frame) {
+static inline int rig_send(rig_t *r, const char *frame) {
     return cmcp_transport_write(r->client_t, frame, strlen(frame));
 }
 
 /* Read one frame and parse it. Owned value, or NULL on any failure. */
-static cmcp_json_t *rig_recv(rig_t *r) {
+static inline cmcp_json_t *rig_recv(rig_t *r) {
     char *in = NULL; size_t n = 0;
     if (cmcp_transport_read(r->client_t, &in, &n) != CMCP_OK) return NULL;
     cmcp_json_t *v = cmcp_json_parse(in, n);
@@ -72,23 +72,23 @@ static cmcp_json_t *rig_recv(rig_t *r) {
 }
 
 /* Write one frame, read one frame back. */
-static cmcp_json_t *exchange(rig_t *r, const char *frame) {
+static inline cmcp_json_t *exchange(rig_t *r, const char *frame) {
     if (rig_send(r, frame) != CMCP_OK) return NULL;
     return rig_recv(r);
 }
 
 /* Small JSON path helpers: NULL-safe, return NULL on any miss. */
-static const cmcp_json_t *get(const cmcp_json_t *o, const char *key) {
+static inline const cmcp_json_t *get(const cmcp_json_t *o, const char *key) {
     return (o && o->type == CMCP_JSON_OBJECT) ? cmcp_json_object_get(o, key)
                                               : NULL;
 }
 
-static int is_str(const cmcp_json_t *v, const char *want) {
+static inline int is_str(const cmcp_json_t *v, const char *want) {
     return v && v->type == CMCP_JSON_STRING &&
            strcmp(cmcp_json_string(v), want) == 0;
 }
 
-static long long int_of(const cmcp_json_t *v) {
+static inline long long int_of(const cmcp_json_t *v) {
     return (v && v->type == CMCP_JSON_INT) ? cmcp_json_int(v) : -999999;
 }
 

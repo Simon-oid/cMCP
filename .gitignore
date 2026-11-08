@@ -39,6 +39,7 @@ tests/test_*
 # Conformance harness: the built C driver + npm-installed reference SDKs.
 # package.json / *.mjs ARE tracked; node_modules and the binary are not.
 conformance/client_vs_ts
+conformance/client_vs_py
 conformance/schema_ajv_runner
 conformance/node_modules/
 conformance/py/.venv/

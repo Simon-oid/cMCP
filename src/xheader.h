@@ -35,4 +35,13 @@ typedef const char *(*cmcp_header_get_fn)(void *ctx, const char *name);
 int cmcp_xheader_check(const cmcp_json_t *input_schema, const cmcp_json_t *args,
                        cmcp_header_get_fn get, void *get_ctx, char **out_msg);
 
+/* Client side: for every annotated argument present (and not null) in
+ * `args`, call emit(ctx, "<Name>", "<value as text>") — strings as is,
+ * integers in decimal, booleans as true / false. The caller encodes the
+ * value for the header. Returns the first non-zero emit result, or 0. */
+typedef int (*cmcp_xheader_emit_fn)(void *ctx, const char *name,
+                                    const char *value);
+int cmcp_xheader_collect(const cmcp_json_t *input_schema, const cmcp_json_t *args,
+                         cmcp_xheader_emit_fn emit, void *ctx);
+
 #endif

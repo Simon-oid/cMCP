@@ -29,6 +29,8 @@
  */
 
 #include "cmcp.h"
+#include "client_modern.h"
+#include "xheader.h"
 #include "cmcp_client.h"
 #include "cmcp_json.h"
 #include "cmcp_session.h"
@@ -182,6 +184,17 @@ struct cmcp_client {
 
     /* Spawned child (cmcp_client_connect_stdio). */
     pid_t                       child_pid;
+
+    /* Protocol era (MCP 2026-07-28 dual-era). `mode` is what the host
+     * asked for; `modern` is set once the connection runs on the modern
+     * revision: every request then carries `_meta`, there is no
+     * handshake, and input_required results are retried (MRTR). Both are
+     * written only during connection setup, before concurrent use. */
+    cmcp_client_mode_t          mode;
+    int                         modern;
+    /* logLevel to send in each modern request's _meta (owned, or NULL:
+     * no log notifications). Set by cmcp_client_set_log_level. */
+    char                       *log_level;
 };
 
 /* ====================================================================== */
@@ -337,13 +350,13 @@ static void handle_ping(cmcp_client_t *c, const cmcp_rpc_message_t *req) {
  * callback runs. If the host never called set_roots, fall through to
  * the -32601 path — the cap wasn't advertised either, so the server
  * shouldn't be asking. */
-static void handle_roots_list(cmcp_client_t *c,
-                                const cmcp_rpc_message_t *req) {
+/* The roots/list result for the roots the host declared, or NULL when
+ * it declared none (cmcp_client_set_roots never called). */
+static cmcp_json_t *roots_result(cmcp_client_t *c) {
     pthread_mutex_lock(&c->roots_mu);
     if (!c->roots_set) {
         pthread_mutex_unlock(&c->roots_mu);
-        reply_method_not_found(c, &req->id);
-        return;
+        return NULL;
     }
     cmcp_json_t *arr = cmcp_json_new_array();
     for (size_t i = 0; i < c->n_roots; i++) {
@@ -358,6 +371,16 @@ static void handle_roots_list(cmcp_client_t *c,
 
     cmcp_json_t *result = cmcp_json_new_object();
     cmcp_json_object_set(result, "roots", arr);
+    return result;
+}
+
+static void handle_roots_list(cmcp_client_t *c,
+                                const cmcp_rpc_message_t *req) {
+    cmcp_json_t *result = roots_result(c);
+    if (!result) {
+        reply_method_not_found(c, &req->id);
+        return;
+    }
 
     cmcp_rpc_message_t resp;
     if (cmcp_rpc_make_response(&resp, &req->id, result) != CMCP_OK) return;
@@ -598,6 +621,7 @@ cmcp_client_t *cmcp_client_new(const char *name, const char *version) {
 
 void cmcp_client_free(cmcp_client_t *c) {
     if (!c) return;
+    free(c->log_level);
 
     atomic_store_explicit(&c->shutting_down, 1, memory_order_relaxed);
 
@@ -760,6 +784,8 @@ int cmcp_client_set_roots(cmcp_client_t *c,
 
 int cmcp_client_notify_roots_changed(cmcp_client_t *c) {
     if (!c) return CMCP_EINVAL;
+    /* Removed in 2026-07-28: a modern server asks for roots per request. */
+    if (c->modern) return CMCP_EUNSUPPORTED;
     if (!c->caps.roots_list_changed) return CMCP_EPROTOCOL;
     return cmcp_client_notify(c, "notifications/roots/list_changed", NULL);
 }
@@ -768,6 +794,15 @@ int cmcp_client_set_log_level(cmcp_client_t *c, cmcp_log_level_t level) {
     if (!c) return CMCP_EINVAL;
     const char *lname = cmcp_log_level_to_name(level);
     if (!lname) return CMCP_EINVAL;
+    if (c->modern) {
+        /* 2026-07-28 has no logging/setLevel: the level rides in every
+         * request's _meta from now on. */
+        char *copy = xstrdup(lname);
+        if (!copy) return CMCP_ENOMEM;
+        free(c->log_level);
+        c->log_level = copy;
+        return CMCP_OK;
+    }
 
     cmcp_json_t *params = cmcp_json_new_object();
     if (!params) return CMCP_ENOMEM;
@@ -861,6 +896,15 @@ int cmcp_client_call_async(cmcp_client_t *c, const char *method,
         return CMCP_EINVAL;
     }
 
+    /* Modern requests carry the protocol version, capabilities and
+     * identity themselves; there is no session to remember them. */
+    if (c->modern) {
+        params = cmcp_cmodern_attach(
+            params, cmcp_cmodern_meta(c->name, c->version, c->description,
+                                      client_caps_to_json(c), c->log_level));
+        if (!params) return CMCP_ENOMEM;
+    }
+
     pending_completion_t *p = pending_completion_new(0);
     if (!p) { cmcp_json_free(params); return CMCP_ENOMEM; }
 
@@ -924,13 +968,57 @@ int cmcp_client_wait(cmcp_client_t *c, long long id,
     return cancelled ? CMCP_ECANCELLED : CMCP_OK;
 }
 
-int cmcp_client_request(cmcp_client_t *c, const char *method,
-                         cmcp_json_t *params,
-                         cmcp_rpc_message_t *out_response) {
+static int request_once(cmcp_client_t *c, const char *method,
+                        cmcp_json_t *params, cmcp_rpc_message_t *out_response) {
     long long id = 0;
     int rc = cmcp_client_call_async(c, method, params, &id);
     if (rc != CMCP_OK) return rc;
     return cmcp_client_wait(c, id, out_response);
+}
+
+/* Answer an input request embedded in an InputRequiredResult with the
+ * same host handlers that serve server→client requests on the legacy
+ * path. No handler: the host declines, and the call fails. */
+static int answer_input(const char *method, const cmcp_json_t *params,
+                        void *ctx, cmcp_json_t **out) {
+    cmcp_client_t *c = (cmcp_client_t *)ctx;
+    *out = NULL;
+    if (strcmp(method, "elicitation/create") == 0 && c->elicitation_fn)
+        return c->elicitation_fn(params, c->elicitation_ud, out);
+    if (strcmp(method, "sampling/createMessage") == 0 && c->sampling_fn)
+        return c->sampling_fn(params, c->sampling_ud, out);
+    if (strcmp(method, "roots/list") == 0) {
+        *out = roots_result(c);
+        if (*out) return CMCP_OK;
+    }
+    return CMCP_EUNSUPPORTED;
+}
+
+int cmcp_client_request(cmcp_client_t *c, const char *method,
+                         cmcp_json_t *params,
+                         cmcp_rpc_message_t *out_response) {
+    if (!c || !c->modern || !cmcp_cmodern_supports_mrtr(method))
+        return request_once(c, method, params, out_response);
+
+    /* MRTR: each round is a new request (new id) with the original
+     * params plus the answers; keep the original to rebuild from. */
+    cmcp_json_t *orig = params ? cmcp_json_clone(params) : NULL;
+    if (params && !orig) { cmcp_json_free(params); return CMCP_ENOMEM; }
+    int rc = request_once(c, method, params, out_response);
+    for (int round = 0; rc == CMCP_OK && !out_response->error &&
+                        cmcp_cmodern_input_required(out_response->result);
+         round++) {
+        cmcp_json_t *next = NULL;
+        rc = round < CMCP_CLIENT_MRTR_MAX_ROUNDS
+                 ? cmcp_cmodern_retry_params(orig, out_response->result,
+                                             answer_input, c, &next)
+                 : CMCP_EPROTOCOL;            /* server keeps asking */
+        cmcp_rpc_message_clear(out_response);
+        if (rc != CMCP_OK) break;
+        rc = request_once(c, method, next, out_response);
+    }
+    cmcp_json_free(orig);
+    return rc;
 }
 
 int cmcp_client_notify(cmcp_client_t *c, const char *method,
@@ -1126,6 +1214,35 @@ static void absorb_tools_page(const cmcp_rpc_message_t *resp,
     }
 }
 
+/* Modern Streamable HTTP: tell the transport which arguments each tool
+ * mirrors into Mcp-Param-* headers. A tool whose x-mcp-header
+ * annotations break the rules MUST be left out of the list (spec:
+ * server/tools, x-mcp-header). Returns the new length. */
+static size_t register_tool_headers(cmcp_client_t *c, cmcp_session_tool_t *arr,
+                                    size_t len) {
+    size_t kept = 0;
+    for (size_t i = 0; i < len; i++) {
+        cmcp_session_tool_t *e = &arr[i];
+        cmcp_schema_error_t err;
+        if (cmcp_xheader_lint(e->input_schema, &err) != CMCP_OK) {
+            fprintf(stderr, "cmcp_client: dropping tool '%s': %s at '%s'\n",
+                    e->name, err.message ? err.message : "invalid x-mcp-header",
+                    err.path ? err.path : "");
+            cmcp_schema_error_clear(&err);
+            free(e->name);
+            free(e->description);
+            cmcp_json_free(e->input_schema);
+            continue;
+        }
+        cmcp_schema_error_clear(&err);
+        cmcp_transport_http_set_tool_schema(c->transport, e->name,
+                                            e->input_schema);
+        if (kept != i) arr[kept] = *e;
+        kept++;
+    }
+    return kept;
+}
+
 int cmcp_client_tools_list(cmcp_client_t *c,
                             cmcp_session_tool_t **out_tools,
                             size_t *out_n) {
@@ -1148,6 +1265,8 @@ int cmcp_client_tools_list(cmcp_client_t *c,
         absorb_tools_page(&resp, &arr, &len, &cap);
     } while (helper_fetch_next_page(c, "tools/list", &resp));
     cmcp_rpc_message_clear(&resp);
+    if (c->modern && cmcp_transport_http_is_client(c->transport))
+        len = register_tool_headers(c, arr, len);
 
     *out_tools = arr;
     *out_n = len;
@@ -1696,6 +1815,26 @@ int cmcp_client_prompt_get(cmcp_client_t *c, const char *name,
 /* Handshake                                                               */
 /* ====================================================================== */
 
+/* Capture serverInfo {name, version, description?} from `si`. */
+static void absorb_server_info(cmcp_client_t *c, const cmcp_json_t *si) {
+    if (!si || si->type != CMCP_JSON_OBJECT) return;
+    const cmcp_json_t *n = cmcp_json_object_get(si, "name");
+    const cmcp_json_t *v = cmcp_json_object_get(si, "version");
+    const cmcp_json_t *d = cmcp_json_object_get(si, "description");
+    if (n && n->type == CMCP_JSON_STRING) {
+        free(c->server_name);
+        c->server_name = xstrdup(n->str.s);
+    }
+    if (v && v->type == CMCP_JSON_STRING) {
+        free(c->server_version);
+        c->server_version = xstrdup(v->str.s);
+    }
+    if (d && d->type == CMCP_JSON_STRING) {
+        free(c->server_description);
+        c->server_description = xstrdup(d->str.s);
+    }
+}
+
 static int do_initialize(cmcp_client_t *c) {
     cmcp_json_t *params = cmcp_json_new_object();
     if (!params) return CMCP_ENOMEM;
@@ -1745,24 +1884,7 @@ static int do_initialize(cmcp_client_t *c) {
                 "proceeding (host may disconnect)\n",
                 pv->str.s, CMCP_PROTOCOL_VERSION);
     }
-    const cmcp_json_t *si = cmcp_json_object_get(resp.result, "serverInfo");
-    if (si && si->type == CMCP_JSON_OBJECT) {
-        const cmcp_json_t *n = cmcp_json_object_get(si, "name");
-        const cmcp_json_t *v = cmcp_json_object_get(si, "version");
-        const cmcp_json_t *d = cmcp_json_object_get(si, "description");
-        if (n && n->type == CMCP_JSON_STRING) {
-            free(c->server_name);
-            c->server_name = xstrdup(n->str.s);
-        }
-        if (v && v->type == CMCP_JSON_STRING) {
-            free(c->server_version);
-            c->server_version = xstrdup(v->str.s);
-        }
-        if (d && d->type == CMCP_JSON_STRING) {
-            free(c->server_description);
-            c->server_description = xstrdup(d->str.s);
-        }
-    }
+    absorb_server_info(c, cmcp_json_object_get(resp.result, "serverInfo"));
     server_caps_from_json(cmcp_json_object_get(resp.result, "capabilities"),
                            &c->server_caps);
     cmcp_rpc_message_clear(&resp);
@@ -1772,6 +1894,59 @@ static int do_initialize(cmcp_client_t *c) {
 
     c->initialized = 1;
     return CMCP_OK;
+}
+
+/* Probe with server/discover (MCP 2026-07-28). On a server that lists
+ * the modern revision the connection stays modern and is ready: no
+ * handshake. Otherwise it returns non-OK with the client back on the
+ * legacy wire, for the caller to fall back to initialize. */
+static int do_discover(cmcp_client_t *c) {
+    c->modern = 1;
+    cmcp_rpc_message_t resp;
+    cmcp_rpc_message_init(&resp);
+    int rc = request_once(c, "server/discover", NULL, &resp);
+    int ok = rc == CMCP_OK && !resp.error &&
+             cmcp_cmodern_discover_ok(resp.result);
+    if (!ok) {
+        cmcp_rpc_message_clear(&resp);
+        c->modern = 0;
+        return rc != CMCP_OK ? rc : CMCP_EPROTOCOL;
+    }
+    const cmcp_json_t *meta = cmcp_json_object_get(resp.result, "_meta");
+    absorb_server_info(c, meta ? cmcp_json_object_get(
+                                     meta, "io.modelcontextprotocol/serverInfo")
+                               : NULL);
+    server_caps_from_json(cmcp_json_object_get(resp.result, "capabilities"),
+                          &c->server_caps);
+    free(c->server_protocol);
+    c->server_protocol = xstrdup(CMCP_PROTOCOL_VERSION_MODERN);
+    cmcp_rpc_message_clear(&resp);
+    c->initialized = 1;
+    return CMCP_OK;
+}
+
+/* Open the connection in the requested era. auto: a dual-era client
+ * probes server/discover and falls back to initialize on any failure
+ * (spec: basic/versioning, backward compatibility). */
+static int do_connect(cmcp_client_t *c) {
+    if (c->mode == CMCP_CLIENT_LEGACY) return do_initialize(c);
+    int rc = do_discover(c);
+    if (rc == CMCP_OK || c->mode == CMCP_CLIENT_MODERN) return rc;
+    return do_initialize(c);
+}
+
+int cmcp_client_set_mode(cmcp_client_t *c, cmcp_client_mode_t mode) {
+    if (!c) return CMCP_EINVAL;
+    if (c->initialized || c->reader_started) return CMCP_EPROTOCOL;
+    if (mode != CMCP_CLIENT_LEGACY && mode != CMCP_CLIENT_AUTO &&
+        mode != CMCP_CLIENT_MODERN)
+        return CMCP_EINVAL;
+    c->mode = mode;
+    return CMCP_OK;
+}
+
+int cmcp_client_is_modern(const cmcp_client_t *c) {
+    return c ? c->modern : 0;
 }
 
 int cmcp_client_handshake(cmcp_client_t *c, cmcp_transport_t *t) {
@@ -1788,7 +1963,7 @@ int cmcp_client_handshake(cmcp_client_t *c, cmcp_transport_t *t) {
     }
     c->reader_started = 1;
 
-    return do_initialize(c);
+    return do_connect(c);
 }
 
 /* ====================================================================== */
@@ -1866,7 +2041,7 @@ int cmcp_client_connect_stdio(cmcp_client_t *c,
     }
     c->reader_started = 1;
 
-    int rc = do_initialize(c);
+    int rc = do_connect(c);
     if (rc != CMCP_OK) {
         /* Tear down: reader thread + child get cleaned up by free. */
         return rc;

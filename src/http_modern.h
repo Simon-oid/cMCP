@@ -49,4 +49,22 @@ int cmcp_http_modern_status(const char *resp, size_t len);
  * not valid base64 (or decodes to bytes containing NUL). */
 char *cmcp_http_header_decode(const char *value);
 
+/* The client side of the same rule: `value` as is when it is a plain
+ * header value (visible ASCII and inner spaces, no leading or trailing
+ * whitespace, not itself shaped like the sentinel), otherwise
+ * `=?base64?<base64 of the UTF-8 bytes>?=`. Malloc'd, or NULL. */
+char *cmcp_http_header_encode(const char *value);
+
+/* Client side: the request-metadata headers for a modern request body —
+ * MCP-Protocol-Version (from _meta), Mcp-Method, Mcp-Name for
+ * tools/call / resources/read / prompts/get, and Mcp-Param-<Name> for
+ * each x-mcp-header argument of `tool_schema` (the tool's inputSchema,
+ * may be NULL). Values are encoded with cmcp_http_header_encode. Each
+ * header goes to add(ctx, "Name: value"); returns CMCP_ENOMEM or the
+ * first non-zero add result, else CMCP_OK. */
+typedef int (*cmcp_http_line_fn)(void *ctx, const char *line);
+int cmcp_http_modern_request_headers(const cmcp_json_t *body,
+                                     const cmcp_json_t *tool_schema,
+                                     cmcp_http_line_fn add, void *ctx);
+
 #endif

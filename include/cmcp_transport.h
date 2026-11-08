@@ -24,6 +24,8 @@
 
 #include <stddef.h>
 
+#include "cmcp_json.h"
+
 /* ====================================================================== */
 /* Transport vtable                                                        */
 /* ====================================================================== */
@@ -200,5 +202,16 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
  * the system CA bundle (no custom CA pinning); no exposed knobs for
  * proxies (set CURL env vars if you need them). */
 cmcp_transport_t *cmcp_transport_http_connect(const char *url);
+
+/* Non-zero when `t` came from cmcp_transport_http_connect. */
+int cmcp_transport_http_is_client(const cmcp_transport_t *t);
+
+/* MCP 2026-07-28 x-mcp-header: remember `tool`'s inputSchema (copied)
+ * so modern tools/call requests mirror its annotated arguments into
+ * Mcp-Param-* headers. The client calls this after tools/list on a
+ * modern connection; hosts rarely need to. CMCP_EUNSUPPORTED when `t`
+ * is not an HTTP client transport. */
+int cmcp_transport_http_set_tool_schema(cmcp_transport_t *t, const char *tool,
+                                        const cmcp_json_t *input_schema);
 
 #endif

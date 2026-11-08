@@ -31,6 +31,8 @@
 
 #include "cmcp.h"
 #include "cmcp_transport.h"
+#include "cmcp_json.h"
+#include "http_modern.h"
 
 #include <curl/curl.h>
 #include <pthread.h>
@@ -180,6 +182,12 @@ typedef struct {
      * mutex-guarded read sites below use atomic_load too for
      * consistency; the mutex still provides the cv ordering. */
     atomic_int       shutting_down;
+
+    /* MCP 2026-07-28: input schemas of the tools whose x-mcp-header
+     * arguments must be mirrored into Mcp-Param-* headers, keyed by tool
+     * name. Registered by the client after tools/list. */
+    pthread_mutex_t  tools_mu;
+    cmcp_json_t     *tool_schemas;     /* object, or NULL */
 } http_client_impl_t;
 
 /* Push one frame onto the queue. Copies data. Signals one waiter. */
@@ -253,10 +261,21 @@ typedef struct {
     size_t len;
     size_t cap;
     char   session_id_seen[64];
+    /* A modern server may answer a POST with an SSE stream scoped to
+     * that request: its events (notifications, then the response) are
+     * parsed as they arrive and queued like GET-stream frames. */
+    http_client_impl_t *impl;
+    void  *sse;             /* sse_state_t *, set once the head says so */
 } post_state_t;
+
+/* Defined with the SSE parser below. */
+static void  *post_sse_open(http_client_impl_t *impl);
+static void   post_sse_close(void *st);
+static size_t sse_write_cb(char *ptr, size_t size, size_t nmemb, void *ud);
 
 static size_t post_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
     post_state_t *ps = (post_state_t *)ud;
+    if (ps->sse) return sse_write_cb(ptr, size, nmemb, ps->sse);
     size_t total = size * nmemb;
     if (ps->len + total + 1 > ps->cap) {
         size_t nc = ps->cap ? ps->cap * 2 : 1024;
@@ -272,9 +291,21 @@ static size_t post_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
     return total;
 }
 
+/* Does `buf[0..len)` (not NUL-terminated) contain `needle`? */
+static int span_has(const char *buf, size_t len, const char *needle) {
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= len; i++)
+        if (memcmp(buf + i, needle, n) == 0) return 1;
+    return 0;
+}
+
 static size_t post_header_cb(char *buf, size_t size, size_t nmemb, void *ud) {
     post_state_t *ps = (post_state_t *)ud;
     size_t total = size * nmemb;
+    static const char ctype[] = "Content-Type:";
+    if (total > sizeof ctype - 1 && strncasecmp(buf, ctype, sizeof ctype - 1) == 0 &&
+        span_has(buf, total, "text/event-stream") && !ps->sse)
+        ps->sse = post_sse_open(ps->impl);
     static const char hname[] = "Mcp-Session-Id:";
     size_t hlen = sizeof hname - 1;
     if (total >= hlen && strncasecmp(buf, hname, hlen) == 0) {
@@ -292,6 +323,51 @@ static size_t post_header_cb(char *buf, size_t size, size_t nmemb, void *ud) {
     return total;
 }
 
+/* A body is modern when its params._meta names a protocol version. */
+static int modern_body(const cmcp_json_t *b) {
+    const cmcp_json_t *p = (b && b->type == CMCP_JSON_OBJECT)
+                               ? cmcp_json_object_get(b, "params") : NULL;
+    const cmcp_json_t *m = (p && p->type == CMCP_JSON_OBJECT)
+                               ? cmcp_json_object_get(p, "_meta") : NULL;
+    return m && m->type == CMCP_JSON_OBJECT &&
+           cmcp_json_object_get(m, "io.modelcontextprotocol/protocolVersion");
+}
+
+static int is_jsonrpc(const char *buf, size_t len) {
+    cmcp_json_t *j = cmcp_json_parse(buf, len);
+    int ok = j && j->type == CMCP_JSON_OBJECT &&
+             cmcp_json_object_get(j, "jsonrpc") != NULL;
+    cmcp_json_free(j);
+    return ok;
+}
+
+static int append_line(void *ctx, const char *line) {
+    struct curl_slist **h = (struct curl_slist **)ctx;
+    struct curl_slist *n = curl_slist_append(*h, line);
+    if (!n) return CMCP_ENOMEM;
+    *h = n;
+    return CMCP_OK;
+}
+
+/* MCP-Protocol-Version, Mcp-Method, Mcp-Name and the tool's Mcp-Param-*
+ * headers for a modern request body. */
+static int add_modern_headers(http_client_impl_t *impl, const cmcp_json_t *b,
+                              struct curl_slist **headers) {
+    const cmcp_json_t *params = cmcp_json_object_get(b, "params");
+    const cmcp_json_t *name = cmcp_json_object_get(params, "name");
+    cmcp_json_t *schema = NULL;
+    pthread_mutex_lock(&impl->tools_mu);
+    if (impl->tool_schemas && name && name->type == CMCP_JSON_STRING) {
+        const cmcp_json_t *s = cmcp_json_object_get(impl->tool_schemas,
+                                                    cmcp_json_string(name));
+        if (s) schema = cmcp_json_clone(s);
+    }
+    pthread_mutex_unlock(&impl->tools_mu);
+    int rc = cmcp_http_modern_request_headers(b, schema, append_line, headers);
+    cmcp_json_free(schema);
+    return rc;
+}
+
 static int do_post(http_client_impl_t *impl,
                     const char *body, size_t body_len) {
     CURL *c = curl_easy_init();
@@ -302,9 +378,21 @@ static int do_post(http_client_impl_t *impl,
     headers = curl_slist_append(headers,
                 "Accept: application/json, text/event-stream");
 
+    /* 2026-07-28: no session; the request carries its own metadata
+     * headers, mirrored from the body. */
+    cmcp_json_t *parsed = cmcp_json_parse(body, body_len);
+    int modern = modern_body(parsed);
+    if (modern && add_modern_headers(impl, parsed, &headers) != CMCP_OK) {
+        cmcp_json_free(parsed);
+        curl_slist_free_all(headers);
+        curl_easy_cleanup(c);
+        return CMCP_ENOMEM;
+    }
+    cmcp_json_free(parsed);
+
     char sid_header[96] = {0};
     pthread_mutex_lock(&impl->session_mu);
-    int post_init = impl->session_set;
+    int post_init = impl->session_set && !modern;
     if (post_init) {
         snprintf(sid_header, sizeof sid_header,
                   "Mcp-Session-Id: %s", impl->session_id);
@@ -318,6 +406,7 @@ static int do_post(http_client_impl_t *impl,
                     "MCP-Protocol-Version: " CMCP_PROTOCOL_VERSION);
 
     post_state_t ps = {0};
+    ps.impl = impl;
 
     curl_easy_setopt(c, CURLOPT_URL,            impl->url);
     curl_easy_setopt(c, CURLOPT_POST,           1L);
@@ -339,6 +428,8 @@ static int do_post(http_client_impl_t *impl,
 
     curl_easy_cleanup(c);
     curl_slist_free_all(headers);
+    int streamed = ps.sse != NULL;
+    if (ps.sse) post_sse_close(ps.sse);   /* flushes a last unterminated event */
 
     if (rc != CURLE_OK) {
         free(ps.body);
@@ -362,10 +453,17 @@ static int do_post(http_client_impl_t *impl,
      * error, so the host caller observes the right return code rather
      * than a hang. The body (if any) is discarded — it's an HTTP error
      * page, not a JSON-RPC frame. */
+    /* A modern server answers protocol errors (-32020/-32021/-32022,
+     * -32601) with 400/404 AND a JSON-RPC error frame: that frame goes to
+     * the client like a 200 body, since it needs it (e.g. to fall back
+     * from a version it does not share). A streamed (SSE) response has
+     * already queued every event. */
+    int modern_error = modern && status >= 400 && status < 500 &&
+                       ps.len > 0 && is_jsonrpc(ps.body, ps.len);
     int push_rc = CMCP_OK;
-    if (status == 200 && ps.len > 0) {
+    if (!streamed && ((status == 200 && ps.len > 0) || modern_error)) {
         push_rc = queue_push(impl, ps.body, ps.len);
-    } else if (status == 200 || status == 202) {
+    } else if (streamed || status == 200 || status == 202) {
         /* 200 with empty body and 202 Accepted are both fine — the
          * latter is the spec-defined notification ack with no body. */
     } else if (status == 503) {
@@ -517,6 +615,21 @@ static size_t sse_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {  //
         }
     }
     return total;
+}
+
+static void *post_sse_open(http_client_impl_t *impl) {
+    sse_state_t *st = (sse_state_t *)calloc(1, sizeof *st);
+    if (st) st->impl = impl;
+    return st;
+}
+
+static void post_sse_close(void *arg) {
+    sse_state_t *st = (sse_state_t *)arg;
+    if (st->line_buf_len) sse_consume_line(st, st->line_buf, st->line_buf_len);
+    sse_emit(st);
+    free(st->event_data);
+    free(st->line_buf);
+    free(st);
 }
 
 static int sse_progress_cb(void *ud, curl_off_t dlt, curl_off_t dln,
@@ -678,6 +791,8 @@ static void http_client_close(cmcp_transport_t *t) {
         }
 
         free(impl->url);
+        cmcp_json_free(impl->tool_schemas);
+        pthread_mutex_destroy(&impl->tools_mu);
         pthread_mutex_destroy(&impl->q_mu);
         pthread_cond_destroy(&impl->q_cv);
         pthread_mutex_destroy(&impl->session_mu);
@@ -713,6 +828,7 @@ cmcp_transport_t *cmcp_transport_http_connect(const char *url) {
     pthread_mutex_init(&impl->session_mu, NULL);
     pthread_cond_init (&impl->session_cv, NULL);
     pthread_mutex_init(&impl->sse_id_mu, NULL);
+    pthread_mutex_init(&impl->tools_mu, NULL);
 
     t->impl     = impl;
     t->read_fn  = http_client_read;
@@ -736,4 +852,26 @@ fail:
     if (impl) { free(impl->url); free(impl); }
     free(t);
     return NULL;
+}
+
+int cmcp_transport_http_is_client(const cmcp_transport_t *t) {
+    return t && t->read_fn == http_client_read;
+}
+
+int cmcp_transport_http_set_tool_schema(cmcp_transport_t *t, const char *tool,
+                                        const cmcp_json_t *input_schema) {
+    if (!cmcp_transport_http_is_client(t)) return CMCP_EUNSUPPORTED;
+    if (!tool) return CMCP_EINVAL;
+    http_client_impl_t *impl = (http_client_impl_t *)t->impl;
+    cmcp_json_t *copy = input_schema ? cmcp_json_clone(input_schema)
+                                     : cmcp_json_new_object();
+    if (!copy) return CMCP_ENOMEM;
+    pthread_mutex_lock(&impl->tools_mu);
+    if (!impl->tool_schemas) impl->tool_schemas = cmcp_json_new_object();
+    int rc = impl->tool_schemas &&
+             cmcp_json_object_set(impl->tool_schemas, tool, copy) == 0
+                 ? CMCP_OK : CMCP_ENOMEM;
+    pthread_mutex_unlock(&impl->tools_mu);
+    if (rc != CMCP_OK) cmcp_json_free(copy);
+    return rc;
 }

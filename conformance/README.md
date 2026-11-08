@@ -73,3 +73,25 @@ table moves forward on purpose as the 2026-07-28 upgrade lands. Needs
 - **Scope.** TypeScript reference only. The Python SDK is a separate
   implementation of the same wire spec — redundant for pure conformance
   and deliberately out of scope.
+
+## Direction D — cMCP client vs the Python SDK server
+
+`conformance/client_vs_py.c` drives the cMCP client against
+`conformance/py/server_for_cmcp.py`, an MCP Python SDK (`mcp` 2.3.0)
+server with four tools: `echo`, `add`, `greet` (asks for a name with
+`Elicit`: a server-initiated elicitation on the legacy path, an
+InputRequiredResult on the modern one) and `where` (an `x-mcp-header`
+argument the SDK checks over HTTP).
+
+| Transport | Mode | Expected |
+|---|---|---|
+| stdio | legacy | pass, protocol 2025-11-25 |
+| stdio | auto | pass, protocol 2026-07-28 |
+| stdio | modern | pass, protocol 2026-07-28 |
+| HTTP | auto | pass, protocol 2026-07-28 |
+| HTTP | modern | pass, protocol 2026-07-28 |
+
+As in Direction C, a pair that behaves differently from its row fails
+the run, in either direction. Run by `make conformance-py`, after
+Direction C.
+

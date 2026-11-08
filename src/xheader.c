@@ -165,3 +165,49 @@ int cmcp_xheader_check(const cmcp_json_t *input_schema, const cmcp_json_t *args,
     if (!input_schema || input_schema->type != CMCP_JSON_OBJECT || !get) return 0;
     return check_props(input_schema, args, get, get_ctx, out_msg);
 }
+
+/* ---------------------------------------------------------------- */
+/* Client side                                                       */
+/* ---------------------------------------------------------------- */
+
+/* Text form of an argument for its header; 0 when it has none. */
+static int value_text(const cmcp_json_t *v, char *buf, size_t cap,
+                      const char **out) {
+    if (v->type == CMCP_JSON_STRING) { *out = v->str.s; return 1; }
+    if (v->type == CMCP_JSON_BOOL) { *out = v->b ? "true" : "false"; return 1; }
+    if (v->type == CMCP_JSON_INT) {
+        snprintf(buf, cap, "%lld", v->i);
+        *out = buf;
+        return 1;
+    }
+    return 0;                 /* the lint allows only these three types */
+}
+
+static int collect_props(const cmcp_json_t *schema, const cmcp_json_t *args,
+                         cmcp_xheader_emit_fn emit, void *ctx) {
+    const cmcp_json_t *props = cmcp_json_object_get(schema, "properties");
+    if (!props || props->type != CMCP_JSON_OBJECT ||
+        !args || args->type != CMCP_JSON_OBJECT)
+        return 0;
+    for (size_t i = 0; i < props->obj.len; i++) {
+        const cmcp_json_t *sub = props->obj.values[i];
+        const cmcp_json_t *val = cmcp_json_object_get(args, props->obj.keys[i]);
+        if (sub->type != CMCP_JSON_OBJECT || !val) continue;
+        const cmcp_json_t *x = cmcp_json_object_get(sub, XHEADER_KEY);
+        char num[32];
+        const char *text = NULL;
+        if (x && x->type == CMCP_JSON_STRING && value_text(val, num, sizeof num, &text)) {
+            int rc = emit(ctx, x->str.s, text);
+            if (rc) return rc;
+        }
+        int rc = collect_props(sub, val, emit, ctx);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
+int cmcp_xheader_collect(const cmcp_json_t *input_schema, const cmcp_json_t *args,
+                         cmcp_xheader_emit_fn emit, void *ctx) {
+    if (!input_schema || input_schema->type != CMCP_JSON_OBJECT || !emit) return 0;
+    return collect_props(input_schema, args, emit, ctx);
+}

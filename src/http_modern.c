@@ -5,6 +5,7 @@
 #include "cmcp.h"
 #include "cmcp_types.h"
 #include "era.h"
+#include "xheader.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,6 +106,53 @@ char *cmcp_http_header_decode(const char *value) {
     char *copy = (char *)malloc(n + 1);
     if (copy) memcpy(copy, value, n + 1);
     return copy;
+}
+
+static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/* A value that can travel in a header without encoding (RFC 9110). */
+static int header_safe(const char *v) {
+    size_t n = strlen(v);
+    if (n == 0) return 1;
+    if (v[0] == ' ' || v[0] == '\t' || v[n - 1] == ' ' || v[n - 1] == '\t')
+        return 0;
+    /* A plain value shaped like the sentinel must be encoded too. */
+    if (n >= SENTINEL_PREFIX_LEN + SENTINEL_SUFFIX_LEN &&
+        strncmp(v, SENTINEL_PREFIX, SENTINEL_PREFIX_LEN) == 0 &&
+        strcmp(v + n - SENTINEL_SUFFIX_LEN, SENTINEL_SUFFIX) == 0)
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)v[i];
+        if (c < 0x20u || c > 0x7Eu) return 0;
+    }
+    return 1;
+}
+
+char *cmcp_http_header_encode(const char *value) {
+    if (!value) return NULL;
+    size_t n = strlen(value);
+    if (header_safe(value)) {
+        char *copy = (char *)malloc(n + 1);
+        if (copy) memcpy(copy, value, n + 1);
+        return copy;
+    }
+    size_t cap = SENTINEL_PREFIX_LEN + (n + 2) / 3 * 4 + SENTINEL_SUFFIX_LEN + 1;
+    char *out = (char *)malloc(cap);
+    if (!out) return NULL;
+    const unsigned char *in = (const unsigned char *)value;
+    size_t o = (size_t)snprintf(out, cap, "%s", SENTINEL_PREFIX);
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned w = (unsigned)in[i] << 16u;
+        if (i + 1 < n) w |= (unsigned)in[i + 1] << 8u;
+        if (i + 2 < n) w |= (unsigned)in[i + 2];
+        out[o++] = B64[(w >> 18u) & 63u];
+        out[o++] = B64[(w >> 12u) & 63u];
+        out[o++] = i + 1 < n ? B64[(w >> 6u) & 63u] : '=';
+        out[o++] = i + 2 < n ? B64[w & 63u] : '=';
+    }
+    snprintf(out + o, cap - o, "%s", SENTINEL_SUFFIX);
+    return out;
 }
 
 /* ---------------------------------------------------------------- */
@@ -240,4 +288,60 @@ int cmcp_http_modern_status(const char *resp, size_t len) {
         c == CMCP_RPC_UNSUPPORTED_PROTOCOL_VERSION)
         return 400;
     return 200;
+}
+
+/* ---------------------------------------------------------------- */
+/* Client side: request headers                                      */
+/* ---------------------------------------------------------------- */
+
+/* add("<name>: <encoded value>"). */
+static int add_header(cmcp_http_line_fn add, void *ctx, const char *name,
+                      const char *value) {
+    char *enc = cmcp_http_header_encode(value);
+    if (!enc) return CMCP_ENOMEM;
+    size_t n = strlen(name) + 2 + strlen(enc) + 1;
+    char *line = (char *)malloc(n);
+    int rc = CMCP_ENOMEM;
+    if (line) {
+        snprintf(line, n, "%s: %s", name, enc);
+        rc = add(ctx, line);
+        free(line);
+    }
+    free(enc);
+    return rc;
+}
+
+typedef struct {
+    cmcp_http_line_fn add;
+    void             *ctx;
+} param_ctx_t;
+
+static int emit_param(void *ctx, const char *name, const char *value) {
+    param_ctx_t *pc = (param_ctx_t *)ctx;
+    char hname[160];
+    snprintf(hname, sizeof hname, "Mcp-Param-%s", name);
+    return add_header(pc->add, pc->ctx, hname, value);
+}
+
+int cmcp_http_modern_request_headers(const cmcp_json_t *body,
+                                     const cmcp_json_t *tool_schema,
+                                     cmcp_http_line_fn add, void *ctx) {
+    const cmcp_json_t *params = field(body, "params");
+    const char *pv = str_field(field(params, "_meta"), CMCP_META_PROTOCOL_VERSION);
+    const char *method = str_field(body, "method");
+    int rc = CMCP_OK;
+    if (pv) rc = add_header(add, ctx, "MCP-Protocol-Version", pv);
+    if (rc == CMCP_OK && method && field(body, "id"))
+        rc = add_header(add, ctx, "Mcp-Method", method);
+    if (rc != CMCP_OK || !method || !needs_name(method)) return rc;
+
+    const char *name = str_field(params, "name");
+    if (!name) name = str_field(params, "uri");
+    if (name) rc = add_header(add, ctx, "Mcp-Name", name);
+    if (rc == CMCP_OK && tool_schema && strcmp(method, "tools/call") == 0) {
+        param_ctx_t pc = {add, ctx};
+        rc = cmcp_xheader_collect(tool_schema, field(params, "arguments"),
+                                  emit_param, &pc);
+    }
+    return rc;
 }

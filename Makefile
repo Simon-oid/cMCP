@@ -28,7 +28,7 @@ CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c src/era.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
 SERVER_CANDIDATES := src/server.c src/worker.c src/mrtr.c src/subscriptions.c
-CLIENT_CANDIDATES := src/client.c src/session.c
+CLIENT_CANDIDATES := src/client.c src/session.c src/client_modern.c
 
 CORE_SRC   := $(wildcard $(CORE_CANDIDATES))
 SERVER_SRC := $(wildcard $(SERVER_CANDIDATES))
@@ -149,6 +149,7 @@ $(DOGFOOD_CRAG_HOST_BIN): tools/dogfood-crag-host/main.c $(BUILT_LIBS)
 # of `make test`, which stays hermetic and offline. See conformance/README.md.
 CONF_DIR   := conformance
 CONF_C_BIN := $(CONF_DIR)/client_vs_ts
+CONF_PY_C_BIN := $(CONF_DIR)/client_vs_py
 
 conformance: all $(CONF_C_BIN)
 	@command -v npm >/dev/null || { echo "npm not found — install Node.js"; exit 1; }
@@ -167,14 +168,19 @@ conformance: all $(CONF_C_BIN)
 # first run (pip installs the pinned SDK into conformance/py/.venv).
 CONF_PY_VENV := $(CONF_DIR)/py/.venv
 
-conformance-py: examples/echo-server examples/ask-server
+conformance-py: examples/echo-server examples/ask-server $(CONF_PY_C_BIN)
 	@command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
 	@test -x $(CONF_PY_VENV)/bin/python || python3 -m venv $(CONF_PY_VENV)
 	$(CONF_PY_VENV)/bin/pip install --quiet --disable-pip-version-check -r $(CONF_DIR)/py/requirements.txt
 	@echo "=== conformance C: Python SDK client  vs  cMCP echo-server ==="
 	$(CONF_PY_VENV)/bin/python -I $(CONF_DIR)/py/client_vs_cmcp.py
+	@echo "=== conformance D: cMCP client  vs  Python SDK server ==="
+	CMCP_CONF_PY=$(CONF_PY_VENV)/bin/python ./$(CONF_PY_C_BIN)
 
 $(CONF_C_BIN): $(CONF_DIR)/client_vs_ts.c $(BUILT_LIBS)
+	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
+
+$(CONF_PY_C_BIN): $(CONF_DIR)/client_vs_py.c $(BUILT_LIBS)
 	$(CC) $(CFLAGS) -o $@ $< $(BUILT_LIBS) $(LDFLAGS) $(LDLIBS)
 
 # --- Schema validator cross-check (axis 6.7) ------------------------------

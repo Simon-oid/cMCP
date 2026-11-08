@@ -207,6 +207,42 @@ void cmcp_client_set_capabilities(cmcp_client_t *c,
 int cmcp_client_set_description(cmcp_client_t *c, const char *description);
 
 /* ====================================================================== */
+/* Protocol era (MCP 2026-07-28 dual-era)                                  */
+/* ====================================================================== */
+
+/* Which MCP revision a client speaks.
+ *
+ *   LEGACY  initialize handshake, 2025-11-25 (the default; unchanged).
+ *   MODERN  2026-07-28 only: server/discover, then stateless requests
+ *           that carry their own `_meta`. Fails on a legacy server.
+ *   AUTO    probe server/discover; fall back to initialize on any
+ *           failure. Works against both kinds of server.
+ *
+ * On a modern connection cmcp_client_request (and the helpers built on
+ * it: tool_call, resource_read, prompt_get) drive multi round-trip
+ * requests by themselves: an `input_required` result is answered with
+ * the elicitation / sampling handlers and the declared roots, and the
+ * request is retried, up to 8 rounds. A missing handler fails the call
+ * with CMCP_EUNSUPPORTED. The raw call_async / wait pair returns the
+ * input_required result as is. cmcp_client_set_log_level then sets the
+ * per-request `logLevel` instead of sending logging/setLevel, and
+ * cmcp_client_notify_roots_changed returns CMCP_EUNSUPPORTED. */
+typedef enum {
+    CMCP_CLIENT_LEGACY = 0,
+    CMCP_CLIENT_AUTO   = 1,
+    CMCP_CLIENT_MODERN = 2,
+} cmcp_client_mode_t;
+
+/* Choose the era before connecting (handshake / connect_stdio).
+ * CMCP_EPROTOCOL once connected, CMCP_EINVAL for an unknown mode. */
+int cmcp_client_set_mode(cmcp_client_t *c, cmcp_client_mode_t mode);
+
+/* Non-zero when the connection runs on the modern revision (MODERN, or
+ * AUTO against a modern server). cmcp_client_server_protocol then
+ * reports "2026-07-28". */
+int cmcp_client_is_modern(const cmcp_client_t *c);
+
+/* ====================================================================== */
 /* Notification routing                                                    */
 /* ====================================================================== */
 
