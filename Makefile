@@ -124,7 +124,7 @@ crag-mcp: $(CRAG_MCP_BIN)
 $(CRAG_MCP_BIN): $(CRAG_MCP_SRC) tools/crag-mcp/crag_cutoff.c \
                  tools/crag-mcp/crag_cutoff.h $(BUILT_LIBS)
 	@test -d $(CRAG_DIR) || { echo "cRAG not found at $(CRAG_DIR) — set CRAG_DIR=..."; exit 1; }
-	$(CC) $(CFLAGS) -I$(CRAG_DIR)/include -o $@ $< tools/crag-mcp/crag_cutoff.c \
+	$(CC) $(CFLAGS) -I$(CRAG_DIR)/include -I$(CRAG_DIR)/third_party -o $@ $< tools/crag-mcp/crag_cutoff.c \
 	    $(BUILT_LIBS) \
 	    $(filter-out $(CRAG_DIR)/src/main.o, $(wildcard $(CRAG_DIR)/src/*.o)) \
 	    $(CRAG_DIR)/third_party/sqlite3.o \

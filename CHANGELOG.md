@@ -9,6 +9,10 @@ legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
 
 ## Unreleased
 
+- `make crag-mcp` builds without a system SQLite: `tools/crag-mcp/main.c`
+  includes `<sqlite3.h>`, which only the system header supplied. The rule
+  now adds `$(CRAG_DIR)/third_party`, the header matching the bundled
+  `sqlite3.o` it links. Found building it in a clean Debian container.
 - `cmcp-inspect --mode legacy|auto|modern` picks the protocol era, and the
   banner now prints the protocol version actually negotiated (it printed
   the build's legacy pin even when the server spoke another version).
