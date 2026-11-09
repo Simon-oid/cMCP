@@ -1,6 +1,6 @@
 # Nightly fuzz baselines (Tier 7.2)
 
-cMCP ships four libFuzzer harnesses (JSON, JSON-RPC, schema-validator,
+cMCP ships six libFuzzer harnesses (JSON, JSON-RPC, schema-validator,
 HTTP-parser). CI runs each one for 60 seconds on every push — the
 [`fuzz-smoke`](../Makefile) target. That catches the obvious crashes
 but not the deep-corpus discoveries that come from hour-scale
@@ -27,7 +27,7 @@ minimised input attached.
 | Permissions      | `contents: read`, `issues: write`              |
 
 Why 6h and not 24h: GitHub Actions free-tier ceiling on per-job
-wall-clock. Stacking 4 harnesses × 6h matrix-parallel gets the
+wall-clock. Stacking 6 harnesses × 6h matrix-parallel gets the
 equivalent of one 24h coverage budget per night, distributed across
 the four parsers. A self-hosted bare-metal runner could lift the
 per-harness ceiling — Tier 8 follow-up if traffic warrants the lab

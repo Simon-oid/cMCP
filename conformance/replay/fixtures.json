@@ -16,9 +16,46 @@
     "Prerequisite kinds:",
     "  - {kind:'cmd',  name:'ollama'}        skip if command missing",
     "  - {kind:'env',  name:'CRAG_TEST_DB'}  skip if env var unset",
-    "  - {kind:'file', path:'tools/x/y'}     skip if file absent"
+    "  - {kind:'file', path:'tools/x/y'}     skip if file absent",
+    "  - {kind:'ollama_model', name:'m'}     skip if `ollama list` lacks model m",
+    "",
+    "match_by_id: true pairs responses by JSON-RPC id instead of position,",
+    "for sessions where inline methods can overtake pooled tool calls."
   ],
   "fixtures": [
+    {
+      "name": "echo-server/modern_session",
+      "_note": [
+        "MCP 2026-07-28, no handshake: server/discover, tools/list,",
+        "tools/call (success and schema violation -> isError), and ping,",
+        "which the modern path no longer serves (-32601)."
+      ],
+      "match_by_id": true,
+      "fixture": "conformance/fixtures/echo-server/modern_session.jsonl",
+      "server": "examples/echo-server",
+      "prerequisites": [
+        {"kind": "file", "path": "examples/echo-server"}
+      ]
+    },
+    {
+      "name": "ask-server/mrtr_round_trip",
+      "_note": [
+        "Multi round-trip request: greet answers input_required with an",
+        "elicitation, the retry carries inputResponses and completes, and",
+        "a client without the elicitation capability gets -32021.",
+        "serverInfo.version is CMCP_VERSION, masked so a release bump",
+        "does not invalidate the fixture."
+      ],
+      "match_by_id": true,
+      "fixture": "conformance/fixtures/ask-server/mrtr_round_trip.jsonl",
+      "server": "examples/ask-server",
+      "output_masks": [
+        {"kind": "set", "path": "/result/_meta/io.modelcontextprotocol~1serverInfo/version", "value": "<version>"}
+      ],
+      "prerequisites": [
+        {"kind": "file", "path": "examples/ask-server"}
+      ]
+    },
     {
       "name": "echo-server/add_schema_type_mismatch",
       "fixture": "conformance/fixtures/echo-server/add_schema_type_mismatch.jsonl",
@@ -135,7 +172,8 @@
       ],
       "prerequisites": [
         {"kind": "file", "path": "tools/crag-mcp/crag-mcp"},
-        {"kind": "cmd",  "name": "ollama"}
+        {"kind": "cmd",  "name": "ollama"},
+        {"kind": "ollama_model", "name": "mxbai-embed-large"}
       ]
     },
     {

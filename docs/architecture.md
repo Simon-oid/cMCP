@@ -12,9 +12,30 @@ Three static link targets, share-and-stack:
 ```
 libcmcp_core.a    json + rpc + schema + types + transport_stdio
                   + transport_http (server) + transport_http_client
-libcmcp_server.a  + server.c + worker.c          (depends on core)
-libcmcp_client.a  + client.c + session.c         (depends on core)
+                  + era + http_modern + seal + sha256
+                  + schema_check + schema_format + xheader
+libcmcp_server.a  + server.c + worker.c + mrtr.c + subscriptions.c
+                                                  (depends on core)
+libcmcp_client.a  + client.c + session.c + client_modern.c
+                                                  (depends on core)
 ```
+
+Since v0.11.0 cMCP is **dual-era** (MCP 2026-07-28 next to 2025-11-25).
+The modern-revision rules sit in small modules of their own, so the
+legacy code paths stay as they were:
+
+| Module | Role |
+|---|---|
+| `era.c` | which era a request belongs to; required `_meta`; `server/discover`; `resultType` and cache hints on modern results |
+| `mrtr.c` | multi round-trip requests on the server: per-request caps and logLevel, queued input requests, `input_required`, -32021 |
+| `seal.c`, `sha256.c` | HMAC-SHA256 seal for `requestState` (method, primitive and expiry bound) |
+| `subscriptions.c` | `subscriptions/listen` registry and notification fan-out |
+| `http_modern.c` | Streamable HTTP request metadata: `Mcp-*` header checks (server) and construction (client), base64 sentinel, status mapping |
+| `schema_check.c`, `schema_format.c`, `xheader.c` | schema checks at registration, `format` checks, `x-mcp-header` lint / comparison / extraction |
+| `client_modern.c` | client `_meta`, MRTR retry construction, discover parsing |
+
+The per-phase design notes (why each rule exists, what was tested) are
+in the CHANGELOG entry for v0.11.0.
 
 The server and client sides of an MCP conversation share most of the
 machinery — JSON-RPC framing, message parsing, schema validation,

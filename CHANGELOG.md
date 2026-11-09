@@ -1,17 +1,21 @@
 # Changelog
 
 All notable changes to cMCP are recorded here. Phase numbers match
-[`TODO.md`](TODO.md) and the commit log. One MCP spec revision is
-pinned per release in `include/cmcp.h` (`CMCP_PROTOCOL_VERSION`).
+[`TODO.md`](TODO.md) and the commit log. Up to v0.10.0 one MCP spec
+revision was pinned per release (`CMCP_PROTOCOL_VERSION` in
+`include/cmcp.h`); since v0.11.0 cMCP is dual-era and pins two: the
+legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
+(`CMCP_PROTOCOL_VERSION_MODERN`).
 
-## Unreleased — dual-era: MCP 2026-07-28 (in progress)
+## v0.11.0 — dual-era: MCP 2026-07-28 (2026-11-09)
 
-cMCP is becoming *dual-era*: it keeps serving the legacy 2025-11-25
-revision through `initialize` and adds the modern, stateless
-2026-07-28 revision, chosen per request. Landing in phases; the stdio
-server path, multi round-trip requests, modern requests over Streamable
-HTTP, `subscriptions/listen`, the JSON Schema work and the dual-era
-client are done; the release work follows.
+cMCP is now *dual-era*: it keeps serving the legacy 2025-11-25 revision
+through `initialize` and adds the modern, stateless 2026-07-28 revision,
+chosen per request, on the server and on the client, over stdio and
+Streamable HTTP. Existing users see no change unless they opt in: a
+legacy client gets byte-identical answers, and `cmcp_client_t` stays on
+the legacy revision until `cmcp_client_set_mode` says otherwise. The
+behaviour changes that do apply to everyone are marked below.
 
 - **Modern server path (stdio).** A request whose `params._meta`
   carries `io.modelcontextprotocol/protocolVersion` or
@@ -133,6 +137,19 @@ client are done; the release work follows.
 - **Behaviour change:** `cmcp_server_log` now drops messages until a
   legacy session has completed its handshake (no one has opted in to
   server-wide logs before that).
+- **Release work.** The replay gate gains fixtures for a modern
+  session (`echo-server/modern_session`) and a full multi round-trip
+  (`ask-server/mrtr_round_trip`), a `match_by_id` option for sessions
+  whose responses legitimately reorder, an `--update NAME` re-record
+  mode, RFC 6901 escapes in masks, and an `ollama_model` prerequisite
+  (the crag-mcp dogfood fixture now skips instead of failing when its
+  embedding model is absent; its tool description was refreshed). Two
+  new libFuzzer harnesses run nightly: `fuzz_seal` (forgery and
+  round-trip properties of the requestState seal) and `fuzz_modern`
+  (the whole 2026-07-28 request surface, with a decode(encode(v)) == v
+  property for header values). `make check-spec-drift` now compares the
+  modern pin. The `format` checks moved out of `schema.c` into
+  `src/schema_format.c`.
 - **Internal:** `src/era.{c,h}` holds the modern request rules; the
   method chain in `server.c` moved into `dispatch_request`, shared by
   both eras.

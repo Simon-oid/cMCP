@@ -89,7 +89,8 @@ def apply_mask(obj: Any, path: str, repl: Any) -> Any:
     """
     if not path or path == "/":
         return repl
-    parts = [p for p in path.split("/") if p != ""]
+    parts = [p.replace("~1", "/").replace("~0", "~")  # RFC 6901
+             for p in path.split("/") if p != ""]
     cur = obj
     for p in parts[:-1]:
         if isinstance(cur, list):
@@ -118,7 +119,8 @@ def apply_text_regex(obj: Any, path: str, pattern: str, repl: str) -> Any:
     """Like apply_mask but treats the targeted leaf as a string and
     runs re.sub on it. Useful when only PART of a field is volatile
     (e.g. a temp-dir suffix inside a longer message)."""
-    parts = [p for p in path.split("/") if p != ""]
+    parts = [p.replace("~1", "/").replace("~0", "~")  # RFC 6901
+             for p in path.split("/") if p != ""]
     cur = obj
     for p in parts[:-1]:
         if isinstance(cur, list):
@@ -188,6 +190,17 @@ def check_prereqs(prereqs: list[dict]) -> str | None:
         elif kind == "file":
             if not Path(os.path.expandvars(p["path"])).exists():
                 return f"file not present: {p['path']}"
+        elif kind == "ollama_model":
+            # A fixture recorded against one embedding model cannot be
+            # replayed with another: skip, never fail or re-record.
+            try:
+                listing = subprocess.run(["ollama", "list"], capture_output=True,
+                                         text=True, timeout=10).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                return "ollama not reachable"
+            names = [ln.split()[0] for ln in listing.splitlines()[1:] if ln.strip()]
+            if not any(n.split(":")[0] == p["name"] for n in names):
+                return f"ollama model not installed: {p['name']}"
         else:
             return f"unknown prereq kind: {kind}"
     return None
@@ -208,8 +221,49 @@ def run_teardown(cmds: list[str], cwd: Path) -> None:
         subprocess.run(["bash", "-c", cmd], cwd=cwd, check=False)
 
 
-def replay_one(name: str, spec: dict) -> tuple[str, str]:
-    """Returns (status, detail) where status is PASS / FAIL / SKIP."""
+def rewrite_outputs(path: Path, observed: list[str]) -> bool:
+    """Replace the fixture's dir:'out' frames, in order, with `observed`.
+    In frames, timestamps and frame order are kept. Returns True when
+    anything changed."""
+    lines = path.read_text().splitlines()
+    out_i = 0
+    changed = False
+    new_lines = []
+    for line in lines:
+        if not line.strip():
+            new_lines.append(line)
+            continue
+        rec = json.loads(line)
+        if rec.get("dir") == "out" and out_i < len(observed):
+            if rec["frame"] != observed[out_i]:
+                rec["frame"] = observed[out_i]
+                changed = True
+            out_i += 1
+            line = json.dumps(rec, separators=(",", ":"))
+        new_lines.append(line)
+    if changed:
+        path.write_text("\n".join(new_lines) + "\n")
+    return changed
+
+
+def match_by_id(expected: list[str], observed: list[str],
+                masks: list[dict]) -> tuple[str, str]:
+    """Compare responses paired by JSON-RPC id instead of position."""
+    def by_id(frames: list[str]) -> dict:
+        return {json.dumps(json.loads(f).get("id")): f for f in frames}
+    exp, obs = by_id(expected), by_id(observed)
+    if set(exp) != set(obs):
+        return ("FAIL", f"response ids differ: expected {sorted(exp)}, got {sorted(obs)}")
+    for key in sorted(exp):
+        ok, diff = compare(exp[key], obs[key], masks)
+        if not ok:
+            return ("FAIL", f"response id {key} mismatch:\n{diff}")
+    return ("PASS", "")
+
+
+def replay_one(name: str, spec: dict, update: bool = False) -> tuple[str, str]:
+    """Returns (status, detail) where status is PASS / FAIL / SKIP, or
+    UPDATED when `update` rewrote the fixture's expected frames."""
     fixture_path = ROOT / spec["fixture"]
     if not fixture_path.exists():
         return ("FAIL", f"fixture not found: {fixture_path}")
@@ -279,6 +333,15 @@ def replay_one(name: str, spec: dict) -> tuple[str, str]:
                 f"expected {len(out_frames)} response frames, got {len(observed)}",
             )
 
+        if update:
+            # Re-record: the server's current answers become the expected
+            # frames. Review the diff before committing it.
+            return ("UPDATED", "") if rewrite_outputs(fixture_path, observed) \
+                else ("PASS", "")
+        if spec.get("match_by_id"):
+            # Inline methods (ping, capability errors) can overtake
+            # pooled tool calls, so pair responses by JSON-RPC id.
+            return match_by_id([f.body for f in out_frames], observed, masks)
         for i, (exp, act) in enumerate(zip(out_frames, observed)):
             ok, diff = compare(exp.body, act, masks)
             if not ok:
@@ -297,7 +360,13 @@ def main() -> int:
     with REGISTRY.open() as f:
         registry = json.load(f)
 
-    name_filter = sys.argv[1] if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    update = "--update" in args
+    args = [a for a in args if a != "--update"]
+    name_filter = args[0] if args else None
+    if update and not name_filter:
+        print("--update needs a fixture name filter", file=sys.stderr)
+        return 1
 
     pass_n = fail_n = skip_n = 0
     failures: list[tuple[str, str]] = []
@@ -305,8 +374,11 @@ def main() -> int:
         name = entry["name"]
         if name_filter and name_filter not in name:
             continue
-        status, detail = replay_one(name, entry)
-        if status == "PASS":
+        status, detail = replay_one(name, entry, update)
+        if status == "UPDATED":
+            print(f"  UPDATED  {name}  (review: git diff {entry['fixture']})")
+            pass_n += 1
+        elif status == "PASS":
             print(f"  PASS  {name}")
             pass_n += 1
         elif status == "SKIP":

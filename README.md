@@ -2,14 +2,16 @@
 
 [![CI](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Simon-oid/cMCP/actions/workflows/codeql.yml/badge.svg)](https://github.com/Simon-oid/cMCP/actions/workflows/codeql.yml)
-[![MCP spec](https://img.shields.io/badge/MCP%20spec-2025--11--25-blue)](https://modelcontextprotocol.io/specification/2025-11-25/)
+[![MCP spec](https://img.shields.io/badge/MCP%20spec-2026--07--28%20%2B%202025--11--25-blue)](https://modelcontextprotocol.io/specification/2026-07-28/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ![cMCP demo: spawn a server with cmcp-inspect, call tools, watch a symlink sandbox-escape get refused, then the raw JSON-RPC wire captured with cmcp-tee](docs/demo.gif)
 
 A from-scratch implementation of the
 [Model Context Protocol](https://modelcontextprotocol.io/) in pure C11
-— client **and** server, stdio **and** Streamable HTTP.
+— client **and** server, stdio **and** Streamable HTTP, and **dual-era**:
+it speaks the stateless MCP 2026-07-28 revision and the handshake-based
+2025-11-25 one, chosen per request.
 
 No C++. No external JSON library. No third-party MCP SDK. Hand-rolled
 JSON parser, hand-rolled JSON Schema validator (near-parity with Ajv),
@@ -18,6 +20,14 @@ libcurl (for the Streamable HTTP client transport).
 
 ## Highlights
 
+- **Dual-era MCP 2026-07-28 + 2025-11-25.** Stateless requests with
+  per-request `_meta`, `server/discover`, multi round-trip requests
+  with an HMAC-sealed `requestState`, `subscriptions/listen`,
+  session-less Streamable HTTP with validated `Mcp-*` headers and
+  `x-mcp-header`, JSON Schema 2020-12 — on both the server and the
+  client, next to the unchanged 2025-11-25 path. Verified in both
+  directions against the official Python SDK (its client against the
+  cMCP server, the cMCP client against its server).
 - **~43,000 `tools/call`/s** steady-state over stdio (p50 22 µs, p99
   27 µs; median of 5 runs on a Ryzen 7 5800X, 2026-11-08) — **~3.9×
   lower p50 latency than the official TypeScript SDK, ~43× lower than
@@ -32,9 +42,9 @@ libcurl (for the Streamable HTTP client transport).
 - **500/500 agreement with Ajv** across the JSON Schema validator
   conformance corpus
   ([`docs/schema-conformance.md`](docs/schema-conformance.md)).
-- **Fuzzed nightly** — four libFuzzer harnesses (JSON, JSON-RPC,
-  schema, HTTP parser), 6 hours each per night, zero outstanding
-  findings.
+- **Fuzzed nightly** — six libFuzzer harnesses (JSON, JSON-RPC,
+  schema, HTTP parser, the requestState seal, and the 2026-07-28
+  request surface), 6 hours each per night, zero outstanding findings.
 - **Threat-modelled and hardened** — STRIDE pass over five trust
   boundaries; SSRF egress guard, slowloris budgets, accept-rate token
   bucket, parser depth/size caps, credential log redaction

@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        harness: [json, rpc, schema, http]
+        harness: [json, rpc, schema, http, seal, modern]
 
     steps:
       - uses: actions/checkout@v6

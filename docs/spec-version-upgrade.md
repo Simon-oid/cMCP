@@ -3,16 +3,24 @@
 This document is the checklist to run when the spec-drift watch
 (`scripts/check-spec-version.sh`, exercised weekly in CI) reports that
 a newer dated revision exists upstream. It does **not** trigger
-automatically — cMCP pins one protocol version per release on purpose,
+automatically — cMCP pins its protocol versions per release on purpose,
 and a bump touches wire-relevant code paths that need a human reading
 the changelog.
+
+Since v0.11.0 cMCP is dual-era: `CMCP_PROTOCOL_VERSION_MODERN` is the
+newest revision served (stateless, per-request `_meta`) and
+`CMCP_PROTOCOL_VERSION` the legacy handshake revision. The drift watch
+compares the **modern** pin. A new revision of the stateless era is
+usually a bump of `CMCP_PROTOCOL_VERSION_MODERN` plus the supported list
+in `src/era.c`; a whole new era would need the kind of work v0.11.0 did
+(see its CHANGELOG entry).
 
 ## When this fires
 
 CI's `spec-drift` job runs `./scripts/check-spec-version.sh` and exits
 non-zero when:
 
-- `CMCP_PROTOCOL_VERSION` in `include/cmcp.h` doesn't match the
+- `CMCP_PROTOCOL_VERSION_MODERN` in `include/cmcp.h` doesn't match the
   newest dated directory under
   [`modelcontextprotocol/modelcontextprotocol@main:schema/`](https://github.com/modelcontextprotocol/modelcontextprotocol/tree/main/schema)
   (ignoring `draft/`).

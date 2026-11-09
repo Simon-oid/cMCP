@@ -137,7 +137,8 @@ cMCP carries two version numbers, deliberately separate:
 | Macro                    | What it identifies                              |
 |--------------------------|-------------------------------------------------|
 | `CMCP_VERSION`           | The cMCP package release (this SemVer policy). |
-| `CMCP_PROTOCOL_VERSION`  | The MCP wire protocol revision (e.g. `2025-11-25`).  |
+| `CMCP_PROTOCOL_VERSION`  | The legacy (handshake) MCP revision (`2025-11-25`).  |
+| `CMCP_PROTOCOL_VERSION_MODERN` | The modern (stateless) MCP revision (`2026-07-28`), since v0.11.0. |
 
 A package release can bump `CMCP_PROTOCOL_VERSION` without changing the
 public C surface — that goes in a MINOR (new behavior added) or even

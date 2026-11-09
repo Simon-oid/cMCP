@@ -23,7 +23,7 @@ LDLIBS  ?= -Wl,--as-needed $(CURL_LIBS) -Wl,--no-as-needed -lpthread -lm
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.
 CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c src/era.c \
                      src/sha256.c src/seal.c src/http_modern.c \
-                     src/schema_check.c src/xheader.c \
+                     src/schema_check.c src/schema_format.c src/xheader.c \
                      src/http_parser.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
@@ -527,7 +527,8 @@ FUZZ_CFLAGS  := -std=c11 -Wall -Wextra -O1 -g -Iinclude \
                 -fsanitize=address,undefined,fuzzer \
                 -fno-sanitize-recover=all
 
-FUZZ_BINS    := fuzz/fuzz_json fuzz/fuzz_rpc fuzz/fuzz_schema fuzz/fuzz_http
+FUZZ_BINS    := fuzz/fuzz_json fuzz/fuzz_rpc fuzz/fuzz_schema fuzz/fuzz_http \
+                fuzz/fuzz_seal fuzz/fuzz_modern
 
 # Each harness compiles the matching parser source directly + any
 # dependencies. Keeping the dep lists explicit beats wildcarding the
@@ -535,8 +536,14 @@ FUZZ_BINS    := fuzz/fuzz_json fuzz/fuzz_rpc fuzz/fuzz_schema fuzz/fuzz_http
 # not the whole transport stack.
 FUZZ_JSON_SRC   := src/json.c
 FUZZ_RPC_SRC    := src/json.c src/rpc.c src/types.c
-FUZZ_SCHEMA_SRC := src/json.c src/schema.c
+FUZZ_SCHEMA_SRC := src/json.c src/schema.c src/schema_format.c
 FUZZ_HTTP_SRC   := src/http_parser.c
+FUZZ_SEAL_SRC   := src/json.c src/seal.c src/sha256.c
+FUZZ_MODERN_SRC := src/json.c src/rpc.c src/types.c src/era.c src/schema.c \
+                   src/schema_format.c \
+                   src/schema_check.c src/xheader.c src/http_parser.c \
+                   src/http_modern.c src/seal.c src/sha256.c src/mrtr.c \
+                   src/subscriptions.c
 
 fuzz/fuzz_json: fuzz/fuzz_json.c $(FUZZ_JSON_SRC)
 	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
@@ -553,6 +560,14 @@ fuzz/fuzz_schema: fuzz/fuzz_schema.c $(FUZZ_SCHEMA_SRC)
 fuzz/fuzz_http: fuzz/fuzz_http.c $(FUZZ_HTTP_SRC)
 	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_seal: fuzz/fuzz_seal.c $(FUZZ_SEAL_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_modern: fuzz/fuzz_modern.c $(FUZZ_MODERN_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^ -lpthread -lm
 
 fuzz-build: $(FUZZ_BINS)
 

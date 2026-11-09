@@ -1,0 +1,8 @@
+POST /mcp HTTP/1.1
+Host: x
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: echo
+Content-Length: 355
+
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{},"inputResponses":{"n":{"action":"accept","content":{"name":"Ada"}}},"requestState":"v1.e30.AAAA","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"elicitation":{}},"io.modelcontextprotocol/logLevel":"debug"}}}

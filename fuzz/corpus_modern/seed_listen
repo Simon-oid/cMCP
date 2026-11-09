@@ -1,0 +1,7 @@
+POST /mcp HTTP/1.1
+Host: x
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: subscriptions/listen
+Content-Length: 272
+
+{"jsonrpc":"2.0","id":3,"method":"subscriptions/listen","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}},"notifications":{"toolsListChanged":true,"resourceSubscriptions":["a://x"]}}}

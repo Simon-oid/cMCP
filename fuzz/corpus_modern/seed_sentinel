@@ -1,0 +1,8 @@
+POST /mcp HTTP/1.1
+Host: x
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: prompts/get
+Mcp-Name: =?base64?cA==?=
+Content-Length: 198
+
+{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"p","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}}}

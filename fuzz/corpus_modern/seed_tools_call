@@ -1,0 +1,9 @@
+POST /mcp HTTP/1.1
+Host: x
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: echo
+Mcp-Param-Region: us-west1
+Content-Length: 234
+
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"region":"us-west1"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{"elicitation":{}}}}}

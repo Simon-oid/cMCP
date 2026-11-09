@@ -1,0 +1,7 @@
+POST /mcp HTTP/1.1
+Host: x
+Mcp-Param-Region: =?base64?dXMtd2VzdDE=?=
+Mcp-Param-N: 42.0
+Content-Length: 248
+
+{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"},"n":{"type":"integer","x-mcp-header":"N"}},"$defs":{"a":{"contains":{"const":1},"minContains":1}},"allOf":[{"$ref":"#/$defs/a"}],"dependentRequired":{"region":["n"]}}

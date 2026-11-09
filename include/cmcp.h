@@ -14,7 +14,7 @@
 
 /** Package version of this cMCP build (e.g. "0.8.0"). Independent of
  *  `CMCP_PROTOCOL_VERSION` — see docs/SEMVER.md. */
-#define CMCP_VERSION       "0.10.0"
+#define CMCP_VERSION       "0.11.0"
 
 /** Legacy (handshake-based) MCP revision this build speaks on the
  *  `initialize` path. The handshake captures whatever the peer

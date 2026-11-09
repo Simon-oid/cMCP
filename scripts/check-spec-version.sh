@@ -22,6 +22,11 @@ if [ ! -f "$HEADER" ]; then
     echo "check-spec-version: header not found at $HEADER (run from repo root)" >&2
     exit 2
 fi
+# cMCP is dual-era: the newest revision it serves is the modern pin
+# (CMCP_PROTOCOL_VERSION_MODERN); CMCP_PROTOCOL_VERSION is the legacy
+# handshake pin. Fall back to it for a single-era header.
+CURRENT=$(sed -nE 's/^#define[[:space:]]+CMCP_PROTOCOL_VERSION_MODERN[[:space:]]+"([^"]+)".*/\1/p' "$HEADER")
+[ -n "$CURRENT" ] || \
 CURRENT=$(sed -nE 's/^#define[[:space:]]+CMCP_PROTOCOL_VERSION[[:space:]]+"([^"]+)".*/\1/p' "$HEADER")
 if [ -z "$CURRENT" ]; then
     echo "check-spec-version: CMCP_PROTOCOL_VERSION not found in $HEADER" >&2

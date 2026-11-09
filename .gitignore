@@ -53,6 +53,8 @@ fuzz/fuzz_json
 fuzz/fuzz_rpc
 fuzz/fuzz_schema
 fuzz/fuzz_http
+fuzz/fuzz_seal
+fuzz/fuzz_modern
 fuzz/artifacts_*/
 fuzz/crash-*
 fuzz/timeout-*
