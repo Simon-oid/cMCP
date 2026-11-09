@@ -7,6 +7,16 @@ revision was pinned per release (`CMCP_PROTOCOL_VERSION` in
 legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
 (`CMCP_PROTOCOL_VERSION_MODERN`).
 
+## Unreleased
+
+- `cmcp-inspect --mode legacy|auto|modern` picks the protocol era, and the
+  banner now prints the protocol version actually negotiated (it printed
+  the build's legacy pin even when the server spoke another version).
+- `scripts/demo.sh`: a paced, narrated five-scene terminal demo (both
+  eras, the symlink-escape refusal, a schema error as a tool error, the
+  cMCP client against the Python SDK server, the measured test count),
+  for screen recording.
+
 ## v0.11.0 — dual-era: MCP 2026-07-28 (2026-11-09)
 
 cMCP is now *dual-era*: it keeps serving the legacy 2025-11-25 revision

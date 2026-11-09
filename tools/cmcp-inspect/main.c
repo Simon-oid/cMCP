@@ -59,11 +59,14 @@ static void print_help(void) {
 "  -c, --call NAME    After listing, call this tool.\n"
 "  -a, --args JSON    JSON object for --call (default '{}').\n"
 "  -j, --json         Emit raw JSON for results.\n"
+"  -m, --mode MODE    Protocol era: legacy (default), auto or modern\n"
+"                     (MCP 2026-07-28, no handshake).\n"
 "  -h, --help         Show this help and exit.\n"
 "\n"
 "Examples:\n"
 "  cmcp-inspect -- ./examples/echo-server\n"
-"  cmcp-inspect -c echo -a '{\"text\":\"hi\"}' -- ./examples/echo-server\n",
+"  cmcp-inspect -c echo -a '{\"text\":\"hi\"}' -- ./examples/echo-server\n"
+"  cmcp-inspect -m modern -- ./examples/echo-server\n",
           stderr);
 }
 
@@ -231,6 +234,7 @@ int main(int argc, char **argv) {
     const char *call_name = NULL;
     const char *call_args = NULL;
     int         json_mode = 0;
+    cmcp_client_mode_t mode = CMCP_CLIENT_LEGACY;
 
     /* Hand-rolled option parsing so we can stop cleanly at `--`.
      * getopt_long would also work but its handling of `--` is fine
@@ -239,16 +243,26 @@ int main(int argc, char **argv) {
         { "call", required_argument, NULL, 'c' },
         { "args", required_argument, NULL, 'a' },
         { "json", no_argument,       NULL, 'j' },
+        { "mode", required_argument, NULL, 'm' },
         { "help", no_argument,       NULL, 'h' },
         { NULL,   0,                 NULL,  0  },
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "c:a:jh", longopts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:a:jm:h", longopts, NULL)) != -1) {
         switch (opt) {
         case 'c': call_name = optarg; break;
         case 'a': call_args = optarg; break;
         case 'j': json_mode = 1;      break;
+        case 'm':
+            if      (strcmp(optarg, "legacy") == 0) mode = CMCP_CLIENT_LEGACY;
+            else if (strcmp(optarg, "auto") == 0)   mode = CMCP_CLIENT_AUTO;
+            else if (strcmp(optarg, "modern") == 0) mode = CMCP_CLIENT_MODERN;
+            else {
+                fprintf(stderr, "cmcp-inspect: unknown --mode '%s'\n", optarg);
+                return 2;
+            }
+            break;
         case 'h': print_help(); return 0;
         default:  print_help(); return 2;
         }
@@ -272,6 +286,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    cmcp_client_set_mode(cli, mode);
+
     /* Spawn the child, set up the stdio transport, and run the
      * handshake — all in one shot. cmcp_client_free will close the
      * transport and reap the child. */
@@ -287,9 +303,11 @@ int main(int argc, char **argv) {
     if (!json_mode) {
         const char *sn = cmcp_client_server_name(cli);
         const char *sv = cmcp_client_server_version(cli);
-        printf("Connected: %s %s (protocol %s)\n\n",
-                sn ? sn : "(unnamed)", sv ? sv : "?",
-                CMCP_PROTOCOL_VERSION);
+        /* The version actually in use, not the one this build pins. */
+        const char *pv = cmcp_client_server_protocol(cli);
+        printf("Connected: %s %s (protocol %s%s)\n\n",
+                sn ? sn : "(unnamed)", sv ? sv : "?", pv ? pv : "?",
+                cmcp_client_is_modern(cli) ? ", stateless" : "");
     }
 
     if (do_list(cli, json_mode) != 0) {
