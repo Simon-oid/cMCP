@@ -362,6 +362,9 @@ the rationale behind each design decision — is in
 
 Each deferral is a scope decision, not a gap discovered late — the
 rationale for each is recorded in [`CHANGELOG.md`](CHANGELOG.md).
+[`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md) collects these with the
+schema-validation edges, the threats only partly defended, and the
+reference servers' limits.
 
 ## Layout
 
