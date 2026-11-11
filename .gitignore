@@ -136,6 +136,7 @@ cMCP/
 graphify-out/
 # cRAG SQLite index — runtime data, may hold indexed content
 tools/crag-mcp/crag.db
+/crag.db
 # internal research note (IT)
 docs/Testare RAG e MCP_ Guida Dettagliata.md
 # Author's personal study guide — kept locally, never pushed. Not library
