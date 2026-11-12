@@ -25,7 +25,7 @@ jobs:
       matrix:
         target: [test, test-asan, test-tsan]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build dependencies
         run: |
@@ -82,7 +82,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build + coverage dependencies
         run: |
@@ -97,7 +97,7 @@ jobs:
       - name: Restore coverage baseline (Tier 7.4)
         id: restore-cov
         if: github.event_name == 'pull_request'
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: coverage-baseline/summary.txt
           key: coverage-baseline-main-${{ github.event.pull_request.base.sha }}
@@ -178,7 +178,7 @@ jobs:
 
       - name: Cache coverage baseline (Tier 7.4)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: coverage-baseline/summary.txt
           key: coverage-baseline-main-${{ github.sha }}
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build + analysis dependencies
         run: |
@@ -217,7 +217,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install build + bench dependencies
         run: |
@@ -282,7 +282,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # cmake is the only non-default dep on top of ci's libcurl baseline.
       # The smoke harness gates both pkg-config + CMake find_package wiring,
