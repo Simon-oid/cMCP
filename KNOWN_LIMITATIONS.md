@@ -73,9 +73,6 @@ Out of the library's reach altogether:
   drops far-off-topic chunks only. A same-domain question whose fact is
   absent still returns plausible chunks, and the agent must check them, as
   the tool's description says.
-- **`crag-mcp` returns text, not structured content.** Clients parse
-  `[cos … bm25 … fusion …] path` lines. cMCP supports structured tool output,
-  but this server does not use it yet.
 - **`filesystem-mcp` is bounded to one root,** with symlink leaves refused
   on write ([`docs/case-study-symlink-escape.md`](docs/case-study-symlink-escape.md)).
   It has no delete, rename or permission tools.

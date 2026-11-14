@@ -106,6 +106,58 @@ static cmcp_json_t *single_text_array(const char *text) {
 #define CRAG_SEARCH_DEFAULT_K  5
 #define CRAG_SEARCH_MAX_K      20
 
+/* structuredContent for crag_search. The text content items stay as they
+ * were (`[cos … bm25 … fusion …] path` + body) for clients that only read
+ * `content`; hosts that want the scores parse these fields instead of
+ * regex-matching the text. `status` tells the four non-error outcomes
+ * apart: ok, empty_index, no_match (retriever returned nothing),
+ * below_threshold (hits existed but none cleared the cosine gate). */
+static const char CRAG_SEARCH_OUTPUT_SCHEMA[] =
+    "{"
+      "\"type\":\"object\","
+      "\"properties\":{"
+        "\"status\":{\"enum\":[\"ok\",\"empty_index\",\"no_match\","
+                                "\"below_threshold\"]},"
+        "\"results\":{\"type\":\"array\",\"items\":{"
+          "\"type\":\"object\","
+          "\"properties\":{"
+            "\"source\":{\"type\":\"string\"},"
+            "\"cosine\":{\"type\":\"number\"},"
+            "\"bm25\":{\"type\":\"number\"},"
+            "\"fusion\":{\"type\":\"number\"},"
+            "\"text\":{\"type\":\"string\"}"
+          "},"
+          "\"required\":[\"source\",\"cosine\",\"bm25\",\"fusion\",\"text\"],"
+          "\"additionalProperties\":false"
+        "}}"
+      "},"
+      "\"required\":[\"status\",\"results\"],"
+      "\"additionalProperties\":false"
+    "}";
+
+static cmcp_json_t *search_hit_json(const char *src, const char *txt,
+                                     const crag_score_t *sc) {
+    cmcp_json_t *o = cmcp_json_new_object();
+    if (!o) return NULL;
+    cmcp_json_object_set(o, "source", cmcp_json_new_string(src));
+    cmcp_json_object_set(o, "cosine", cmcp_json_new_double((double)sc->cosine));
+    cmcp_json_object_set(o, "bm25",   cmcp_json_new_double((double)sc->bm25));
+    cmcp_json_object_set(o, "fusion", cmcp_json_new_double((double)sc->fusion));
+    cmcp_json_object_set(o, "text",   cmcp_json_new_string(txt));
+    return o;
+}
+
+/* Attach {status, results}. `results` is consumed; NULL → empty array. */
+static void set_search_structured(cmcp_handler_ctx_t *hctx,
+                                  const char *status, cmcp_json_t *results) {
+    cmcp_json_t *o = cmcp_json_new_object();
+    if (!o) { cmcp_json_free(results); return; }
+    cmcp_json_object_set(o, "status", cmcp_json_new_string(status));
+    cmcp_json_object_set(o, "results",
+                         results ? results : cmcp_json_new_array());
+    cmcp_handler_set_structured(hctx, o);
+}
+
 /* The minimum cosine similarity for a hybrid-search result to count as a
  * real match is resolved at startup into ctx->min_cosine. The RRF fusion
  * score cannot be thresholded — its range is structural (~0.033 = ranked
@@ -117,7 +169,6 @@ static cmcp_json_t *single_text_array(const char *text) {
 static int crag_search_handler(const cmcp_json_t *args, void *userdata,
                                 cmcp_handler_ctx_t *hctx,
                                 cmcp_json_t **out_content, int *out_is_error) {
-    (void)hctx;
     crag_mcp_ctx_t *ctx = (crag_mcp_ctx_t *)userdata;
 
     /* Schema validator already enforced shape; safe to assume args is
@@ -170,8 +221,10 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
             *out_content = single_text_array(
                 "(index is empty — 0 chunks; check the --db path / ingest, "
                 "this is NOT a no-match result)");
+            set_search_structured(hctx, "empty_index", NULL);
         } else {
             *out_content = single_text_array("(no matching chunks)");
+            set_search_structured(hctx, "no_match", NULL);
         }
         return CMCP_OK;
     }
@@ -181,8 +234,11 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
      *   <chunk body>
      * cosine leads because it is the only calibrated relevance signal;
      * bm25 and fusion follow for transparency / debugging.            */
-    cmcp_json_t *arr = cmcp_json_new_array();
-    if (!arr) {
+    cmcp_json_t *arr  = cmcp_json_new_array();
+    cmcp_json_t *hits = cmcp_json_new_array();
+    if (!arr || !hits) {
+        cmcp_json_free(arr);
+        cmcp_json_free(hits);
         for (int i = 0; i < n; i++) {
             free(results[i].source);
             free(results[i].text);
@@ -212,6 +268,8 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
                           (double)scores[i].cosine, (double)scores[i].bm25,
                           (double)scores[i].fusion, src, txt);
                 cmcp_json_array_append(arr, text_item(buf));
+                cmcp_json_array_append(hits,
+                                       search_hit_json(src, txt, &scores[i]));
                 free(buf);
                 emitted++;
             }
@@ -228,17 +286,20 @@ static int crag_search_handler(const cmcp_json_t *args, void *userdata,
      * match — so report them distinctly (F1). */
     if (emitted == 0) {
         cmcp_json_free(arr);
+        cmcp_json_free(hits);
         *out_is_error = 0;
         /* n>0 here, so the index is non-empty: every hit fell below the
          * relevance gate. (Empty-index is handled at the n==0 branch.) */
         *out_content = single_text_array(
             "(no chunk cleared the relevance threshold — the index is "
             "non-empty but nothing matched this query)");
+        set_search_structured(hctx, "below_threshold", NULL);
         return CMCP_OK;
     }
 
     *out_is_error = 0;
     *out_content  = arr;
+    set_search_structured(hctx, "ok", hits);
     return CMCP_OK;
 }
 
@@ -387,7 +448,9 @@ int main(int argc, char **argv) {
                         "special syntax). Returns up to k chunks ranked by "
                         "relevance, one text content item per chunk, each "
                         "prefixed with `[cos … bm25 … fusion …] <path>` "
-                        "followed by the chunk body verbatim. "
+                        "followed by the chunk body verbatim. The same hits "
+                        "are in structuredContent as {status, results: "
+                        "[{source, cosine, bm25, fusion, text}]}. "
                         "IMPORTANT — this is a RETRIEVER, not a relevance "
                         "judge: it returns the nearest chunks, NOT a verdict "
                         "that they answer your question. A coarse cosine gate "
@@ -412,6 +475,7 @@ int main(int argc, char **argv) {
               "\"required\":[\"query\"],"
               "\"additionalProperties\":false"
             "}",
+        .output_schema = CRAG_SEARCH_OUTPUT_SCHEMA,
         .handler  = crag_search_handler,
         .userdata = &ctx,
     });

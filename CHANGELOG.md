@@ -9,6 +9,14 @@ legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
 
 ## Unreleased
 
+- `crag-mcp`: `crag_search` returns `structuredContent`
+  `{status, results: [{source, cosine, bm25, fusion, text}]}` and declares
+  it as `outputSchema`, so hosts no longer regex-parse the
+  `[cos … bm25 … fusion …] path` text (still sent, unchanged, for clients
+  that only read `content`). `status` is `ok`, `below_threshold`,
+  `no_match` or `empty_index`. Re-recorded the dogfood replay fixture: it
+  also still expected `(no matching chunks)` from before the empty-index
+  message, a staleness CI missed because the fixture skips without ollama.
 - `make crag-mcp` builds without a system SQLite: `tools/crag-mcp/main.c`
   includes `<sqlite3.h>`, which only the system header supplied. The rule
   now adds `$(CRAG_DIR)/third_party`, the header matching the bundled

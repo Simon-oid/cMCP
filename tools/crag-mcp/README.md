@@ -58,6 +58,35 @@ matches on one of them. If every hit falls below it, the tool returns a
 single `(no chunk cleared the relevance threshold)` item — a valid,
 non-error answer to a query nothing matches.
 
+#### Structured output
+
+Every non-error result also carries `structuredContent`, declared by the
+tool's `outputSchema`, so hosts read the scores as fields instead of
+parsing the text above (which stays, for clients that only read
+`content`):
+
+```json
+{
+  "status": "ok",
+  "results": [
+    { "source": "path/to/source.md", "cosine": 0.715, "bm25": 12.62,
+      "fusion": 0.033, "text": "<chunk body>" }
+  ]
+}
+```
+
+`status` separates the outcomes the text only hints at:
+
+| `status`          | Meaning                                                   |
+|-------------------|-----------------------------------------------------------|
+| `ok`              | `results` holds the hits that cleared the cosine gate     |
+| `below_threshold` | the index is non-empty, but no hit cleared the gate       |
+| `no_match`        | the retriever returned nothing for a non-empty index      |
+| `empty_index`     | 0 chunks: wrong `--db` path or failed ingest, not a miss  |
+
+`results` is empty for every status but `ok`. Tool errors (`isError`:
+embedding or retrieval failure) carry no `structuredContent`.
+
 Default `k` is 5; the server also clamps to `[1, 20]` defensively.
 
 ### `crag_stats`
