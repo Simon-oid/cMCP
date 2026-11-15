@@ -614,7 +614,8 @@ INSTALL_DIR     ?= $(INSTALL) -d -m 755
 
 # Single source of truth for the package version: CMCP_VERSION in
 # include/cmcp.h. Awk extracts it so we don't fork bumping the version.
-VERSION       := $(shell awk '/^#define CMCP_VERSION[ \t]/ {gsub(/"/, "", $$3); print $$3; exit}' include/cmcp.h)
+# "." for "#": GNU make 3.81 (macOS) reads a "#" even inside $(shell) as a comment.
+VERSION       := $(shell awk '/^.define CMCP_VERSION[ \t]/ {gsub(/"/, "", $$3); print $$3; exit}' include/cmcp.h)
 VERSION_MAJOR := $(firstword $(subst ., ,$(VERSION)))
 
 PUBLIC_HEADERS := $(wildcard include/cmcp*.h)
