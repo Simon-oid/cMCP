@@ -1124,12 +1124,22 @@ static void watchdog_sweep(cmcp_server_t *s) {
     pthread_mutex_unlock(&s->inflight_mu);
 }
 
+/* The watchdog's condvar clock. macOS has no pthread_condattr_setclock,
+ * so there the 200 ms poll waits on CLOCK_REALTIME: a wall-clock step
+ * can stretch one poll, never a deadline (deadlines are CLOCK_MONOTONIC,
+ * compared in watchdog_sweep). */
+#if defined(__APPLE__)
+#define WATCHDOG_CV_CLOCK CLOCK_REALTIME
+#else
+#define WATCHDOG_CV_CLOCK CLOCK_MONOTONIC
+#endif
+
 static void *watchdog_main(void *arg) {
     watchdog_t *wd = (watchdog_t *)arg;
     pthread_mutex_lock(&wd->mu);
     while (!wd->stop) {
         struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
+        clock_gettime(WATCHDOG_CV_CLOCK, &ts);
         ts.tv_nsec += 200L * 1000 * 1000;   /* 200ms poll */
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
         pthread_cond_timedwait(&wd->cv, &wd->mu, &ts);
@@ -1151,7 +1161,9 @@ static int watchdog_start(watchdog_t *wd, cmcp_server_t *s) {
 
     pthread_condattr_t ca;
     pthread_condattr_init(&ca);
-    pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
+#if !defined(__APPLE__)
+    pthread_condattr_setclock(&ca, WATCHDOG_CV_CLOCK);
+#endif
     if (pthread_mutex_init(&wd->mu, NULL) != 0) {
         pthread_condattr_destroy(&ca);
         return CMCP_ENOMEM;
