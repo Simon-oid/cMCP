@@ -1,6 +1,7 @@
 # cMCP
 
 [![CI](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml)
+[![Coverage 87.6% (2026-11-15), no-drop gate](https://img.shields.io/badge/coverage-87.6%25%20%C2%B7%20no--drop%20gate-brightgreen)](https://github.com/Simon-oid/cMCP/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Simon-oid/cMCP/actions/workflows/codeql.yml/badge.svg)](https://github.com/Simon-oid/cMCP/actions/workflows/codeql.yml)
 [![MCP spec](https://img.shields.io/badge/MCP%20spec-2026--07--28%20%2B%202025--11--25-blue)](https://modelcontextprotocol.io/specification/2026-07-28/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
