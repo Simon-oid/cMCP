@@ -1,0 +1,7 @@
+# Applied to changed lines only (CI: git clang-format against the base
+# commit). The existing code is not reformatted in bulk: a quarter of its
+# lines would move, and blame with them.
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 80
+SortIncludes: Never
