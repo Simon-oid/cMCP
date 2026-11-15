@@ -147,6 +147,7 @@ struct cmcp_client {
     pthread_t                   reader;
     int                         reader_started;
     atomic_int                  shutting_down;
+    atomic_int reader_exited; /* set by the reader as it returns */
 
     pthread_mutex_t             list_mu;
     pending_completion_t       *active_head;       /* doubly-linked list */
@@ -524,11 +525,21 @@ static void cancel_all_waiters(cmcp_client_t *c) {
     pthread_mutex_unlock(&c->list_mu);
 }
 
+static void reader_loop(cmcp_client_t *c);
+
+/* The reader's last act is to say it is done, so cmcp_client_free can
+ * wait for it portably (pthread_tryjoin_np is a glibc extension). */
 static void *reader_main(void *arg) {
     cmcp_client_t *c = (cmcp_client_t *)arg;
+    reader_loop(c);
+    atomic_store_explicit(&c->reader_exited, 1, memory_order_release);
+    return NULL;
+}
+
+static void reader_loop(cmcp_client_t *c) {
     for (;;) {
         if (atomic_load_explicit(&c->shutting_down, memory_order_relaxed))
-            return NULL;
+            return;
         char *frame = NULL; size_t flen = 0;
         int rc = cmcp_transport_read(c->transport, &frame, &flen);
         if (rc != CMCP_OK) {
@@ -539,11 +550,11 @@ static void *reader_main(void *arg) {
             if (!atomic_load_explicit(&c->shutting_down,
                                        memory_order_relaxed))
                 cancel_all_waiters(c);
-            return NULL;     /* EIO / EOF / signal-interrupted shutdown */
+            return; /* EIO / EOF / signal-interrupted shutdown */
         }
         if (atomic_load_explicit(&c->shutting_down, memory_order_relaxed)) {
             free(frame);
-            return NULL;
+            return;
         }
         cmcp_rpc_message_t *msgs = NULL; size_t n = 0;
         int prc = cmcp_rpc_parse(frame, flen, &msgs, &n);
@@ -644,14 +655,13 @@ void cmcp_client_free(cmcp_client_t *c) {
      * and the actual blocking call. */
     if (c->reader_started) {
         if (c->transport) cmcp_transport_wake(c->transport);
-        for (;;) {
-            int jr = pthread_tryjoin_np(c->reader, NULL);
-            if (jr == 0) break;
+        while (!atomic_load_explicit(&c->reader_exited, memory_order_acquire)) {
             if (c->transport) cmcp_transport_wake(c->transport);
             pthread_kill(c->reader, CMCP_WAKE_SIGNAL);
             struct timespec ts = { 0, 100000 };  /* 100us */
             nanosleep(&ts, NULL);
         }
+        pthread_join(c->reader, NULL);
         c->reader_started = 0;
     }
 
@@ -1959,6 +1969,7 @@ int cmcp_client_handshake(cmcp_client_t *c, cmcp_transport_t *t) {
 
     /* Reader must be running before we send the initialize request,
      * since its response comes back through the pending table. */
+    atomic_store_explicit(&c->reader_exited, 0, memory_order_relaxed);
     if (pthread_create(&c->reader, NULL, reader_main, c) != 0) {
         c->transport = NULL;
         return CMCP_EIO;
@@ -2032,6 +2043,7 @@ int cmcp_client_connect_stdio(cmcp_client_t *c,
     c->transport     = t;
     c->own_transport = 1;
 
+    atomic_store_explicit(&c->reader_exited, 0, memory_order_relaxed);
     if (pthread_create(&c->reader, NULL, reader_main, c) != 0) {
         cmcp_transport_close(t);
         c->transport = NULL;

@@ -57,6 +57,37 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Portability (Linux and macOS). A write to a peer that went away must not
+ * raise SIGPIPE in the host process: Linux takes MSG_NOSIGNAL per send,
+ * macOS takes SO_NOSIGPIPE per socket. Neither changes the process's
+ * signal disposition, which a library must leave alone. */
+#ifdef MSG_NOSIGNAL
+#define CMCP_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define CMCP_SEND_FLAGS 0
+#endif
+
+static void no_sigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+    (void)fd;
+#endif
+}
+
+/* socket() with close-on-exec: atomic where SOCK_CLOEXEC exists. */
+static int socket_cloexec(int family, int type, int proto) {
+#ifdef SOCK_CLOEXEC
+    return socket(family, type | SOCK_CLOEXEC, proto);
+#else
+    int fd = socket(family, type, proto);
+    if (fd >= 0)
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    return fd;
+#endif
+}
 #include <strings.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -320,7 +351,7 @@ static int http_read_request(int fd, conn_budget_t *budget,
 static int send_all(int fd, const char *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, buf + sent, len - sent, MSG_NOSIGNAL);
+        ssize_t n = send(fd, buf + sent, len - sent, CMCP_SEND_FLAGS);
         if (n <= 0) return CMCP_EIO;
         sent += (size_t)n;
     }
@@ -681,7 +712,7 @@ static void maybe_keepalive(sse_conn_t *c, long long *last_ms) {
     if (now - *last_ms < HTTP_LISTEN_KEEPALIVE_MS) return;
     *last_ms = now;
     pthread_mutex_lock(&c->owner->sse_mu);
-    (void)send(c->fd, ":\n\n", 3, MSG_NOSIGNAL);
+    (void)send(c->fd, ":\n\n", 3, CMCP_SEND_FLAGS);
     pthread_mutex_unlock(&c->owner->sse_mu);
 }
 
@@ -1510,6 +1541,7 @@ static void *acceptor_main(void *arg) {
             if (errno == EINTR || errno == EAGAIN) continue;
             break;
         }
+        no_sigpipe(cfd);
 
         /* Accept-rate gate (6.5.2). Peer's connection is already
          * established at the kernel layer; we send a 503 and close
@@ -1859,8 +1891,7 @@ cmcp_transport_t *cmcp_transport_http_listen(const char *host,
 
     int fd = -1;
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC,
-                     ai->ai_protocol);
+        fd = socket_cloexec(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) continue;
         int yes = 1;
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);

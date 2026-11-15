@@ -17,7 +17,13 @@ LDFLAGS ?=
 # any transport_http_client.o it pulled has already surfaced the undefined
 # curl_* symbols that keep the library. pthread/m are genuinely universal, so
 # --no-as-needed pins them unconditionally.
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+# Apple's ld has no --as-needed; it already omits unused dylibs (-dead_strip_dylibs).
+LDLIBS  ?= $(CURL_LIBS) -lpthread -lm
+else
 LDLIBS  ?= -Wl,--as-needed $(CURL_LIBS) -Wl,--no-as-needed -lpthread -lm
+endif
 
 # --- Source partitioning into three link targets ---------------------------
 # Lists are wildcard-matched so the Makefile naturally grows as phases land.

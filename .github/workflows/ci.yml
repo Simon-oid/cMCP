@@ -53,6 +53,21 @@ jobs:
         if: matrix.target == 'test'
         run: scripts/test-stats.sh --check test.log
 
+  # Portability: the library and its test suite on macOS (clang, Apple ld,
+  # brew's libcurl). The sanitizer layers run on Linux only.
+  test-macos:
+    name: make test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install dependencies
+        run: brew install pkg-config curl
+      - name: make test
+        run: |
+          export PKG_CONFIG_PATH="$(brew --prefix curl)/lib/pkgconfig"
+          make test
+
   format:
     name: clang-format (changed lines)
     runs-on: ubuntu-latest
