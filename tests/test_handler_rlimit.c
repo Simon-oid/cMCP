@@ -56,6 +56,11 @@
  * explicitly and we honour it here. */
 static int unsafe_to_tighten(void) {
     if (UNDER_SANITIZER) return 1;
+#if defined(__APPLE__)
+    /* macOS accepts RLIMIT_AS but does not enforce a finite one: the knob
+       is inert there (KNOWN_LIMITATIONS.md), so only the no-op cases run. */
+    return 1;
+#endif
     const char *pre = getenv("LD_PRELOAD");
     if (pre && (strstr(pre, "vgpreload") || strstr(pre, "valgrind")))
         return 1;
@@ -151,8 +156,10 @@ int main(void) {
     RUN_CHILD("test_negative_is_noop", body_expect_noop("-512"));
 
     if (unsafe_to_tighten()) {
-        fprintf(stderr, "  - test_tightens (skipped: sanitizer/valgrind/emulation)\n");
-        fprintf(stderr, "  - test_never_raises (skipped: sanitizer/valgrind/emulation)\n");
+        fprintf(stderr, "  - test_tightens (skipped: "
+                        "sanitizer/valgrind/emulation/macOS)\n");
+        fprintf(stderr, "  - test_never_raises (skipped: "
+                        "sanitizer/valgrind/emulation/macOS)\n");
     } else {
         RUN_CHILD("test_tightens",     body_expect_tighten());
         RUN_CHILD("test_never_raises", body_never_raise());
