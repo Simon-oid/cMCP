@@ -5,9 +5,13 @@ reasoning in [`CHANGELOG.md`](CHANGELOG.md) and the documents linked below.
 
 ## Scope (deliberate)
 
-- **Linux only** (x86-64 and aarch64). The transports use `fork`, pipes and
-  pthreads, and Linux is what CI builds and tests. macOS and Windows are not
-  supported.
+- **Linux and macOS; no Windows.** The transports use `fork`, pipes and
+  pthreads. CI runs the full suite on Linux (x86-64 and aarch64, with
+  ASan/UBSan, TSan and valgrind) and on macOS (Apple silicon, plain
+  build: the sanitizer layers run on Linux only).
+- **On macOS `CMCP_HANDLER_RLIMIT_AS_MB` is inert:** macOS does not
+  enforce a finite `RLIMIT_AS`, so the opt-in memory cap has no effect
+  there.
 - **No OAuth 2.1** or any other application-layer authentication. The
   library trusts the request it receives: authentication is the job of the
   proxy in front of it ([`docs/threat-model.md`](docs/threat-model.md)).

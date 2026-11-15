@@ -9,6 +9,13 @@ legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
 
 ## Unreleased
 
+- **macOS support**: the library and the whole test suite build and pass
+  on macOS, now a CI job. `pthread_tryjoin_np` (glibc) became an exit flag
+  the client's reader sets; `MSG_NOSIGNAL` / `SOCK_CLOEXEC` fall back to
+  `SO_NOSIGPIPE` / `fcntl`; the watchdog's condvar waits on
+  `CLOCK_REALTIME` there (no `pthread_condattr_setclock`; deadlines stay
+  monotonic); the Makefile works with GNU make 3.81 and Apple's ld.
+  `CMCP_HANDLER_RLIMIT_AS_MB` has no effect on macOS.
 - `resources/templates/list` and template-routed `resources/read`:
   `cmcp_server_add_resource_template` registers an RFC 6570 template
   (`{var}` and `{+var}`; other operators refused with `CMCP_EINVAL`). A URI

@@ -350,9 +350,9 @@ the rationale behind each design decision — is in
 
 ### Known limitations (deliberate)
 
-- **Linux-only.** The transports use `fork`/pipes/pthreads; Linux
-  (x86-64 and aarch64) is what CI builds and tests. macOS and Windows
-  are not supported.
+- **Linux and macOS, no Windows.** The transports use
+  `fork`/pipes/pthreads. CI runs the suite on Linux (x86-64, aarch64,
+  under sanitizers) and on macOS.
 - **OAuth 2.1 deferred** — no remote authenticated-server consumer in
   sight yet. TLS is terminator-only by design (run the HTTP transport
   behind nginx/caddy); rationale in
