@@ -21,6 +21,9 @@ UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 # Apple's ld has no --as-needed; it already omits unused dylibs (-dead_strip_dylibs).
 LDLIBS  ?= $(CURL_LIBS) -lpthread -lm
+# The sources define _POSIX_C_SOURCE, which on macOS hides the BSD
+# extensions glibc's _DEFAULT_SOURCE keeps (MSG_DONTWAIT, SO_NOSIGPIPE).
+override CFLAGS += -D_DARWIN_C_SOURCE
 else
 LDLIBS  ?= -Wl,--as-needed $(CURL_LIBS) -Wl,--no-as-needed -lpthread -lm
 endif
