@@ -276,6 +276,75 @@ static void test_both_eras_on_one_process(void) {
     rig_stop(&r);
 }
 
+/* resources/templates/list and completion/complete on the modern path. */
+static int tmpl_read(const char *uri, void *u, cmcp_handler_ctx_t *h,
+                     cmcp_json_t **out, int *is_error) {
+    (void)u;
+    (void)h;
+    *out = cmcp_resource_text_contents(uri, "text/plain", uri);
+    *is_error = 0;
+    return CMCP_OK;
+}
+
+static int one_value(const char *type, const char *id, const char *arg,
+                     const char *value, const cmcp_json_t *ctx, void *u,
+                     cmcp_json_t **out, int *more) {
+    (void)type;
+    (void)id;
+    (void)arg;
+    (void)value;
+    (void)ctx;
+    (void)u;
+    (void)more;
+    *out = cmcp_json_new_array();
+    cmcp_json_array_append(*out, cmcp_json_new_string("users"));
+    return CMCP_OK;
+}
+
+static int add_templates(cmcp_server_t *srv) {
+    if (cmcp_server_add_resource_template(
+            srv, &(cmcp_resource_template_t){.uri_template = "db://{table}",
+                                             .name = "table",
+                                             .read = tmpl_read}) != CMCP_OK)
+        return -1;
+    return cmcp_server_set_completion(srv, one_value, NULL);
+}
+
+static void test_templates_and_completion_on_modern_path(void) {
+    rig_t r;
+    TEST_ASSERT(rig_start(&r, "modern-server", "1.2.3", add_templates) == 0);
+
+    cmcp_json_t *v = exchange(&r, "{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":"
+                                  "\"resources/templates/list\","
+                                  "\"params\":{" META_OK "}}");
+    const cmcp_json_t *res = get(v, "result");
+    TEST_ASSERT(res != NULL);
+    assert_modern_complete(res);
+    assert_cache_hints(res);
+    const cmcp_json_t *list = get(res, "resourceTemplates");
+    TEST_ASSERT(list && cmcp_json_array_len(list) == 1);
+    cmcp_json_free(v);
+
+    v = exchange(
+        &r, "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"completion/complete\","
+            "\"params\":{\"ref\":{\"type\":\"ref/resource\",\"uri\":\"db://"
+            "{table}\"},"
+            "\"argument\":{\"name\":\"table\",\"value\":\"u\"}," META_OK "}}");
+    res = get(v, "result");
+    TEST_ASSERT(res != NULL);
+    assert_modern_complete(res);
+    TEST_ASSERT(array_has_str(get(get(res, "completion"), "values"), "users"));
+    cmcp_json_free(v);
+
+    v = exchange(
+        &r, "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"server/discover\","
+            "\"params\":{" META_OK "}}");
+    TEST_ASSERT(get(get(get(v, "result"), "capabilities"), "completions") !=
+                NULL);
+    cmcp_json_free(v);
+    rig_stop(&r);
+}
+
 int main(void) {
     TEST_RUN(test_discover_reports_both_eras);
     TEST_RUN(test_missing_protocol_version_is_invalid_params);
@@ -287,5 +356,6 @@ int main(void) {
     TEST_RUN(test_legacy_path_unchanged);
     TEST_RUN(test_legacy_request_before_initialize_still_refused);
     TEST_RUN(test_both_eras_on_one_process);
+    TEST_RUN(test_templates_and_completion_on_modern_path);
     TEST_DONE();
 }

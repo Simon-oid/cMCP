@@ -15,10 +15,9 @@
 
 /* Methods the server answers on the modern path. */
 static const char *const MODERN_METHODS[] = {
-    "server/discover",
-    "tools/list",     "tools/call",
-    "resources/list", "resources/read",
-    "prompts/list",   "prompts/get",
+    "server/discover",      "tools/list",     "tools/call",
+    "resources/list",       "resources/read", "resources/templates/list",
+    "prompts/list",         "prompts/get",    "completion/complete",
     "subscriptions/listen",
 };
 

@@ -1,0 +1,2 @@
+db://{table}/rows/{id}
+db://users/rows/42

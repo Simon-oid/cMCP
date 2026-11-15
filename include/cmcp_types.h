@@ -30,6 +30,7 @@ typedef struct {
     int resources_list_changed;   /* resources/list_changed */
     int prompts_list_changed;     /* prompts/list_changed */
     int logging;                  /* logging methods */
+    int completions;              /* completion/complete */
 } cmcp_server_capabilities_t;
 
 typedef struct {

@@ -1019,13 +1019,8 @@ setLevel it cannot honour.
   multiple transports.
 - OAuth 2.1 on the HTTP transport. Deferred — no remote authed cMCP
   server in sight for the target consumer (a local agent host).
-- `completion/complete` (argument autocomplete for prompts and
-  resources). Low value for an autonomous agent — the agent's LLM
-  picks arguments, it does not drive a completion menu. Implement
-  if an interactive host ever consumes cMCP.
-- `resources/templates/list` (RFC 6570 URI-templated resources).
-  Needs a URI-template engine cMCP does not have; deferred until a
-  templated server is real.
+- A typed client wrapper for `completion/complete` (the server side and
+  `resources/templates/list` shipped after v0.11.0; see CHANGELOG).
 - Connection pooling at the session layer. One client per server is
   the current shape; real agent-host usage hasn't yet shown a need
   for more.

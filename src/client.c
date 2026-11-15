@@ -300,6 +300,8 @@ static void server_caps_from_json(const cmcp_json_t *o,
         }
     }
     if (cmcp_json_object_get(o, "logging")) out->logging = 1;
+    if (cmcp_json_object_get(o, "completions"))
+        out->completions = 1;
 }
 
 /* ====================================================================== */

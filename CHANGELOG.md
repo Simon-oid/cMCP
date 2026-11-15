@@ -9,6 +9,20 @@ legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
 
 ## Unreleased
 
+- `resources/templates/list` and template-routed `resources/read`:
+  `cmcp_server_add_resource_template` registers an RFC 6570 template
+  (`{var}` and `{+var}`; other operators refused with `CMCP_EINVAL`). A URI
+  no exact resource matches goes to the first template it expands, and
+  the read handler gets the concrete URI. Matcher in `src/uri_template.c`,
+  memoised so a hostile URI stays bounded (`tests/test_uri_template.c`),
+  and fuzzed nightly (`fuzz/fuzz_uri_template.c`, 3.2M runs clean in the
+  first 60 s).
+- `completion/complete`: `cmcp_server_set_completion` installs a handler
+  and advertises the `completions` capability; the library checks that
+  `ref` names a registered prompt or template, caps `values` at the
+  spec's 100 with `total` and `hasMore`, and runs it on the worker pool.
+  `cmcp_server_capabilities_t.completions` is read by the client. Both
+  methods are served on the 2026-07-28 path too.
 - `crag-mcp`: `crag_search` returns `structuredContent`
   `{status, results: [{source, cosine, bm25, fusion, text}]}` and declares
   it as `outputSchema`, so hosts no longer regex-parse the

@@ -9,6 +9,7 @@
 #include "cmcp_types.h"
 #include "cmcp_transport.h"
 #include "worker.h"
+#include "uri_template.h"
 #include "era.h"
 #include "mrtr.h"
 #include "seal.h"
@@ -109,6 +110,16 @@ struct cmcp_server {
     server_resource_t          *resources;
     size_t                      n_resources;
     size_t                      cap_resources;
+
+    /* Resource templates — server_resource_t with `uri` holding the
+     * template; matched by uri_template.c on resources/read. */
+    server_resource_t *templates;
+    size_t n_templates;
+    size_t cap_templates;
+
+    /* completion/complete handler; NULL = method not found. */
+    cmcp_completion_fn complete_fn;
+    void *complete_userdata;
 
     /* Prompt registry — same shape. */
     server_prompt_t            *prompts;
@@ -284,6 +295,9 @@ void cmcp_server_free(cmcp_server_t *s) {
     free(s->tools);
     for (size_t i = 0; i < s->n_resources; i++) resource_clear(&s->resources[i]);
     free(s->resources);
+    for (size_t i = 0; i < s->n_templates; i++)
+        resource_clear(&s->templates[i]);
+    free(s->templates);
     for (size_t i = 0; i < s->n_prompts; i++) prompt_clear(&s->prompts[i]);
     free(s->prompts);
     for (size_t i = 0; i < s->n_subs; i++) free(s->sub_uris[i]);
@@ -564,6 +578,76 @@ static server_prompt_t *prompt_find(cmcp_server_t *s, const char *name) {
     return NULL;
 }
 
+static server_resource_t *template_find(cmcp_server_t *s, const char *tmpl) {
+    for (size_t i = 0; i < s->n_templates; i++)
+        if (strcmp(s->templates[i].uri, tmpl) == 0)
+            return &s->templates[i];
+    return NULL;
+}
+
+static server_resource_t *template_matching(cmcp_server_t *s, const char *uri) {
+    for (size_t i = 0; i < s->n_templates; i++)
+        if (cmcp_uri_template_match(s->templates[i].uri, uri))
+            return &s->templates[i];
+    return NULL;
+}
+
+int cmcp_server_add_resource_template(cmcp_server_t *s,
+                                      const cmcp_resource_template_t *t) {
+    if (!s || !t || !t->name || !t->read ||
+        !cmcp_uri_template_valid(t->uri_template))
+        return CMCP_EINVAL;
+    if (template_find(s, t->uri_template))
+        return CMCP_EPROTOCOL;
+    cmcp_json_t *icons = NULL;
+    if (t->icons) {
+        icons = cmcp_json_parse(t->icons, strlen(t->icons));
+        if (!icons || icons->type != CMCP_JSON_ARRAY) {
+            cmcp_json_free(icons);
+            return CMCP_EPARSE;
+        }
+    }
+    if (s->n_templates == s->cap_templates) {
+        size_t newcap = s->cap_templates ? s->cap_templates * 2 : 4;
+        server_resource_t *nt =
+            (server_resource_t *)realloc(s->templates, newcap * sizeof *nt);
+        if (!nt) {
+            cmcp_json_free(icons);
+            return CMCP_ENOMEM;
+        }
+        s->templates = nt;
+        s->cap_templates = newcap;
+    }
+    server_resource_t *e = &s->templates[s->n_templates];
+    memset(e, 0, sizeof *e);
+    e->uri = xstrdup(t->uri_template);
+    e->name = xstrdup(t->name);
+    e->title = t->title ? xstrdup(t->title) : NULL;
+    e->description = t->description ? xstrdup(t->description) : NULL;
+    e->mime_type = t->mime_type ? xstrdup(t->mime_type) : NULL;
+    e->icons = icons;
+    e->read = t->read;
+    e->userdata = t->userdata;
+    if (!e->uri || !e->name || (t->title && !e->title) ||
+        (t->description && !e->description) ||
+        (t->mime_type && !e->mime_type)) {
+        resource_clear(e);
+        memset(e, 0, sizeof *e);
+        return CMCP_ENOMEM;
+    }
+    s->n_templates++;
+    return CMCP_OK;
+}
+
+int cmcp_server_set_completion(cmcp_server_t *s, cmcp_completion_fn fn,
+                               void *userdata) {
+    if (!s || !fn)
+        return CMCP_EINVAL;
+    s->complete_fn = fn;
+    s->complete_userdata = userdata;
+    return CMCP_OK;
+}
+
 int cmcp_server_add_prompt(cmcp_server_t *s, const cmcp_prompt_t *p) {
     if (!s || !p || !p->name || !p->handler) return CMCP_EINVAL;
     if (prompt_find(s, p->name)) return CMCP_EPROTOCOL;
@@ -657,7 +741,8 @@ static cmcp_json_t *server_caps_to_json(const cmcp_server_t *s) {
             cmcp_json_object_set(tools, "listChanged", cmcp_json_new_bool(1));
         cmcp_json_object_set(root, "tools", tools);
     }
-    if (s->n_resources > 0 || c->resources_list_changed || c->resources_subscribe) {
+    if (s->n_resources > 0 || s->n_templates > 0 || c->resources_list_changed ||
+        c->resources_subscribe) {
         cmcp_json_t *res = cmcp_json_new_object();
         if (c->resources_subscribe)
             cmcp_json_object_set(res, "subscribe", cmcp_json_new_bool(1));
@@ -672,6 +757,8 @@ static cmcp_json_t *server_caps_to_json(const cmcp_server_t *s) {
         cmcp_json_object_set(root, "prompts", pr);
     }
     if (c->logging) cmcp_json_object_set(root, "logging", cmcp_json_new_object());
+    if (s->complete_fn || c->completions)
+        cmcp_json_object_set(root, "completions", cmcp_json_new_object());
     return root;
 }
 
@@ -1394,6 +1481,8 @@ static void handle_resources_read(cmcp_server_t *s,
         return;
     }
     server_resource_t *r = resource_find(s, uri_v->str.s);
+    if (!r)
+        r = template_matching(s, uri_v->str.s);
     if (!r) {
         cmcp_json_t *data = cmcp_json_new_object();
         cmcp_json_object_set(data, "uri", cmcp_json_new_string(uri_v->str.s));
@@ -1410,7 +1499,8 @@ static void handle_resources_read(cmcp_server_t *s,
     }
     cmcp_json_t *contents = NULL;
     int is_error = 0;
-    int rc = r->read(r->uri, r->userdata, hctx, &contents, &is_error);
+    /* The concrete URI asked for: for a template, r->uri is the template. */
+    int rc = r->read(uri_v->str.s, r->userdata, hctx, &contents, &is_error);
     if (rc != CMCP_OK) {
         cmcp_json_free(contents);
         cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
@@ -1423,6 +1513,131 @@ static void handle_resources_read(cmcp_server_t *s,
     cmcp_json_object_set(result, "contents", contents);
     if (is_error)
         cmcp_json_object_set(result, "isError", cmcp_json_new_bool(1));
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
+/* resources/templates/list                                                */
+/* ====================================================================== */
+
+static void handle_templates_list(cmcp_server_t *s,
+                                  const cmcp_rpc_message_t *req,
+                                  cmcp_rpc_message_t *resp) {
+    cmcp_json_t *result = cmcp_json_new_object();
+    cmcp_json_t *arr = cmcp_json_new_array();
+    for (size_t i = 0; i < s->n_templates; i++) {
+        /* Same fields as a resource, keyed uriTemplate instead of uri. */
+        const server_resource_t *t = &s->templates[i];
+        cmcp_json_t *d = cmcp_json_new_object();
+        if (!d)
+            continue;
+        cmcp_json_object_set(d, "uriTemplate", cmcp_json_new_string(t->uri));
+        cmcp_json_object_set(d, "name", cmcp_json_new_string(t->name));
+        if (t->title)
+            cmcp_json_object_set(d, "title", cmcp_json_new_string(t->title));
+        if (t->description)
+            cmcp_json_object_set(d, "description",
+                                 cmcp_json_new_string(t->description));
+        if (t->mime_type)
+            cmcp_json_object_set(d, "mimeType",
+                                 cmcp_json_new_string(t->mime_type));
+        if (t->icons)
+            cmcp_json_object_set(d, "icons", cmcp_json_clone(t->icons));
+        cmcp_json_array_append(arr, d);
+    }
+    cmcp_json_object_set(result, "resourceTemplates", arr);
+    cmcp_rpc_make_response(resp, &req->id, result);
+}
+
+/* ====================================================================== */
+/* completion/complete                                                     */
+/* ====================================================================== */
+
+#define COMPLETION_MAX_VALUES 100 /* spec: "MUST NOT exceed 100 items" */
+
+static const char *str_field(const cmcp_json_t *o, const char *key) {
+    const cmcp_json_t *v = o ? cmcp_json_object_get(o, key) : NULL;
+    return v && v->type == CMCP_JSON_STRING ? v->str.s : NULL;
+}
+
+static void handle_completion(cmcp_server_t *s, const cmcp_rpc_message_t *req,
+                              cmcp_rpc_message_t *resp) {
+    if (!s->complete_fn) {
+        cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_METHOD_NOT_FOUND,
+                            "completion/complete", NULL);
+        return;
+    }
+    const cmcp_json_t *ref =
+        req->params ? cmcp_json_object_get(req->params, "ref") : NULL;
+    const cmcp_json_t *arg =
+        req->params ? cmcp_json_object_get(req->params, "argument") : NULL;
+    const char *type = str_field(ref, "type");
+    const char *arg_name = str_field(arg, "name"),
+               *arg_value = str_field(arg, "value");
+    if (!type || !arg_name || !arg_value) {
+        reply_invalid_params(
+            resp, &req->id,
+            "completion/complete requires ref.type and argument.{name,value}",
+            NULL);
+        return;
+    }
+    const char *id = NULL;
+    if (strcmp(type, "ref/prompt") == 0) {
+        id = str_field(ref, "name");
+        int known = 0;
+        for (size_t i = 0; id && i < s->n_prompts; i++)
+            if (strcmp(s->prompts[i].name, id) == 0)
+                known = 1;
+        if (!known)
+            id = NULL;
+    } else if (strcmp(type, "ref/resource") == 0) {
+        id = str_field(ref, "uri");
+        if (id && !template_find(s, id))
+            id = NULL;
+    }
+    if (!id) {
+        reply_invalid_params(resp, &req->id, "Unknown completion reference",
+                             NULL);
+        return;
+    }
+    const cmcp_json_t *ctx =
+        req->params ? cmcp_json_object_get(req->params, "context") : NULL;
+    const cmcp_json_t *ctx_args =
+        ctx ? cmcp_json_object_get(ctx, "arguments") : NULL;
+
+    cmcp_json_t *values = NULL;
+    int has_more = 0;
+    int rc = s->complete_fn(type, id, arg_name, arg_value, ctx_args,
+                            s->complete_userdata, &values, &has_more);
+    if (rc != CMCP_OK || (values && values->type != CMCP_JSON_ARRAY)) {
+        cmcp_json_free(values);
+        cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                            "Completion handler failed", NULL);
+        return;
+    }
+    size_t total = values ? cmcp_json_array_len(values) : 0;
+    cmcp_json_t *sent = cmcp_json_new_array();
+    for (size_t i = 0; i < total && i < COMPLETION_MAX_VALUES; i++) {
+        const cmcp_json_t *v = cmcp_json_array_at(values, i);
+        if (v->type != CMCP_JSON_STRING) {
+            cmcp_json_free(values);
+            cmcp_json_free(sent);
+            cmcp_rpc_make_error(resp, &req->id, CMCP_RPC_INTERNAL_ERROR,
+                                "Completion values must be strings", NULL);
+            return;
+        }
+        cmcp_json_array_append(sent, cmcp_json_clone(v));
+    }
+    cmcp_json_free(values);
+    cmcp_json_t *completion = cmcp_json_new_object();
+    cmcp_json_object_set(completion, "values", sent);
+    cmcp_json_object_set(completion, "total",
+                         cmcp_json_new_int((long long)total));
+    cmcp_json_object_set(
+        completion, "hasMore",
+        cmcp_json_new_bool(has_more || total > COMPLETION_MAX_VALUES));
+    cmcp_json_t *result = cmcp_json_new_object();
+    cmcp_json_object_set(result, "completion", completion);
     cmcp_rpc_make_response(resp, &req->id, result);
 }
 
@@ -1680,6 +1895,14 @@ static void dispatch_request(cmcp_server_t *s,
         handle_resources_read(s, msg, resp, hctx);
         return;
     }
+    if (strcmp(msg->method, "resources/templates/list") == 0) {
+        handle_templates_list(s, msg, resp);
+        return;
+    }
+    if (strcmp(msg->method, "completion/complete") == 0) {
+        handle_completion(s, msg, resp);
+        return;
+    }
     if (strcmp(msg->method, "resources/subscribe") == 0) {
         handle_resources_subscribe(s, msg, resp, 1);
         return;
@@ -1930,10 +2153,10 @@ static void send_parse_error(cmcp_transport_t *t) {
  * lifecycle FSM, so it stays inline on the loop thread — that keeps the
  * FSM single-threaded and lock-free. */
 static int is_pool_method(const char *method) {
-    return method && (
-        strcmp(method, "tools/call")     == 0 ||
-        strcmp(method, "resources/read") == 0 ||
-        strcmp(method, "prompts/get")    == 0);
+    return method && (strcmp(method, "tools/call") == 0 ||
+                      strcmp(method, "resources/read") == 0 ||
+                      strcmp(method, "prompts/get") == 0 ||
+                      strcmp(method, "completion/complete") == 0);
 }
 
 /* Worker-thread count from $CMCP_WORKERS, clamped to [1,64], default 4. */

@@ -16,9 +16,13 @@ reasoning in [`CHANGELOG.md`](CHANGELOG.md) and the documents linked below.
   ([`docs/deployment-tls.md`](docs/deployment-tls.md)). This is a permanent
   decision, not a deferral.
 - **No HTTP/2 or HTTP/3**, for the same reason.
-- **Not implemented:** `completion/complete` (argument autocomplete) and
-  `resources/templates/list` (needs an RFC 6570 URI-template engine). No
-  consumer needs them yet.
+- **URI templates are a subset of RFC 6570:** literal text, `{var}` and
+  `{+var}`, at most 8 variables, never two adjacent, URIs up to 2048
+  characters. The other operators (`{?q}`, `{#f}`, `{/p}`, lists, prefix
+  modifiers) are refused at registration rather than half-matched.
+- **Completion is server-side only:** `cmcp_server_set_completion` answers
+  `completion/complete`; the client has no typed wrapper (call it with
+  `cmcp_client_request`), and `cmcp_session` does not aggregate it.
 
 ## JSON Schema validation
 

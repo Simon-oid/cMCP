@@ -35,7 +35,7 @@ libcurl (for the Streamable HTTP client transport).
   the Python SDK** on the same workload. SDK versions, methodology and
   the command to reproduce in
   [`docs/perf-baselines.md`](docs/perf-baselines.md#current-numbers-2026-11-08).
-- **<!-- test-stats -->4,307 assertions across 37 test binaries<!-- /test-stats -->**, all green under
+- **<!-- test-stats -->4,436 assertions across 39 test binaries<!-- /test-stats -->**, all green under
   valgrind, ASan/UBSan, and TSan on every push.
 - **Conformance-tested in both wire roles** against the official MCP
   TypeScript reference SDK, plus a replay gate over captured wire
@@ -43,9 +43,10 @@ libcurl (for the Streamable HTTP client transport).
 - **500/500 agreement with Ajv** across the JSON Schema validator
   conformance corpus
   ([`docs/schema-conformance.md`](docs/schema-conformance.md)).
-- **Fuzzed nightly** — six libFuzzer harnesses (JSON, JSON-RPC,
-  schema, HTTP parser, the requestState seal, and the 2026-07-28
-  request surface), 6 hours each per night, zero outstanding findings.
+- **Fuzzed nightly** — seven libFuzzer harnesses (JSON, JSON-RPC,
+  schema, HTTP parser, the requestState seal, the 2026-07-28 request
+  surface, and the URI-template matcher), 6 hours each per night, zero
+  outstanding findings.
 - **Threat-modelled and hardened** — STRIDE pass over five trust
   boundaries; SSRF egress guard, slowloris budgets, accept-rate token
   bucket, parser depth/size caps, credential log redaction
@@ -356,10 +357,6 @@ the rationale behind each design decision — is in
   sight yet. TLS is terminator-only by design (run the HTTP transport
   behind nginx/caddy); rationale in
   [`docs/deployment-tls.md`](docs/deployment-tls.md).
-- **`completion/complete` deferred** — argument autocomplete; agentic
-  hosts don't drive completion menus.
-- **`resources/templates/list` deferred** — needs an RFC 6570
-  URI-template engine; no templated-server consumer yet.
 
 Each deferral is a scope decision, not a gap discovered late — the
 rationale for each is recorded in [`CHANGELOG.md`](CHANGELOG.md).

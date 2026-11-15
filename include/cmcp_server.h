@@ -294,6 +294,64 @@ cmcp_json_t *cmcp_resource_text_contents(const char *uri,
                                           const char *mime_type,
                                           const char *text);
 
+/* Resource template (`resources/templates/list`). A client lists the
+ * templates, builds a concrete URI and calls `resources/read`; a URI that
+ * no exact resource matches is routed to the first template it expands,
+ * in registration order, and `read` receives that concrete URI.
+ *
+ * `uri_template` is RFC 6570 restricted to literal text, simple `{var}`
+ * (one value with no "/", "?" or "#") and reserved `{+var}` (any
+ * non-empty value), at most 8 variables, never two adjacent. Any other
+ * operator is refused with CMCP_EINVAL rather than half-supported. */
+typedef struct {
+    const char *uri_template;   /* required */
+    const char *name;           /* required */
+    const char *title;          /* optional */
+    const char *description;    /* optional */
+    const char *mime_type;      /* optional */
+    const char *icons;          /* optional JSON-text array */
+    cmcp_resource_read_fn read; /* required */
+    void *userdata;
+} cmcp_resource_template_t;
+
+/* Register a template. Strings are deep-copied. CMCP_EINVAL for a
+ * template outside the subset above; CMCP_EPROTOCOL for a duplicate.
+ * MUST be called BEFORE cmcp_server_run(). */
+int cmcp_server_add_resource_template(cmcp_server_t *s,
+                                      const cmcp_resource_template_t *t);
+
+/* ====================================================================== */
+/* Completion (`completion/complete`)                                      */
+/* ====================================================================== */
+
+/* Argument autocompletion for a prompt argument or a template variable.
+ *
+ *   `ref_type`     "ref/prompt" or "ref/resource". The library has checked
+ *                  that `ref_id` names a registered prompt (name) or
+ *                  resource template (its uriTemplate). Borrowed.
+ *   `argument`     The argument / template-variable name. Borrowed.
+ *   `value`        What the user has typed so far (may be ""). Borrowed.
+ *   `context`      `params.context.arguments` (already-resolved
+ *                  arguments), or NULL. Borrowed.
+ *   `out_values`   OUT. Owned JSON array of strings, best first. The
+ *                  library sends at most 100 (the spec's cap) with
+ *                  `total` set to the full count and `hasMore` true when
+ *                  it cut the list. NULL is an empty list.
+ *   `out_has_more` OUT. Set to 1 if more values exist beyond out_values.
+ *
+ * Return CMCP_OK; anything else is an INTERNAL_ERROR (-32603). Runs on
+ * the worker pool like the other handlers. */
+typedef int (*cmcp_completion_fn)(const char *ref_type, const char *ref_id,
+                                  const char *argument, const char *value,
+                                  const cmcp_json_t *context, void *userdata,
+                                  cmcp_json_t **out_values, int *out_has_more);
+
+/* Install the completion handler and advertise the `completions`
+ * capability. Without one, completion/complete is -32601.
+ * MUST be called BEFORE cmcp_server_run(). */
+int cmcp_server_set_completion(cmcp_server_t *s, cmcp_completion_fn fn,
+                               void *userdata);
+
 /* ====================================================================== */
 /* Prompt registry                                                         */
 /* ====================================================================== */

@@ -27,7 +27,8 @@ CORE_CANDIDATES   := src/json.c src/rpc.c src/schema.c src/types.c src/era.c \
                      src/http_parser.c \
                      src/transport_stdio.c src/transport_http.c \
                      src/transport_http_client.c
-SERVER_CANDIDATES := src/server.c src/worker.c src/mrtr.c src/subscriptions.c
+SERVER_CANDIDATES := src/server.c src/worker.c src/mrtr.c src/subscriptions.c \
+                     src/uri_template.c
 CLIENT_CANDIDATES := src/client.c src/session.c src/client_modern.c
 
 CORE_SRC   := $(wildcard $(CORE_CANDIDATES))
@@ -528,7 +529,7 @@ FUZZ_CFLAGS  := -std=c11 -Wall -Wextra -O1 -g -Iinclude \
                 -fno-sanitize-recover=all
 
 FUZZ_BINS    := fuzz/fuzz_json fuzz/fuzz_rpc fuzz/fuzz_schema fuzz/fuzz_http \
-                fuzz/fuzz_seal fuzz/fuzz_modern
+                fuzz/fuzz_seal fuzz/fuzz_modern fuzz/fuzz_uri_template
 
 # Each harness compiles the matching parser source directly + any
 # dependencies. Keeping the dep lists explicit beats wildcarding the
@@ -539,6 +540,7 @@ FUZZ_RPC_SRC    := src/json.c src/rpc.c src/types.c
 FUZZ_SCHEMA_SRC := src/json.c src/schema.c src/schema_format.c
 FUZZ_HTTP_SRC   := src/http_parser.c
 FUZZ_SEAL_SRC   := src/json.c src/seal.c src/sha256.c
+FUZZ_URI_TEMPLATE_SRC := src/uri_template.c
 FUZZ_MODERN_SRC := src/json.c src/rpc.c src/types.c src/era.c src/schema.c \
                    src/schema_format.c \
                    src/schema_check.c src/xheader.c src/http_parser.c \
@@ -562,6 +564,10 @@ fuzz/fuzz_http: fuzz/fuzz_http.c $(FUZZ_HTTP_SRC)
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
 
 fuzz/fuzz_seal: fuzz/fuzz_seal.c $(FUZZ_SEAL_SRC)
+	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
+	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
+
+fuzz/fuzz_uri_template: fuzz/fuzz_uri_template.c $(FUZZ_URI_TEMPLATE_SRC)
 	@command -v $(FUZZ_CC) >/dev/null || { echo "$(FUZZ_CC) not installed"; exit 1; }
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o $@ $^
 

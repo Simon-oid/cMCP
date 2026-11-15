@@ -55,6 +55,7 @@ fuzz/fuzz_schema
 fuzz/fuzz_http
 fuzz/fuzz_seal
 fuzz/fuzz_modern
+fuzz/fuzz_uri_template
 fuzz/artifacts_*/
 fuzz/crash-*
 fuzz/timeout-*
