@@ -302,7 +302,13 @@ cmcp_json_t *cmcp_resource_text_contents(const char *uri,
  * `uri_template` is RFC 6570 restricted to literal text, simple `{var}`
  * (one value with no "/", "?" or "#") and reserved `{+var}` (any
  * non-empty value), at most 8 variables, never two adjacent. Any other
- * operator is refused with CMCP_EINVAL rather than half-supported. */
+ * operator is refused with CMCP_EINVAL rather than half-supported.
+ *
+ * Security: the URI comes from the client and reaches `read` as sent, not
+ * percent-decoded. A `{+var}` value may contain "../", and a `{var}` value
+ * that excludes "/" may still hold "%2F". A handler that maps a variable
+ * to a file path must resolve and confine it itself (as filesystem-mcp
+ * does for its root). */
 typedef struct {
     const char *uri_template;   /* required */
     const char *name;           /* required */
