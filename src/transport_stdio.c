@@ -72,6 +72,11 @@ static ssize_t stdio_getline_bounded(stdio_impl_t *s, size_t max_frame) {
             s->line_buf = nb;
             s->line_cap = ncap;
         }
+        /* Holds already (len <= max_frame here, and the cap allows
+         * max_frame + 2), stated so the analyzer can see the two writes
+         * below stay in bounds. */
+        if (len + 2 > s->line_cap)
+            return -2;
         int ch = getc(s->in);
         if (ch == EOF) {
             if (len == 0) return -1;     /* nothing read → EOF/error */
