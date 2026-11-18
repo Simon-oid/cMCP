@@ -45,7 +45,7 @@ jobs:
     # slower than the ~minutes it takes natively, but well inside this.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Build + test on aarch64
         uses: uraimo/run-on-arch-action@v3
