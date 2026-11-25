@@ -291,7 +291,7 @@ static void test_fork_echo_handshake(void) {
                          cmcp_json_new_string(CMCP_PROTOCOL_VERSION));
     cmcp_json_object_set(params, "capabilities", cmcp_json_new_object());
     cmcp_json_t *ci = cmcp_json_new_object();
-    cmcp_json_object_set(ci, "name", cmcp_json_new_string("openclawd"));
+    cmcp_json_object_set(ci, "name", cmcp_json_new_string("agent-host"));
     cmcp_json_object_set(ci, "version", cmcp_json_new_string("0.0.1"));
     cmcp_json_object_set(params, "clientInfo", ci);
 
@@ -319,7 +319,7 @@ static void test_fork_echo_handshake(void) {
                                                    "clientInfo");
     TEST_ASSERT(cci != NULL);
     const cmcp_json_t *nm = cmcp_json_object_get(cci, "name");
-    TEST_ASSERT(nm && strcmp(nm->str.s, "openclawd") == 0);
+    TEST_ASSERT(nm && strcmp(nm->str.s, "agent-host") == 0);
 
     free(got);
     free(wire);

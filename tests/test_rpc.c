@@ -293,7 +293,7 @@ static void test_roundtrip_mcp_initialize(void) {
         "\"params\":{"
             "\"protocolVersion\":\"2025-11-25\","
             "\"capabilities\":{\"tools\":{}},"
-            "\"clientInfo\":{\"name\":\"openclawd\",\"version\":\"0.0.1\"}"
+            "\"clientInfo\":{\"name\":\"agent-host\",\"version\":\"0.0.1\"}"
         "}}";
     cmcp_rpc_message_t *msgs = NULL; size_t n = 0;
     TEST_ASSERT(cmcp_rpc_parse(src, strlen(src), &msgs, &n) == CMCP_OK);
@@ -311,7 +311,7 @@ static void test_roundtrip_mcp_initialize(void) {
     const cmcp_json_t *ci = cmcp_json_object_get(msgs2[0].params, "clientInfo");
     TEST_ASSERT(ci && ci->type == CMCP_JSON_OBJECT);
     const cmcp_json_t *name = cmcp_json_object_get(ci, "name");
-    TEST_ASSERT(name && strcmp(name->str.s, "openclawd") == 0);
+    TEST_ASSERT(name && strcmp(name->str.s, "agent-host") == 0);
     free(s);
     cmcp_rpc_messages_free(msgs, n);
     cmcp_rpc_messages_free(msgs2, n2);

@@ -516,7 +516,7 @@ static void test_mcp_initialize_request_roundtrip(void) {
             "\"params\":{"
                 "\"protocolVersion\":\"2025-11-25\","
                 "\"capabilities\":{\"roots\":{\"listChanged\":true}},"
-                "\"clientInfo\":{\"name\":\"openclawd\",\"version\":\"0.0.1\"}"
+                "\"clientInfo\":{\"name\":\"agent-host\",\"version\":\"0.0.1\"}"
             "}"
         "}";
 
@@ -538,7 +538,7 @@ static void test_mcp_initialize_request_roundtrip(void) {
 
     const cmcp_json_t *client_info = cmcp_json_object_get(params, "clientInfo");
     TEST_ASSERT(strcmp(cmcp_json_string(
-        cmcp_json_object_get(client_info, "name")), "openclawd") == 0);
+        cmcp_json_object_get(client_info, "name")), "agent-host") == 0);
 
     /* Round-trip: parse → stable-emit → parse → equal */
     char *out = cmcp_json_emit_stable(v);

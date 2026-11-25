@@ -537,7 +537,7 @@ int cmcp_client_tool_call_text(cmcp_client_t *c,
  * Return CMCP_OK on success, non-zero for INTERNAL_ERROR (-32603).
  *
  * Authorisation note: cMCP does NOT impose its own allow-list. The
- * host (openclawd) decides per-server whether to register a handler;
+ * host decides per-server whether to register a handler;
  * a server with no handler attached gets the default -32601 response.
  * That's the trust gate. Don't register a handler for a server you
  * don't trust to spend tokens. */

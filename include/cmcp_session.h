@@ -21,7 +21,7 @@
 
 /* cmcp_session_t aggregates many cmcp_client_t handles into a single
  * tool surface. Tool names are namespaced as "<server>:<tool>" so a
- * host (openclawd) can present a flat menu to its model while the
+ * host can present a flat menu to its model while the
  * session routes calls to the right child server.
  *
  * The session takes ownership of clients added to it. Freeing the
