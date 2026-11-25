@@ -1,12 +1,13 @@
-# Nightly fuzz baselines (Tier 7.2)
+# Nightly fuzz baselines
 
-cMCP ships six libFuzzer harnesses (JSON, JSON-RPC, schema-validator,
-HTTP-parser). CI runs each one for 60 seconds on every push — the
+cMCP ships seven libFuzzer harnesses (JSON, JSON-RPC, schema validator,
+HTTP parser, the `requestState` seal, the 2026-07-28 request surface, and
+the URI-template matcher). CI runs each one for 60 seconds on every push — the
 [`fuzz-smoke`](../Makefile) target. That catches the obvious crashes
 but not the deep-corpus discoveries that come from hour-scale
 coverage growth.
 
-Tier 7.2 adds a **nightly cron** that runs each harness for 6 hours.
+A **nightly cron** runs each harness for 6 hours.
 The post-run corpus uploads as a 90-day artifact; any crash / leak /
 timeout artefact fails the job and opens a tracking issue with the
 minimised input attached.
@@ -27,11 +28,9 @@ minimised input attached.
 | Permissions      | `contents: read`, `issues: write`              |
 
 Why 6h and not 24h: GitHub Actions free-tier ceiling on per-job
-wall-clock. Stacking 6 harnesses × 6h matrix-parallel gets the
-equivalent of one 24h coverage budget per night, distributed across
-the four parsers. A self-hosted bare-metal runner could lift the
-per-harness ceiling — Tier 8 follow-up if traffic warrants the lab
-cost.
+wall-clock. Running the seven harnesses × 6h matrix-parallel gives
+42 harness-hours of coverage per night. A self-hosted bare-metal runner
+could lift the per-harness ceiling, if traffic warrants the lab cost.
 
 ## What lands in the artifact
 
@@ -77,7 +76,7 @@ seeds.
 
 Once a week, a maintainer:
 
-1. Downloads the four `fuzz-<h>-corpus` artifacts from a recent green
+1. Downloads the seven `fuzz-<h>-corpus` artifacts from a recent green
    nightly run.
 2. Unpacks each into `./incoming/<h>/`.
 3. Runs `tools/fuzz-corpus-roll.sh` — drives libFuzzer's `-merge=1`
@@ -94,7 +93,7 @@ curated (each entry represents a meaningful shape) while still
 ratcheting coverage forward against the nightly findings.
 
 ```sh
-# Quick run, all four harnesses, dry-run preview:
+# Quick run, all seven harnesses, dry-run preview:
 make fuzz-build
 DRY_RUN=1 tools/fuzz-corpus-roll.sh
 
@@ -143,9 +142,8 @@ tools/fuzz-corpus-roll.sh
 ## Related
 
 - [`Makefile`](../Makefile) — the `fuzz-build` / `fuzz-smoke` targets
-- [`fuzz/`](../fuzz) — the four harnesses + seed corpora
+- [`fuzz/`](../fuzz) — the seven harnesses + seed corpora
 - [`tools/fuzz-corpus-roll.sh`](../tools/fuzz-corpus-roll.sh) — the
   weekly fold helper
-- [`docs/agentic-readiness.md`](agentic-readiness.md) — Tier 5
-  context that introduced the harnesses
-- [`TODO.md`](../TODO.md) §7.2 — design notes + rationale
+- [`docs/agentic-readiness.md`](agentic-readiness.md) — the quality
+  plan that introduced the harnesses

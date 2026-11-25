@@ -7,7 +7,7 @@
  * The council's framing: the deliverable is NOT this program — it is the
  * friction list against the client API that writing and running a real
  * stateful consumer surfaces. Findings are tagged `FRICTION:` in comments
- * here and collected in TODO.md. The point is falsification: every prior
+ * here. The point is falsification: every prior
  * hardening claim was self-judged; this is the first real host to hold
  * the client API in anger.
  *

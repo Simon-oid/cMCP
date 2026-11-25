@@ -1,7 +1,7 @@
 # Changelog
 
-All notable changes to cMCP are recorded here. Phase numbers match
-[`TODO.md`](TODO.md) and the commit log. Up to v0.10.0 one MCP spec
+All notable changes to cMCP are recorded here. Phase and tier numbers
+refer to the maintainer's development plan and match the commit log. Up to v0.10.0 one MCP spec
 revision was pinned per release (`CMCP_PROTOCOL_VERSION` in
 `include/cmcp.h`); since v0.11.0 cMCP is dual-era and pins two: the
 legacy handshake revision (`CMCP_PROTOCOL_VERSION`) and the modern one
@@ -770,7 +770,7 @@ contract in [`docs/v0.6.0-acceptance.md`](docs/v0.6.0-acceptance.md).
 
 Seven axes mapped from five quality lenses (QUALITY / PROFESSIONALISM /
 CONFORMITY / SECURITY / PERFORMANCE). Foundation-ordered execution.
-Full design in [`TODO.md`](TODO.md) under "Tier 6".
+The design rationale for each axis is in the entries below.
 
 ### Headline
 

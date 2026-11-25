@@ -149,7 +149,7 @@ via `tools/list` etc. (`title`, `description`) but are not enforced:
 
 ## Deliberate departures
 
-### Regex flavour {#regex-flavour}
+### Regex flavour
 
 `pattern` and `patternProperties` use **POSIX Extended Regular
 Expressions** (`regcomp(..., REG_EXTENDED | REG_NOSUB)`), not

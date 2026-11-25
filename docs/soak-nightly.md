@@ -137,7 +137,7 @@ first red night (`git log --since=...`).
   jitter on small workloads and a 6-hour-per-job limit — both
   tolerable individually, but stacking two 6-hour legs on shared
   hardware would noise the gate up to the point where it would page
-  on green. See `TODO.md` Tier 7 open question 1 for the rationale.
+  on green.
 
 ## Related
 
@@ -146,4 +146,4 @@ first red night (`git log --since=...`).
 - [`tests/soak/run_http.sh`](../tests/soak/run_http.sh) — same for HTTP
 - [`docs/perf-baselines.md`](perf-baselines.md) — companion: steady-state
   perf numbers (Tier 6.6.1)
-- [`CLAUDE.md`](../CLAUDE.md) — env-var reference incl. `CMCP_WORKERS`
+- [`README.md`](../README.md#environment-variables) — environment variables, incl. `CMCP_WORKERS`

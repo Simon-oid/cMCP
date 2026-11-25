@@ -66,7 +66,7 @@ up if traffic justifies the lab cost.
 ## Baseline maintenance
 
 `bench/baseline.json` is **committed** — it is not auto-updated by CI.
-This is deliberate (Tier 7 open question 2 in `TODO.md`): explicit
+This is deliberate: explicit
 beats inferred. A PR that intentionally changes performance comes in
 two commits:
 
@@ -160,4 +160,3 @@ change should produce.
 - [`bench/baseline.json`](../bench/baseline.json) — the floor
 - [`docs/perf-baselines.md`](perf-baselines.md) — absolute baseline
   numbers + run methodology
-- [`TODO.md`](../TODO.md) §7.1 — design notes + rationale

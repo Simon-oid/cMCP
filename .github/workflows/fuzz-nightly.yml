@@ -2,8 +2,8 @@ name: Fuzz nightly
 
 # Tier 7.2 — long-haul libFuzzer baselines.
 #
-# Tier 5 / 6 stood up four parser harnesses (json, rpc, schema,
-# http) and CI runs them at 60s smoke level on every push. That
+# cMCP has seven parser harnesses (json, rpc, schema, http, seal,
+# modern, uri_template) and CI runs them at 60s smoke level on every push. That
 # catches the obvious crashes but not the deep-corpus discoveries
 # that show up at hour-scale coverage growth. This workflow runs
 # each harness for 6h overnight, uploads the post-run corpus
@@ -13,7 +13,7 @@ name: Fuzz nightly
 # Why 6h: GitHub Actions free-tier job ceiling. Self-hosted runners
 # could go longer (24h is the aspirational target in
 # docs/agentic-readiness.md); the 6h floor is what shared runners
-# allow. Stacking 4 harnesses x 6h = 24h total, with daily coverage
+# allow. Seven harnesses x 6h = 42h total, with daily coverage
 # delta visible per-harness in the artifact log.
 #
 # Matrix runs in parallel — each harness has its own corpus, no

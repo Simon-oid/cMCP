@@ -18,7 +18,7 @@
 /* Threaded through every validate() call so $ref can resolve against
  * the root schema and so deep recursion (real or attacker-induced via
  * a ref cycle) can be bounded. The depth bound is the same defense the
- * JSON parser applies — see CMCP_JSON_MAX_DEPTH in CLAUDE.md. */
+ * JSON parser applies — see CMCP_JSON_MAX_DEPTH in the README. */
 
 typedef struct {
     const cmcp_json_t *root;      /* root schema (for `#/$defs/x` paths) */

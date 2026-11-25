@@ -59,8 +59,8 @@ Connected: mcp-servers/everything 2.0.0 (protocol 2025-11-25)
 The server advertises **the same** protocol version cMCP pins
 (`CMCP_PROTOCOL_VERSION` == `2025-11-25`), so the handshake is clean. (If a
 future SDK bumps its version, recall cMCP's contract: a version mismatch is
-*not* a handshake failure — the version is captured and the host decides;
-see CLAUDE.md "Spec compliance".)
+*not* a handshake failure — the version is captured and the host decides,
+as the spec leaves the decision to the client.)
 
 ### W2. `tools/list` — 13 tools
 
@@ -96,8 +96,7 @@ Calling `get-structured-content {location:"Paris"}` (not in the server's
 `MCP error -32602: Tool ... not found`.
 
 **Correction (2026-06-01, verified by the P6 host-probe — this overturns
-an earlier draft of this note):** cMCP's own server splits the two cases,
-and NOT the way CLAUDE.md's "Schema" section claims:
+an earlier draft of this note):** cMCP's own server splits the two cases:
 
 - **Tool-input schema failure** (e.g. `add` with a required arg missing)
   comes back as a **tool-level `isError` result** — `src/server.c:1177`
@@ -109,10 +108,8 @@ and NOT the way CLAUDE.md's "Schema" section claims:
   JSON-RPC errors (`src/server.c:651`, confirmed by the probe:
   `code=-32602 msg="Unknown tool"`).
 
-CLAUDE.md still says schema failures "surface as `-32602` with
-{path,keyword,message} data" — that is **stale**; the data is right but it
-rides the `isError` content channel, not the error channel. (Tracked as a
-P6 finding to reconcile doc vs. code.)
+The `{path, keyword, message}` detail of a schema failure rides the
+`isError` content channel, not the error channel, so a host must check both.
 
 **Consequence for a host:** to catch a bad call universally you must check
 *both* `resp.error` (JSON-RPC: unknown tool, transport) *and*

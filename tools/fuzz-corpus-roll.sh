@@ -38,7 +38,7 @@ set -eu
 
 INCOMING=${INCOMING_DIR:-./incoming}
 DRY=${DRY_RUN:-0}
-HARNESSES=${@:-json rpc schema http}
+HARNESSES=${@:-json rpc schema http seal modern uri_template}
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -96,5 +96,5 @@ look useful, drop the rest. Then:
     git add fuzz/corpus_*
     git commit -m "fuzz: fold nightly corpus week of <date>"
 
-Per the docs (CLAUDE.md commit policy), the user runs this commit step.
+The commit step is left to the maintainer, by design.
 EOF

@@ -28,7 +28,8 @@ non-zero when:
 That's the *only* signal. A failing job here is not blocking: the wire
 remains spec-compliant against whatever revision is currently pinned,
 and `cmcp_server_run` / `cmcp_client_connect_stdio` already accept
-cross-version handshakes (per the spec compliance note in `CLAUDE.md`).
+cross-version handshakes: a version mismatch is captured, not refused,
+and the host decides whether to disconnect.
 
 ## Decide whether to upgrade
 
@@ -92,8 +93,8 @@ When the decision is to bump:
       SDK is the most reliable upstream witness for "did I implement
       this right?".
 - [ ] **README + roadmap** — update the user-facing spec-version line
-      in `README.md` and tick the entry in `TODO.md` (or open a
-      new tracking entry if the upgrade unblocks something).
+      in `README.md` (badge, Protocol coverage, Status) and add the
+      release entry to `CHANGELOG.md`.
 
 The pin bump should be its own commit (`phase X.Y: bump
 CMCP_PROTOCOL_VERSION to <NEW>` plus the directly-required wire

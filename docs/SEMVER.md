@@ -40,8 +40,7 @@ include/cmcp_session.h
 ```
 
 Plus the documented set of environment variables (see
-[README.md](../README.md#environment-variables) and the table in
-[CLAUDE.md](../CLAUDE.md) for the in-tree mirror).
+[README.md](../README.md#environment-variables)).
 
 Everything in `src/*.h`, `src/*.c`, `tools/`, `tests/`, `fuzz/`,
 `conformance/`, `examples/`, and `bench/` is **internal**. It may
@@ -130,7 +129,7 @@ by hand at the consumer site.
 
 ---
 
-## Protocol version vs package version {#protocol-version-vs-package-version}
+## Protocol version vs package version
 
 cMCP carries two version numbers, deliberately separate:
 
@@ -171,8 +170,7 @@ release:
 - **Internal headers** under `src/*.h`. Tagged-internal even when
   they look API-shaped.
 - **Wire format of log messages.** Stderr is a debug surface, not a
-  parseable contract. JSON-format logs (`CMCP_LOG_JSON=1`) keep their
-  key set stable within a MAJOR but add new keys freely.
+  parseable contract.
 - **Reference binary CLI flags.** `cmcp-inspect --help` is honest;
   `cmcp-inspect` itself is not a script-stable surface.
 - **Conformance fixtures, soak driver, fuzz corpus.** Internal test

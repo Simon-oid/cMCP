@@ -2,8 +2,7 @@
 
 How we get cMCP to a quality bar where an LLM agent (Claude Code,
 a C agent host, any MCP host) can rely on it without a human in the
-loop. This is not a feature roadmap — see [`TODO.md`](../TODO.md)
-for that. This is the *quality* track: the work that turns "the
+loop. This is not a feature roadmap. This is the *quality* track: the work that turns "the
 suite is green" into "an autonomous agent can drive this for hours
 and survive whatever the wire throws at it."
 
@@ -336,7 +335,5 @@ for agent-in-the-loop runs and nightly soak.
 
 ## Tracking
 
-Each axis above gets one entry in [`TODO.md`](../TODO.md) under a
-new "Tier 5 — agentic readiness" section. As tasks land, the
-acceptance criterion above is the bar for marking them done.
-Cross-linked from the CHANGELOG once shipped.
+The acceptance criterion of each axis above is the bar for marking it
+done. Each shipped axis is recorded in [`CHANGELOG.md`](../CHANGELOG.md).

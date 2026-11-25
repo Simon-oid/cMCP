@@ -1030,5 +1030,5 @@ setLevel it cannot honour.
   returns. Acceptable for current workloads; revisit if real
   throughput demands it.
 
-The full phase plan is in [`TODO.md`](../TODO.md); the release log
-is in [`CHANGELOG.md`](../CHANGELOG.md).
+The release log, with the rationale for each decision, is in
+[`CHANGELOG.md`](../CHANGELOG.md).

@@ -114,4 +114,3 @@ post as a comment.
 - [`docs/SEMVER.md`](SEMVER.md) — coverage isn't part of the SemVer
   contract, but a quiet coverage drop often precedes a quiet API
   surface drift
-- [`TODO.md`](../TODO.md) §7.4 — design notes + rationale

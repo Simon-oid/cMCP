@@ -209,10 +209,15 @@ found.
 
 ## Protocol coverage
 
-Tracking [MCP spec date `2025-11-25`](https://modelcontextprotocol.io/specification/2025-11-25/)
-(pinned in `include/cmcp.h`). The protocol surface has been complete
-since v0.4 — every release after that was hardening and quality gates.
-The table records the version each feature first shipped in:
+cMCP serves two revisions, chosen per request:
+[`2026-07-28`](https://modelcontextprotocol.io/specification/2026-07-28/)
+(`CMCP_PROTOCOL_VERSION_MODERN`, stateless, since v0.11.0) and
+[`2025-11-25`](https://modelcontextprotocol.io/specification/2025-11-25/)
+(`CMCP_PROTOCOL_VERSION`, with the `initialize` handshake), both pinned in
+`include/cmcp.h`. What the 2026-07-28 path adds is listed under
+[Highlights](#highlights) and in the v0.11.0 entry of
+[`CHANGELOG.md`](CHANGELOG.md). The handshake-era surface has been complete
+since v0.4; the table records the version each feature first shipped in:
 
 | Feature                                                    | v0.1 | v0.2 | v0.3 | v0.4 |
 |---|---|---|---|---|
@@ -339,12 +344,41 @@ consumers don't have to reinvent the flags:
   through both pkg-config and CMake. Catches packaging breakage
   before it reaches downstream.
 
+## Environment variables
+
+Every knob is read once (at listen time, at table creation, or on first
+use) and has a safe default. An unparsable value is ignored and the
+default kept.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CMCP_WORKERS` | `4` | server worker-pool threads; values outside 1–64 are ignored |
+| `CMCP_HANDLER_TIMEOUT_MS` | `30000` | per-handler timeout before the watchdog cancels the request; `0` disables |
+| `CMCP_HANDLER_RLIMIT_AS_MB` | unset | lowers the process `RLIMIT_AS` soft limit to this many MiB at `cmcp_server_run` (never raises it) |
+| `CMCP_STDIO_MAX_FRAME` | `16777216` | per-frame byte cap on the stdio read path, server and client; `<= 0` disables |
+| `CMCP_JSON_MAX_DEPTH` | `64` | parser nesting limit; `<= 0` disables |
+| `CMCP_JSON_MAX_ELEMENTS` | `65536` | elements per array or keys per object; `<= 0` disables |
+| `CMCP_RPC_MAX_INFLIGHT` | `1024` | outstanding request IDs per pending table (over it: `CMCP_EAGAIN`); `0` disables |
+| `CMCP_LOG_REDACT` | `1` | redacts values under credential-shaped keys in `notifications/message`; `0` turns it off |
+| `CMCP_HTTP_ALLOWED_ORIGINS` | unset | comma-separated `Origin` allow-list for the HTTP server; a mismatch gets `403`; unset means no check |
+| `CMCP_HTTP_IDLE_TIMEOUT_MS` | `30000` | per-`recv()` idle timeout on the HTTP server (`408`); `<= 0` disables |
+| `CMCP_HTTP_DEADLINE_MS` | `120000` | wall-clock budget for receiving one request (`408`); `<= 0` disables |
+| `CMCP_HTTP_ACCEPT_RATE` | `100` | sustained connections per second at the acceptor (`503` + `Retry-After` over it); `<= 0` disables |
+| `CMCP_HTTP_ACCEPT_BURST` | `200` | token-bucket capacity for the accept rate; must be `> 0` |
+| `CMCP_HTTP_SSE_REPLAY_BUFFER` | `256` | events kept per session for SSE resumption, capped at 65536; `0` disables resumption |
+| `CMCP_HTTP_ALLOW_PRIVATE` | off | set to `1` to let the HTTP client dial private, link-local and metadata addresses (the SSRF guard) |
+| `CMCP_TEE_MAX_FRAME` | `1048576` | `cmcp-tee` only: bytes logged per frame; `0` logs whole frames |
+
+The server's log level is set by the client with `logging/setLevel`, as the
+spec defines; there is no environment variable for it. The threats each
+limit answers are in [`docs/threat-model.md`](docs/threat-model.md).
+
 ## Status & roadmap
 
-Current release: **v0.10.0** (2026-06-12), pinned to MCP spec revision
-`2025-11-25`. The protocol surface has been complete since v0.4;
-everything after was hardening, quality gates, and host-API ergonomics
-driven by real consumers. The full per-release history — including
+Current release: **v0.11.0** (2026-11-09), serving MCP `2026-07-28` and
+`2025-11-25` side by side. The handshake-era surface has been complete
+since v0.4; the releases after it were hardening, quality gates, host-API
+ergonomics driven by real consumers, and the 2026-07-28 revision. The full per-release history — including
 the rationale behind each design decision — is in
 [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -370,21 +404,22 @@ reference servers' limits.
 include/      public headers (cmcp.h, cmcp_json.h, cmcp_types.h,
               cmcp_transport.h, cmcp_http_parser.h, cmcp_schema.h,
               cmcp_server.h, cmcp_client.h, cmcp_session.h)
-src/          json, rpc, schema, types, http_parser,
-              transport_stdio, transport_http (server), transport_http_client
-              → libcmcp_core.a
-              server.c, worker.c → libcmcp_server.a
-              client.c, session.c → libcmcp_client.a
+src/          json, rpc, schema, types, http_parser, transport_stdio,
+              transport_http (server), transport_http_client, and the
+              2026-07-28 rules: era, seal + sha256, http_modern,
+              schema_check, schema_format, xheader → libcmcp_core.a
+              server, worker, mrtr, subscriptions, uri_template → libcmcp_server.a
+              client, session, client_modern → libcmcp_client.a
 build/        generated objects + archives (gitignored); `make clean` wipes it
 tools/        cmcp-inspect (CLI), filesystem-mcp + crag-mcp (reference servers),
               cmcp-tee (wire-capture proxy for replay-gate fixtures),
               dogfood-crag-host (real-agent-in-loop host probe)
 examples/     echo-server, minimal-client, host-probe;
               install-smoke/ (consumer build smoke-test, Make + CMake)
-tests/        one binary per test_*.c (27 total), all use tests/test.h
-tests/soak/   long-running stability harness (Tier 5.6)
-fuzz/         libFuzzer harnesses + seed corpora (Tier 5.4)
-bench/        microbenchmarks + perf-regression baselines (Tier 7.1);
+tests/        one binary per test_*.c (39 total), all use tests/test.h
+tests/soak/   long-running stability harness
+fuzz/         libFuzzer harnesses + seed corpora
+bench/        microbenchmarks + perf-regression baselines;
               bench/compare/ cross-language harness, bench/profile/ callgrind+massif
 conformance/  cross-check vs MCP TS SDK; replay-based regression gate
               over captured wire transcripts; agent playbooks
